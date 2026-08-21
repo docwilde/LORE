@@ -19,9 +19,9 @@ memory architecture, replacing the built-in auto-memory: small curated memory un
 hard caps, lexical search over full session history, and a background reviewer that
 proposes — never applies — what gets remembered.
 
-## The four tiers
+## Features
 
-1. **Curated core memory, hard-capped.** Two markdown files: `USER.md`
+- **Tier 1 — Curated core memory, hard-capped.** Two markdown files: `USER.md`
    (global, 1375 chars — who the user is, preferences) and per-project `MEMORY.md`
    (2200 chars — environment facts, conventions, workarounds). Injected into context
    once at `SessionStart` as a frozen snapshot (re-injected after `/clear` and
@@ -29,12 +29,12 @@ proposes — never applies — what gets remembered.
    past the cap fails and lists every entry, forcing consolidation instead of growth.
    The cap is the design: no aging heuristics, no relevance ranking, no drift —
    what fits is what's remembered.
-2. **Session search, SQLite FTS5.** Every Claude Code transcript under
+- **Tier 2 — Session search, SQLite FTS5.** Every Claude Code transcript under
    `~/.claude/projects/` is indexed incrementally (mtime/size-stamped, ~1s cold for
    130 sessions, ~0.3s warm) into `state.db`. `lore search "query"` is BM25 with
    porter stemming — exact identifiers, error strings and file paths match precisely,
    which is what coding-agent recall queries look like. No embeddings, no API calls.
-3. **Background review, staged.** On `SessionEnd` a detached worker digests the
+- **Tier 3 — Background review, staged.** On `SessionEnd` a detached worker digests the
    transcript and runs `claude --bare -p` on a cheap model (`--bare` = no hooks, so
    no recursion; `--allowedTools ""` = no tool use) to extract at most 5 durable
    memories and at most 1 reusable skill. Proposals are **staged** in `pending/`,
@@ -56,7 +56,7 @@ proposes — never applies — what gets remembered.
    step, or a `retire` proposal that moves it to `skills-retired/` on approval.
    Run → outcome → reconcile → update or retire: the improvement loop is closed,
    and every transition passes the pending gate.
-4. **Belief store + dialectic** (after [Honcho](https://github.com/plastic-labs/honcho)'s
+- **Tier 4 — Belief store + dialectic** (after [Honcho](https://github.com/plastic-labs/honcho)'s
    Deriver / Dreamer / Dialectic split). The same review call also **derives** up to
    10 confidence-weighted conclusions per session straight into SQLite (`beliefs` +
    evidence trail + FTS) — no approval gate, because beliefs are queryable data and
