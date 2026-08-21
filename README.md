@@ -61,8 +61,8 @@ proposes — never applies — what gets remembered.
    Deriver / Dreamer / Dialectic split). The same review call also **derives** up to
    10 confidence-weighted conclusions per session straight into SQLite (`beliefs` +
    evidence trail + FTS) — no approval gate, because beliefs are queryable data and
-   never enter context uninvited. Restating an active claim reinforces it instead of
-   duplicating. When new beliefs land, the **dreamer** pairs same-subject beliefs by
+   never enter context uninvited ([what that costs](#human-in-the-loop), and how to
+   review the store). Restating an active claim reinforces it instead of duplicating. When new beliefs land, the **dreamer** pairs same-subject beliefs by
    token overlap and has the cheap model reconcile them — merge duplicates, supersede
    the loser of a contradiction (audit trail kept: `superseded_by`, `resolution`) —
    and stage well-evidenced beliefs for **promotion** into the capped core memory
@@ -76,50 +76,75 @@ proposes — never applies — what gets remembered.
 
 ## Human in the loop
 
-Nothing the background reviewer produces applies itself. The flow, end to end:
+Two stores, two different contracts. Knowing which is which is the whole of it.
 
-1. **Staging notifies you.** The worker runs after `SessionEnd` — the session is
-   already closed, so there is nothing to interrupt. Proposals land as files in
-   `LORE_ROOT/pending/` (worker log in `LORE_ROOT/logs/`), and a desktop
-   notification fires minutes after the session ends: *"2 proposal(s) staged —
-   /lore:pending"* (auto-enabled when `notify-send` exists; `LORE_NOTIFY=0` off).
-2. **Every session opens with the lore MOTD** — the block-art wordmark and
-   the mascot reading its tome, thinking the session's stats in its bubble:
-   pending proposals by kind, new beliefs since last start (yours counted
-   separately), memory usage, learned-skill health, index size.
+**Memory and skills are gated. Nothing applies itself.** A proposal is a file in
+`LORE_ROOT/pending/` and stays one until you say otherwise:
 
-   ```
-                   ╭───────────────────────────────────────╮
-                   │ 2 pending (1× memory, 1× skill update)│
-                   │ +7 beliefs since last start, 3 yours  │
-                   ╰───────────────────────────────────────╯
-                 ◌
-               ∘
-             ·
-       ▐▛███▜▌
-      ▝▜█████▛▘
-    ▗▄▄▄▄▄▄▖▗▄▄▄▄▄▄▖
-    ▐ ┄┄┄┄ ▌▐ ┄┄┄┄ ▌
-    ▝▀▀▀▀▀▀▘▝▀▀▀▀▀▀▘
-   ```
- `LORE_MOTD=line` compacts it to
-   one line, `LORE_MOTD=0` to the pending notice alone (never suppressed). The MOTD is a hook `systemMessage`,
-   displayed by the harness itself — model-independent; the injected snapshot
-   additionally instructs the agent to bring pending items up early. `lore status`
-   remains the manual check.
-3. **You review.** `/lore:pending` lists every proposal with its origin session;
-   the agent adds a keep/reject/merge judgment per item but is explicitly forbidden
-   to act without your word.
-4. **You decide.** `/lore:approve <id|all>` applies — memory writes go through the
-   same cap enforcement as everything else, skill updates print a unified diff
-   before overwriting, retires move the skill to `skills-retired/` (never deleted).
-   `/lore:reject` archives the proposal with its verdict. Both leave an audit trail
-   in `pending/archive/`.
+| | |
+|---|---|
+| **Staged** | The worker runs after `SessionEnd`, so there is nothing to interrupt. Proposals land in `pending/`, the worker log in `logs/`, and a desktop notification fires minutes later. |
+| **Surfaced** | The next session opens with the pending count, and the injected snapshot tells the agent to raise it early. `lore status` is the manual check. |
+| **Judged** | `/lore:pending` lists every proposal with its origin session. The agent offers a keep/reject/merge opinion and is explicitly forbidden to act on it. |
+| **Applied** | `/lore:approve <id\|all>` — memory writes go through the same cap enforcement as any other write, skill updates print a unified diff before overwriting, retires move to `skills-retired/` rather than being deleted. `/lore:reject` archives with its verdict. Both leave the trail in `pending/archive/`. |
 
-The one thing that skips the gate is the belief store — deliberately: beliefs are
-queryable data that never enter context uninvited, so there is nothing to approve.
-The moment a belief tries to become context (promotion into core memory) it passes
-the same pending gate as everything else.
+**Beliefs are not gated, and that is a trade rather than an oversight.** The
+deriver writes them straight to SQLite. The argument for it: a belief never
+enters context uninvited — it reaches a model only when `/lore:ask` goes looking,
+or when the dreamer proposes promoting it into core memory, and *that* crosses the
+same gate as everything else. Approving each one would be a gate on data nothing
+reads yet.
+
+The cost is real and worth stating plainly. A belief is live the moment it is
+derived, the store is unbounded, and nothing expires on its own — so a claim that
+was true when written sits there indefinitely, and `/lore:ask` will cite it. The
+prompt works hard to keep stale claims out (a durability test, no work in flight,
+no measurement stated as though timeless, no third-party names), and it does not
+catch everything. Reviewing the store occasionally is part of running this:
+
+```sh
+lore belief list                  # everything active, newest first
+lore belief search "rebase"       # FTS over claims and evidence
+lore belief show 42               # one belief, its evidence trail, its history
+lore belief retract 42            # remove one that has gone stale
+lore dream --dry-run              # what the reconciler would merge, spending nothing
+```
+
+**A backfill changes the arithmetic, not the rules.** `/lore:backfill` reviews
+sessions that ended before lore existed, so it produces in one run what normally
+arrives one session at a time: a large `pending/` pile to triage per project, and
+a batch of beliefs that went in ungated. It notifies twice — once with the total
+it is about to process, once with what it found — rather than once per session,
+and it reconciles beliefs a single time at the end. Scan `belief list` afterwards;
+that is the pass the per-session flow gives you for free and a batch does not.
+
+## What you see at session start
+
+Every session opens with the lore MOTD — the wordmark and the mascot reading its
+tome, thinking the session's stats in its bubble: pending proposals by kind, new
+beliefs since last start (yours counted separately), memory usage, learned-skill
+health, index size.
+
+```
+                ╭───────────────────────────────────────╮
+                │ 2 pending (1× memory, 1× skill update)│
+                │ +7 beliefs since last start, 3 yours  │
+                ╰───────────────────────────────────────╯
+              ◌
+            ∘
+          ·
+    ▐▛███▜▌
+   ▝▜█████▛▘
+ ▗▄▄▄▄▄▄▖▗▄▄▄▄▄▄▖
+ ▐ ┄┄┄┄ ▌▐ ┄┄┄┄ ▌
+ ▝▀▀▀▀▀▀▘▝▀▀▀▀▀▀▘
+```
+
+`LORE_MOTD=line` compacts it to one line; `LORE_MOTD=0` leaves only the pending
+notice, which is never suppressed. The MOTD is a hook `systemMessage` rendered by
+the harness itself, so it costs no tokens and does not depend on the model
+cooperating.
+
 
 ## How the loops run
 
