@@ -835,6 +835,14 @@ exact commands from the T: lines in working order, plus the pitfalls the E: line
 When the session corrects or improves one of the learned skills listed below, propose \
 {{"action":"update"}} for that name with the full corrected body instead of a new skill.
 
+For every learned skill that was INVOKED in this session (its "Skill: <name>" T: line appears \
+in the digest), judge how the run went and report it in "skill_outcomes": "success" when its \
+procedure ran through (commands succeeded, goal reached), "failure" when it errored (E: lines \
+following it) or the user called the result wrong, "unclear" otherwise. "reason" is one short \
+sentence of evidence from the digest. A learned skill whose record below shows repeated \
+failures and no recent success needs action: propose {{"action":"update"}} fixing the failing \
+step, or {{"action":"retire"}} (no body) when the recipe is beyond repair.
+
 Additionally, derive up to 10 conclusions for the belief store: observations about the user \
 (scope "user") or the project (scope "project") that are worth keeping as queryable beliefs \
 even when they don't merit a slot in the small core memory. Each: a declarative claim \
@@ -853,15 +861,16 @@ Already-staged proposals (do not repeat):
 
 Installed skills — never propose one of these as a new skill: {skills}
 
-Learned skills eligible for "update" (name, uses, description):
+Learned skills eligible for "update"/"retire" (name, track record, description):
 {learned}
 
 Output ONLY minified JSON, no prose, no code fences:
 {{"memory":[{{"scope":"user|project","action":"add|replace","match":"substring, replace only",\
-"text":"..."}}],"skills":[{{"name":"kebab-name","action":"add|update","description":"when to \
-use","body":"markdown"}}],\
+"text":"..."}}],"skills":[{{"name":"kebab-name","action":"add|update|retire","description":\
+"when to use","body":"markdown"}}],"skill_outcomes":[{{"name":"kebab-name","outcome":\
+"success|failure|unclear","reason":"short evidence"}}],\
 "conclusions":[{{"scope":"user|project","claim":"...","confidence":0.8,"evidence":"short quote"}}]}}
-If nothing qualifies output {{"memory":[],"skills":[],"conclusions":[]}}
+If nothing qualifies output {{"memory":[],"skills":[],"skill_outcomes":[],"conclusions":[]}}
 
 SESSION DIGEST (project {slug}):
 {digest}
@@ -919,6 +928,48 @@ def load_skill_usage() -> dict:
         return {}
 
 
+def skill_record(rec: dict) -> str:
+    """Human line for a learned skill's track record: 'used 3x, 2 ok / 1 failed, last: failure'."""
+    parts = [f"used {rec.get('uses', 0)}x"]
+    if rec.get("ok") or rec.get("fail"):
+        parts.append(f"{rec.get('ok', 0)} ok / {rec.get('fail', 0)} failed")
+    if rec.get("last_outcome"):
+        parts.append(f"last: {rec['last_outcome']}")
+    return ", ".join(parts)
+
+
+def save_skill_usage(usage: dict) -> None:
+    ROOT.mkdir(parents=True, exist_ok=True)
+    skill_usage_path().write_text(json.dumps(usage, indent=2), encoding="utf-8")
+
+
+def record_skill_outcomes(data: dict) -> int:
+    """Close the loop: store the reviewer's per-run success/failure verdicts, so the
+    next review sees each recipe's track record and can propose update or retire."""
+    learned = learned_skills()
+    usage = load_skill_usage()
+    recorded = 0
+    for o in (data.get("skill_outcomes") or [])[:10]:
+        if not isinstance(o, dict):
+            continue
+        name = str(o.get("name") or "")
+        outcome = o.get("outcome")
+        if name not in learned or outcome not in ("success", "failure", "unclear"):
+            continue
+        rec = usage.setdefault(name, {"uses": 0})
+        if outcome == "success":
+            rec["ok"] = rec.get("ok", 0) + 1
+        elif outcome == "failure":
+            rec["fail"] = rec.get("fail", 0) + 1
+        rec["last_outcome"] = outcome
+        rec["last_reason"] = one_line(str(o.get("reason") or ""))[:200]
+        rec["last"] = utcnow()
+        recorded += 1
+    if recorded:
+        save_skill_usage(usage)
+    return recorded
+
+
 def record_skill_usage(messages: list[tuple[str, str, str]]) -> None:
     """Reinforcement signal: count invocations of learned skills in this session."""
     learned = learned_skills()
@@ -936,8 +987,7 @@ def record_skill_usage(messages: list[tuple[str, str, str]]) -> None:
             entry["last"] = utcnow()
             hit = True
     if hit:
-        ROOT.mkdir(parents=True, exist_ok=True)
-        skill_usage_path().write_text(json.dumps(usage, indent=2), encoding="utf-8")
+        save_skill_usage(usage)
 
 
 def cmd_review(args) -> int:
@@ -962,7 +1012,7 @@ def cmd_review(args) -> int:
     record_skill_usage(messages)
     usage = load_skill_usage()
     learned = "\n".join(
-        f"- {name} (used {usage.get(name, {}).get('uses', 0)}x): {desc}"
+        f"- {name} ({skill_record(usage.get(name, {}))}): {desc}"
         for name, desc in sorted(learned_skills().items())
     ) or "(none)"
     prompt = REVIEW_PROMPT.format(
@@ -1046,7 +1096,9 @@ def cmd_worker(args) -> int:
         return 1
     staged = stage_proposals(data, job["project"], job["session_id"])
     derived = derive_conclusions(data, job["project"], job["session_id"])
-    print(f"[{utcnow()}] staged {staged} proposal(s), derived {derived} belief(s)")
+    outcomes = record_skill_outcomes(data)
+    print(f"[{utcnow()}] staged {staged} proposal(s), derived {derived} belief(s),"
+          f" recorded {outcomes} skill outcome(s)")
     if derived:
         conn = db_connect()
         dream_run(conn, job["project"])
@@ -1115,10 +1167,10 @@ def stage_proposals(data: dict, slug: str, session_id: str) -> int:
             continue
         name = re.sub(r"[^a-z0-9-]", "-", str(s.get("name") or "").lower()).strip("-")
         body = str(s.get("body") or "").strip()
-        if not name or not body:
+        # "update"/"retire" only mean something for a skill lore itself installed
+        action = s.get("action") if s.get("action") in ("update", "retire") and name in learned_skills() else "add"
+        if not name or (not body and action != "retire"):
             continue
-        # "update" only means something for a skill lore itself installed
-        action = "update" if s.get("action") == "update" and name in learned_skills() else "add"
         put({"kind": "skill", "name": name, "action": action,
              "description": one_line(str(s.get("description") or ""))[:300], "body": body})
     return staged
@@ -1182,6 +1234,16 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
             err = memory_add(item["scope"], slug, item["text"])
         return err
     target = SKILLS_DIR / item["name"] / "SKILL.md"
+    if item.get("action") == "retire":
+        if not target.exists():
+            return f"skill {item['name']} is not installed — nothing to retire"
+        if "lore-learned" not in target.read_text(encoding="utf-8")[:600] and not force:
+            return f"skill {item['name']} was not installed by lore (use --force to retire anyway)"
+        graveyard = ROOT / "skills-retired" / f"{item['name']}-{utcnow().replace(':', '')}"
+        graveyard.parent.mkdir(parents=True, exist_ok=True)
+        target.parent.rename(graveyard)
+        print(f"retired {item['name']} -> {graveyard}")
+        return None
     old = None
     if target.exists():
         old = target.read_text(encoding="utf-8")
@@ -1264,9 +1326,7 @@ def cmd_status(args) -> int:
     usage = load_skill_usage()
     learned = learned_skills()
     if learned:
-        uses = ", ".join(
-            f"{n} ({usage.get(n, {}).get('uses', 0)}x)" for n in sorted(learned)
-        )
+        uses = "; ".join(f"{n} ({skill_record(usage.get(n, {}))})" for n in sorted(learned))
         print(f"learned skills:  {uses}")
     return 0
 

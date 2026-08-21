@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/logo.svg" width="128" alt="lore"></p>
+<p align="center"><img src="assets/logo.svg" width="140" alt="lore: an android head reading an open tome, a staged memory rising from the page, a thought cloud forming a belief"><br><sub><b>L·O·R·E</b> — Lots Of Reconciled Engrams</sub></p>
 
 # lore
 
@@ -35,9 +35,15 @@ and a background reviewer that proposes — never applies — new memories and s
    `E:` tool errors, the pitfalls), and the reviewer only proposes a recipe the
    session verified working. A later session that corrects a learned skill yields an
    `update` proposal — approve shows the unified diff and overwrites only skills
-   lore itself installed. Invocations of learned skills are counted per session
-   (`skill_usage.json`, shown in `lore status` and fed back to the reviewer), so a
-   recipe's usage record travels with it.
+   lore itself installed. Every invocation of a learned skill is counted, and each
+   run's **outcome is judged and recorded**: the reviewer sees the skill's tool
+   calls and what followed (execution errors, the user calling the result wrong)
+   and files success/failure/unclear with a one-line reason into `skill_usage.json`.
+   The track record feeds back into the next review — a recipe with repeated
+   failures and no recent success draws an `update` proposal fixing the failing
+   step, or a `retire` proposal that moves it to `skills-retired/` on approval.
+   Run → outcome → reconcile → update or retire: the improvement loop is closed,
+   and every transition passes the pending gate.
 4. **Belief store + dialectic** (after [Honcho](https://github.com/plastic-labs/honcho)'s
    Deriver / Dreamer / Dialectic split). The same review call also **derives** up to
    10 confidence-weighted conclusions per session straight into SQLite (`beliefs` +

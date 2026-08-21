@@ -1,27 +1,26 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="lore">
-  <title>lore — memory for Claude Code</title>
-  <!-- badge -->
-  <rect x="0" y="0" width="256" height="256" rx="56" fill="#12141d"/>
-  <!-- belief store: faint satellites, one linked by a dashed edge (derived, uncurated) -->
-  <g stroke="#f5b942" stroke-opacity="0.30" stroke-width="4" fill="none">
-    <path d="M84 124 L152 88" stroke-dasharray="2 9" stroke-linecap="round"/>
-    <path d="M84 124 L178 128" stroke-dasharray="2 9" stroke-linecap="round"/>
-  </g>
-  <g fill="#f5b942">
-    <circle cx="152" cy="88" r="7" fill-opacity="0.45"/>
-    <circle cx="178" cy="128" r="5" fill-opacity="0.35"/>
-    <circle cx="196" cy="76" r="4" fill-opacity="0.22"/>
-  </g>
-  <!-- curated core: the L, solid nodes on solid edges -->
-  <g stroke="#f5b942" stroke-width="7" stroke-linecap="round" fill="none">
-    <path d="M84 64 L84 184 L188 184"/>
-  </g>
-  <g fill="#f5b942">
-    <circle cx="84" cy="124" r="13"/>
-    <circle cx="84" cy="184" r="13"/>
-    <circle cx="140" cy="184" r="13"/>
-    <circle cx="188" cy="184" r="13"/>
-  </g>
-  <!-- staged proposal: hollow node, not yet part of the core -->
-  <circle cx="84" cy="64" r="12" fill="#12141d" stroke="#f5b942" stroke-width="7"/>
+<title>lore</title>
+<rect x="0" y="0" width="256" height="256" rx="56" fill="#12141d"/>
+
+<path d="M138 112 A22 22 0 0 0 160 90 L160 66 A22 22 0 0 0 138 44 L118 44 A22 22 0 0 0 96 66 L96 90 A22 22 0 0 0 118 112" stroke="#f5b942" stroke-width="8" fill="none" stroke-linecap="round"/>
+<path d="M90 70 V94 M166 70 V94" stroke="#f5b942" stroke-width="7" stroke-linecap="round"/>
+<path d="M108 57 H148" stroke="#f5b942" stroke-width="3.5" stroke-linecap="round" stroke-opacity="0.45"/>
+<circle cx="112" cy="78" r="7" fill="#f5b942"/>
+<circle cx="144" cy="78" r="6" fill="#12141d" stroke="#f5b942" stroke-width="4.5"/>
+<circle cx="164" cy="42" r="3.5" fill="#f5b942" fill-opacity="0.6"/>
+<circle cx="175" cy="33" r="5" fill="#f5b942" fill-opacity="0.8"/>
+<circle cx="188" cy="24" r="11" fill="none" stroke="#f5b942" stroke-width="6"/><circle cx="203" cy="19" r="12" fill="none" stroke="#f5b942" stroke-width="6"/><circle cx="216" cy="26" r="9" fill="none" stroke="#f5b942" stroke-width="6"/>
+<circle cx="188" cy="24" r="8.5" fill="#12141d"/><circle cx="203" cy="19" r="9.5" fill="#12141d"/><circle cx="216" cy="26" r="6.5" fill="#12141d"/>
+<circle cx="202" cy="23" r="4.5" fill="#f5b942"/>
+<g stroke="#f5b942" stroke-width="8" fill="none" stroke-linejoin="round" stroke-linecap="round">
+  <path d="M128 166 C108 154 82 152 60 159 L60 194 C82 187 108 189 128 200"/>
+  <path d="M128 166 C148 154 174 152 196 159 L196 194 C174 187 148 189 128 200"/>
+</g>
+<g stroke="#f5b942" stroke-width="4" fill="none" stroke-linecap="round" stroke-opacity="0.45">
+  <path d="M121 175 C105 166 89 164 73 168"/>
+  <path d="M135 175 C151 166 167 164 183 168"/>
+</g>
+<path d="M128 156 V144" stroke="#f5b942" stroke-width="6" stroke-linecap="round"
+  stroke-dasharray="1 8" stroke-opacity="0.7"/>
+<circle cx="128" cy="129" r="9" fill="#12141d" stroke="#f5b942" stroke-width="6"/>
 </svg>
