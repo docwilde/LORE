@@ -195,7 +195,7 @@ Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
 | `LORE_REVIEW_MIN_MESSAGES` | 3 | skip review below this many user messages |
 | `LORE_CLAUDE_BIN` | `which claude` | claude binary for the worker |
 | `LORE_SKILLS_DIR` | `~/.claude/skills` | where approved skills install |
-| `LORE_MOTD` | `banner` | session-start MOTD: `banner` = ASCII Reading Android thinking the stats in its bubble; `line` = one compact line; `0` = pending notice only (never suppressed) |
+| `LORE_MOTD` | `banner` | session-start MOTD: `banner` = ASCII Reading Android thinking the stats in its bubble; `clawd` = the crab mascot variant, same bubble; `line` = one compact line; `0` = pending notice only (never suppressed) |
 | `LORE_NOTIFY` | auto | desktop notification when proposals are staged (`notify-send`); `0` disables |
 | `LORE_SKIP` | unset | set to any value to no-op all hooks (the worker sets it) |
 

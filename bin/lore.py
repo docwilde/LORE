@@ -852,12 +852,13 @@ def build_motd(cwd: str) -> str | None:
     n_sessions = conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
     n_beliefs = conn.execute("SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
     parts.append(f"{n_beliefs} beliefs · {n_sessions} sessions indexed")
-    if os.environ.get("LORE_MOTD", "banner") == "line":
+    mode = os.environ.get("LORE_MOTD", "banner")
+    if mode == "line":
         return "lore: " + " · ".join(parts)
-    return render_banner(parts)
+    return render_banner(parts, BANNER_CLAWD if mode == "clawd" else BANNER_ANDROID)
 
 
-BANNER_ART = [
+BANNER_ANDROID = [
     "      o  °",
     "    .-------.",
     "   =| o   o |=      L · O · R E",
@@ -869,14 +870,27 @@ BANNER_ART = [
     "  '-.__________.-'",
 ]
 
+BANNER_CLAWD = [
+    "        o  °",
+    "   \\/        \\/",
+    "   ((  _~~~~_ ))",
+    "    \\ ( o  o ) /       L · O · R E",
+    "     \\( \\__/ )/   Lots Of Reconciled Engrams",
+    "       |    |",
+    "      _|____|_",
+    "   .-'  ~~~~  '-.",
+    "   \\  ~~~  ~~~  /",
+    "    '-.________.-'",
+]
 
-def render_banner(stats: list[str]) -> str:
-    """The Reading Android, thinking the session's stats in its bubble."""
+
+def render_banner(stats: list[str], art: list[str]) -> str:
+    """The mascot, thinking the session's stats in its bubble."""
     w = max(len(s) for s in stats)
     lines = [" ." + "-" * (w + 1) + "."]
     lines += ["( " + s.ljust(w) + " )" for s in stats]
     lines.append(" '" + "-" * (w + 1) + "'")
-    return "\n".join(lines + BANNER_ART)
+    return "\n".join(lines + art)
 
 
 def cmd_inject(args) -> int:
