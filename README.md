@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/logo.svg" width="140" alt="lore: an android head reading an open tome, a staged memory rising from the page, a thought cloud forming a belief"><br><sub><b>L·O·R·E</b> — Lots Of Reconciled Engrams</sub></p>
+<p align="center"><img src="assets/logo.svg" width="140" alt="lore: the reader blob over its open tome, a thought trail rising to a forming belief"><br><sub><b>L·O·R·E</b> — Lots Of Reconciled Engrams</sub></p>
 
 # lore — Lots Of Reconciled Engrams
 
@@ -82,10 +82,26 @@ Nothing the background reviewer produces applies itself. The flow, end to end:
    `LORE_ROOT/pending/` (worker log in `LORE_ROOT/logs/`), and a desktop
    notification fires minutes after the session ends: *"2 proposal(s) staged —
    /lore:pending"* (auto-enabled when `notify-send` exists; `LORE_NOTIFY=0` off).
-2. **Every session opens with the lore MOTD** — the ASCII Reading Android,
-   thinking the session's stats in its thought bubble: pending proposals by
-   kind, new beliefs since last start (yours counted separately), memory
-   usage, learned-skill health, index size. `LORE_MOTD=line` compacts it to
+2. **Every session opens with the lore MOTD** — the block-art wordmark and
+   the mascot reading its tome, thinking the session's stats in its bubble:
+   pending proposals by kind, new beliefs since last start (yours counted
+   separately), memory usage, learned-skill health, index size.
+
+   ```
+                   ╭───────────────────────────────────────╮
+                   │ 2 pending (1× memory, 1× skill update)│
+                   │ +7 beliefs since last start, 3 yours  │
+                   ╰───────────────────────────────────────╯
+                 ◌
+               ∘
+             ·
+       ▐▛███▜▌
+      ▝▜█████▛▘
+    ▗▄▄▄▄▄▄▖▗▄▄▄▄▄▄▖
+    ▐ ┄┄┄┄ ▌▐ ┄┄┄┄ ▌
+    ▝▀▀▀▀▀▀▘▝▀▀▀▀▀▀▘
+   ```
+ `LORE_MOTD=line` compacts it to
    one line, `LORE_MOTD=0` to the pending notice alone (never suppressed). The MOTD is a hook `systemMessage`,
    displayed by the harness itself — model-independent; the injected snapshot
    additionally instructs the agent to bring pending items up early. `lore status`
@@ -195,7 +211,7 @@ Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
 | `LORE_REVIEW_MIN_MESSAGES` | 3 | skip review below this many user messages |
 | `LORE_CLAUDE_BIN` | `which claude` | claude binary for the worker |
 | `LORE_SKILLS_DIR` | `~/.claude/skills` | where approved skills install |
-| `LORE_MOTD` | `banner` | session-start MOTD: `banner` = ASCII Reading Android thinking the stats in its bubble; `clawd` = the crab mascot variant, same bubble; `line` = one compact line; `0` = pending notice only (never suppressed) |
+| `LORE_MOTD` | `banner` | session-start MOTD: `banner` = block-art wordmark + mascot reading its tome, stats in the thought bubble; `line` = one compact line; `0` = pending notice only (never suppressed) |
 | `LORE_NOTIFY` | auto | desktop notification when proposals are staged (`notify-send`); `0` disables |
 | `LORE_SKIP` | unset | set to any value to no-op all hooks (the worker sets it) |
 

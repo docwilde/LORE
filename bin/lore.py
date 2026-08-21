@@ -852,45 +852,42 @@ def build_motd(cwd: str) -> str | None:
     n_sessions = conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
     n_beliefs = conn.execute("SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
     parts.append(f"{n_beliefs} beliefs · {n_sessions} sessions indexed")
-    mode = os.environ.get("LORE_MOTD", "banner")
-    if mode == "line":
+    if os.environ.get("LORE_MOTD", "banner") == "line":
         return "lore: " + " · ".join(parts)
-    return render_banner(parts, BANNER_CLAWD if mode == "clawd" else BANNER_ANDROID)
+    return render_banner(parts)
 
 
-BANNER_ANDROID = [
-    "    ◦ °",
-    "   ▄▀▀▀▀▀▀▀▄",
-    "  ▐▌ ●   ○ ▐▌      L · O · R E",
-    "   █  ▀▀▀  █       Lots Of Reconciled Engrams",
-    "   ▀▄▄▄▄▄▄▄▀",
-    "      ▐▌",
-    "  ▄▄▄▄▄▟▙▄▄▄▄▄",
-    " ▐░░░░░░▌░░░░░░▌",
-    "  ▀▀▀▀▀▀▀▀▀▀▀▀▀",
+BANNER_WORDMARK = [
+    "▄▄▄        ▄▄▄▄▄   ▄▄▄▄▄▄▄    ▄▄▄▄▄▄▄",
+    "███      ▄███████▄ ███▀▀███▄ ███▀▀▀▀▀",
+    "███      ███   ███ ███▄▄███▀ ███▄▄",
+    "███      ███▄▄▄███ ███▀▀██▄  ███",
+    "████████  ▀█████▀  ███  ▀███ ▀███████",
+    "",
+    "      Lots Of Reconciled Engrams",
 ]
 
-BANNER_CLAWD = [
-    "      ◦ °",
-    "  ▜▛         ▜▛",
-    "  ▐▙ ▄▀▀▀▀▀▄ ▟▌",
-    "   ▝▌ ●   ● ▐▘      L · O · R E",
-    "    █  ▀▄▄▀  █      Lots Of Reconciled Engrams",
-    "    ▀▄▄▄▄▄▄▄▀",
-    "       ▐▌",
-    "  ▄▄▄▄▄▄▟▙▄▄▄▄▄",
-    " ▐░░░░░░░▌░░░░░░▌",
-    "  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+BANNER_MASCOT = [
+    "              ◌",
+    "            ∘",
+    "          ·",
+    "    ▐▛███▜▌",
+    "   ▝▜█████▛▘",
+    " ▗▄▄▄▄▄▄▖▗▄▄▄▄▄▄▖",
+    " ▐ ┄┄┄┄ ▌▐ ┄┄┄┄ ▌",
+    " ▝▀▀▀▀▀▀▘▝▀▀▀▀▀▀▘",
 ]
 
 
-def render_banner(stats: list[str], art: list[str]) -> str:
-    """The mascot, thinking the session's stats in its bubble."""
+def render_banner(stats: list[str]) -> str:
+    """The wordmark, then the mascot reading its tome, thinking the stats."""
     w = max(len(s) for s in stats)
-    lines = ["╭─" + "─" * w + "─╮"]
-    lines += ["│ " + s.ljust(w) + " │" for s in stats]
-    lines.append("╰─" + "─" * w + "─╯")
-    return "\n".join(lines + art)
+    ind = " " * 16
+    lines = list(BANNER_WORDMARK) + [""]
+    lines.append(ind + "╭─" + "─" * w + "─╮")
+    lines += [ind + "│ " + s.ljust(w) + " │" for s in stats]
+    lines.append(ind + "╰─" + "─" * w + "─╯")
+    return "\n".join(lines + BANNER_MASCOT)
 
 
 def cmd_inject(args) -> int:
