@@ -17,9 +17,11 @@ Stdlib only. State lives under LORE_ROOT (default ~/.claude/lore).
 """
 
 import argparse
+import concurrent.futures
 import difflib
 import json
 import os
+import queue
 import re
 import shutil
 import sqlite3
@@ -183,6 +185,10 @@ def db_connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, stamp TEXT)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS reviewed("
+        "session_id TEXT PRIMARY KEY, project TEXT, ts TEXT)"
+    )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sessions("
         "session_id TEXT PRIMARY KEY, project TEXT, cwd TEXT, title TEXT,"
@@ -1163,25 +1169,17 @@ def record_skill_usage(messages: list[tuple[str, str, str]]) -> None:
         save_skill_usage(usage)
 
 
-def cmd_review(args) -> int:
-    if os.environ.get("LORE_SKIP"):
-        return 0
-    hook = read_hook_input()
-    transcript = args.transcript or hook.get("transcript_path")
-    cwd = args.cwd or hook.get("cwd") or os.getcwd()
-    slug = project_slug(cwd)
-    if args.latest and not transcript:
-        candidates = sorted(
-            (PROJECTS_DIR / slug).glob("*.jsonl"), key=lambda p: p.stat().st_mtime
-        )
-        transcript = str(candidates[-1]) if candidates else None
-    if not transcript or not Path(transcript).exists():
-        print("no transcript to review.", file=sys.stderr)
-        return 0  # never block session end
-    _, messages = parse_transcript(Path(transcript), include_tools=True)
+def build_review_job(transcript: Path, slug: str) -> dict | None:
+    """The deriver job for one transcript, or None when it is too short to review.
+
+    Split out of cmd_review so a batch runs the same prompt, the same
+    scoped pending list and the same skill bookkeeping as a single review
+    does — a second assembly of this would drift from the first.
+    """
+    _, messages = parse_transcript(transcript, include_tools=True)
     user_msgs = sum(1 for _, role, _ in messages if role == "user")
     if user_msgs < REVIEW_MIN_MESSAGES:
-        return 0
+        return None
     record_skill_usage(messages)
     usage = load_skill_usage()
     learned = "\n".join(
@@ -1197,7 +1195,221 @@ def cmd_review(args) -> int:
         slug=slug,
         digest=build_digest(messages),
     )
-    job = {"prompt": prompt, "project": slug, "session_id": Path(transcript).stem}
+    return {"prompt": prompt, "project": slug, "session_id": transcript.stem}
+
+
+WORKER_MARKERS = (
+    "You are the background memory reviewer",
+    "You are the belief reconciler",
+)
+
+
+def is_worker_transcript(transcript: Path) -> bool:
+    """True when this transcript is one of our own deriver/dreamer calls.
+
+    Every `claude -p` we spawn writes a transcript of its own into the project
+    directory of whatever cwd it ran in, so each backfill leaves behind one new
+    file per session it reviewed. They are already skipped for being one user
+    message long, but they would still be counted and reported as sessions
+    waiting to be reviewed, and the pile grows with every run. Recognise them by
+    the prompt we wrote rather than by their shape, and read only the head of
+    the file: a real session's transcript can be tens of megabytes.
+    """
+    try:
+        with transcript.open(encoding="utf-8", errors="replace") as fh:
+            head = fh.read(65536)
+    except OSError:
+        return False
+    return any(marker in head for marker in WORKER_MARKERS)
+
+
+def transcript_cwd(transcript: Path) -> str | None:
+    """The cwd a session ran in, read out of the transcript.
+
+    Not derived from the directory name: that name is project_slug()'s output,
+    which replaces every non-alphanumeric character with "-" and so cannot be
+    turned back into a path. The slug decides which project's memory a proposal
+    is filed against, so guessing it files facts against the wrong project.
+    """
+    try:
+        with transcript.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"cwd"' not in line:
+                    continue
+                try:
+                    cwd = json.loads(line).get("cwd")
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(cwd, str) and cwd:
+                    return cwd
+    except OSError:
+        return None
+    return None
+
+
+def backfill_project(slug: str, transcripts: list[Path], done: set[str],
+                     progress: "queue.Queue[tuple[str, int, str]]") -> None:
+    """Review one project's transcripts in order, reporting each on `progress`.
+
+    One project per worker, sequential inside it: every review is handed the
+    pending list as a do-not-repeat instruction and reads it when it starts, so
+    concurrent reviews of the same project cannot see each other's proposals and
+    would stage a fact twice. Across projects that cannot happen for project
+    scope, which is what makes the project the unit of sharding.
+    """
+    for t in transcripts:
+        if t.stem in done:
+            progress.put((slug, 0, f"already reviewed {t.stem}"))
+            continue
+        cwd = transcript_cwd(t)
+        if not cwd:
+            progress.put((slug, 0, f"no cwd in {t.stem}"))
+            continue
+        job = build_review_job(t, project_slug(cwd))
+        if job is None:
+            progress.put((slug, 0, f"under {REVIEW_MIN_MESSAGES} user messages: {t.stem}"))
+            continue
+        tmp = ROOT / "tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        jobfile = tmp / f"review-{job['session_id']}.json"
+        jobfile.write_text(json.dumps(job), encoding="utf-8")
+        rc = worker_run(jobfile)
+        progress.put((slug, 1 if rc == 0 else 0,
+                      f"{'reviewed' if rc == 0 else 'FAILED'} {t.stem}"))
+        if rc == 0:
+            mark_reviewed(job["session_id"], job["project"])
+
+
+def mark_reviewed(session_id: str, project: str) -> None:
+    conn = db_connect()
+    conn.execute(
+        "INSERT OR REPLACE INTO reviewed(session_id, project, ts) VALUES(?,?,?)",
+        (session_id, project, utcnow()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def reviewed_ids() -> set[str]:
+    conn = db_connect()
+    rows = conn.execute("SELECT session_id FROM reviewed").fetchall()
+    conn.close()
+    return {r[0] for r in rows}
+
+
+def cmd_backfill(args) -> int:
+    """Review a backlog of sessions that ended before lore could see them.
+
+    review() only ever fires on SessionEnd, so a session that finished before
+    lore was installed was never reviewed and never would be — which is why a
+    fresh install shows a large session index beside an empty belief store. This
+    is the one command that reaches backwards.
+    """
+    available = {
+        d.name: [t for t in sorted(d.glob("*.jsonl")) if not is_worker_transcript(t)]
+        for d in sorted(PROJECTS_DIR.iterdir()) if d.is_dir()
+    }
+    available = {k: v for k, v in available.items() if v}
+    if args.list or not args.project:
+        print(f"{'sessions':>9}  project")
+        for slug, ts in sorted(available.items(), key=lambda kv: -len(kv[1])):
+            print(f"{len(ts):>9}  {slug}")
+        print(f"\n{sum(len(v) for v in available.values())} total across "
+              f"{len(available)} project(s).")
+        if not args.project:
+            print("\nPass --project <slug> (repeatable) to review one or more.")
+        return 0
+
+    unknown = [s for s in args.project if s not in available]
+    if unknown:
+        print(f"unknown project(s): {', '.join(unknown)}", file=sys.stderr)
+        return 1
+
+    done = set() if args.force else reviewed_ids()
+    selected = {s: available[s] for s in args.project}
+    todo = sum(1 for ts in selected.values() for t in ts if t.stem not in done)
+    already = sum(len(ts) for ts in selected.values()) - todo
+    if not todo:
+        print(f"nothing to do — all {already} session(s) already reviewed "
+              f"(--force to redo).")
+        return 0
+
+    plan = (f"{todo} session(s) across {len(selected)} project(s)"
+            + (f", {already} already reviewed" if already else ""))
+    print(f"backfill: {plan}")
+    if args.dry_run:
+        for slug, ts in selected.items():
+            pend = [t.stem for t in ts if t.stem not in done]
+            print(f"  {slug}: {len(pend)} to review")
+        return 0
+
+    # The per-session notification is right for one session and is dozens of
+    # them across a batch; the batch speaks twice instead, forced past this.
+    os.environ["LORE_NOTIFY"] = "0"
+    os.environ["LORE_DEFER_DREAM"] = "1"
+    notify("lore backfill started", f"Reviewing {plan}. Nothing is applied without approval.",
+           force=True)
+
+    before_pending = len(load_pending())
+    progress: queue.Queue[tuple[str, int, str]] = queue.Queue()
+    reviewed = failed = skipped = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as ex:
+        futures = [ex.submit(backfill_project, slug, ts, done, progress)
+                   for slug, ts in selected.items()]
+        seen = 0
+        while seen < todo + already:
+            try:
+                slug, ok, note = progress.get(timeout=1)
+            except queue.Empty:
+                if all(f.done() for f in futures):
+                    break
+                continue
+            seen += 1
+            if note.startswith("already reviewed"):
+                continue
+            if ok:
+                reviewed += 1
+            elif note.startswith("FAILED"):
+                failed += 1
+            else:
+                skipped += 1
+            print(f"[{reviewed + skipped + failed}/{todo}] {slug}: {note}", flush=True)
+        for f in futures:
+            f.result()
+
+    staged = len(load_pending()) - before_pending
+    if reviewed:
+        print("reconciling the belief store once for the batch")
+        for slug in selected:
+            dream_run(db_connect(), slug)
+
+    summary = (f"{reviewed} reviewed, {staged} proposal(s) staged"
+               + (f", {skipped} too short" if skipped else "")
+               + (f", {failed} FAILED" if failed else ""))
+    print(f"backfill done: {summary}")
+    notify("lore backfill finished", f"{summary} — review them with /lore:pending",
+           force=True)
+    return 0
+
+
+def cmd_review(args) -> int:
+    if os.environ.get("LORE_SKIP"):
+        return 0
+    hook = read_hook_input()
+    transcript = args.transcript or hook.get("transcript_path")
+    cwd = args.cwd or hook.get("cwd") or os.getcwd()
+    slug = project_slug(cwd)
+    if args.latest and not transcript:
+        candidates = sorted(
+            (PROJECTS_DIR / slug).glob("*.jsonl"), key=lambda p: p.stat().st_mtime
+        )
+        transcript = str(candidates[-1]) if candidates else None
+    if not transcript or not Path(transcript).exists():
+        print("no transcript to review.", file=sys.stderr)
+        return 0  # never block session end
+    job = build_review_job(Path(transcript), slug)
+    if job is None:
+        return 0
     if args.dry_run:
         print(prompt)
         return 0
@@ -1227,23 +1439,54 @@ def find_claude() -> str | None:
     return os.environ.get("LORE_CLAUDE_BIN") or shutil.which("claude")
 
 
-def notify_staged(staged: int) -> None:
-    """Desktop notification when the worker stages proposals, so the user hears
-    about them minutes after the session ends instead of at the next start.
-    Auto-enabled when notify-send exists; LORE_NOTIFY=0 turns it off."""
-    if not staged or os.environ.get("LORE_NOTIFY", "auto") == "0":
+def notify_icon() -> str | None:
+    """What to draw on the notification, or None to let the daemon decide.
+
+    `-i` takes either an icon-theme name or a path, so LORE_NOTIFY_ICON accepts
+    both: a name is passed through untouched, a path only once it exists, since
+    notify-send given a missing file renders a blank space rather than falling
+    back. Default is the 256x256 mark shipped in assets/, found relative to this
+    file so it travels with the plugin wherever the marketplace installs it.
+
+    SVG rests on the daemon loading it through GdkPixbuf, which is usual on a
+    GTK desktop and not guaranteed anywhere else — hence a missing icon staying
+    a cosmetic difference and never a failed notification.
+    """
+    override = os.environ.get("LORE_NOTIFY_ICON", "").strip()
+    if override:
+        return override if "/" not in override or Path(override).is_file() else None
+    shipped = Path(__file__).resolve().parent.parent / "assets" / "logo.svg"
+    return str(shipped) if shipped.is_file() else None
+
+
+def notify(title: str, body: str, force: bool = False) -> None:
+    """Desktop notification, when notify-send exists and LORE_NOTIFY is not 0.
+
+    force=True ignores LORE_NOTIFY, and exists for the two notifications a batch
+    owes the user: a batch sets LORE_NOTIFY=0 to silence the per-session ones,
+    which would otherwise arrive dozens at a time, and still has to be able to
+    say that it started and that it finished.
+    """
+    if not force and os.environ.get("LORE_NOTIFY", "auto") == "0":
         return
     cmd = shutil.which("notify-send")
     if not cmd:
         return
+    argv = [cmd, "-a", "lore"]
+    icon = notify_icon()
+    if icon:
+        argv += ["-i", icon]
     try:
-        subprocess.run(
-            [cmd, "-a", "lore", "lore memory review",
-             f"{staged} proposal(s) staged — /lore:pending"],
-            timeout=10, check=False, capture_output=True,
-        )
+        subprocess.run(argv + [title, body], timeout=10, check=False, capture_output=True)
     except OSError:
         pass
+
+
+def notify_staged(staged: int) -> None:
+    """The per-session notification, so proposals are heard about minutes after
+    the session ends rather than at the next session start."""
+    if staged:
+        notify("lore memory review", f"{staged} proposal(s) staged — /lore:pending")
 
 
 def extract_json(text: str) -> dict | None:
@@ -1697,6 +1940,14 @@ def main() -> int:
     sp = sub.add_parser("_worker")
     sp.add_argument("jobfile")
     sp.set_defaults(fn=cmd_worker)
+
+    sp = sub.add_parser("backfill", help="review a backlog of past sessions")
+    sp.add_argument("--project", action="append", help="project slug (repeatable)")
+    sp.add_argument("--list", action="store_true", help="list projects and session counts")
+    sp.add_argument("--jobs", type=int, default=4, help="projects reviewed in parallel")
+    sp.add_argument("--force", action="store_true", help="re-review already-reviewed sessions")
+    sp.add_argument("--dry-run", action="store_true", help="show what would run")
+    sp.set_defaults(fn=cmd_backfill)
 
     sp = sub.add_parser("pending", help="list staged proposals")
     sp.set_defaults(fn=cmd_pending)

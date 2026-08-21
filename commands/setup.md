@@ -35,9 +35,11 @@ Say the two costs out loud before the gate:
 Then, for each selected project, review its transcripts with the dreamer deferred:
 
 ```sh
-LORE_DEFER_DREAM=1 python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" review \
+LORE_DEFER_DREAM=1 LORE_NOTIFY=0 python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" review \
   --transcript <path> --cwd <cwd> --foreground
 ```
+
+`LORE_NOTIFY=0` is not optional politeness: a review that stages anything raises a desktop notification, which is useful once per session and is dozens of them across a batch.
 
 Four rules the loop has to respect:
 

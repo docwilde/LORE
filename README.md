@@ -191,6 +191,7 @@ because `review` fires on session end and cannot reach backwards.
 | `/lore:approve <id\|all>` | Applies staged proposals: memory writes cap-enforced, skill updates shown as a unified diff before overwriting, retires moved to `skills-retired/`. |
 | `/lore:reject <id\|all>` | Archives proposals unapplied, verdict recorded in `pending/archive/`. |
 | `/lore:review` | Triggers the background review of the current session immediately instead of waiting for session end (`--dry-run` shows what would be sent, spending nothing). |
+| `/lore:backfill` | Reviews sessions that ended before lore could see them — the one path that reaches backwards. Lists projects with session counts, reviews the ones you name (one worker per project), records what it has done so a re-run resumes, reconciles beliefs once at the end, and notifies on start and finish rather than per session. |
 | `/lore:status` | Memory usage per scope, session-index and belief-store sizes, pending count, per-role models, learned skills with their track records. |
 | `/lore:doctor` | Read-only diagnosis: environment checks, effective config, allowlist and auto-memory conflicts, unported entries, unreviewed session backlog. Reports, fixes nothing. |
 | `/lore:setup` | Applies what doctor found, one change behind its own confirmation each: disable built-in auto-memory, add the permission allowlist, port old entries, prime the index, backfill-review the session backlog for the projects you pick, set per-role models. |
@@ -216,6 +217,8 @@ Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
 | `LORE_SKILLS_DIR` | `~/.claude/skills` | where approved skills install |
 | `LORE_MOTD` | `banner` | session-start MOTD: `banner` = block-art wordmark + mascot reading its tome, stats in the thought bubble; `line` = one compact line; `0` = pending notice only (never suppressed) |
 | `LORE_NOTIFY` | auto | desktop notification when proposals are staged (`notify-send`); `0` disables |
+| `LORE_NOTIFY_ICON` | shipped `assets/logo.svg` | notification icon: an icon-theme name, or a path that exists |
+| `LORE_DEFER_DREAM` | unset | hold back the per-review belief reconciliation; run `lore dream` once instead |
 | `LORE_SKIP` | unset | set to any value to no-op all hooks (the worker sets it) |
 
 ## Notes & caveats
