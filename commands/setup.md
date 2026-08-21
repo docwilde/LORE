@@ -12,6 +12,8 @@ Run `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" doctor` and the extra checks fr
 5. **Unreviewed session backlog** → see below. Indexing only builds the search tier; every session that ended before lore was installed never fired `review`, so memory and the belief store stay empty until the backlog is reviewed once.
 6. **Model preferences** (optional, ask) → if the user wants different models per role, add `LORE_DERIVER_MODEL` / `LORE_DREAMER_MODEL` / `LORE_DIALECTIC_MODEL` to the `"env"` block of `~/.claude/settings.json`. Defaults: deriver haiku, dreamer sonnet, dialectic session model.
 
+7. **Mid-session refresh off** (optional, ask) → the snapshot is injected once, at `SessionStart`, so memory approved mid-session — the usual outcome of `/lore:pending` — does not reach the model until the next session. Setting `LORE_REFRESH_SECS` in the `"env"` block of `~/.claude/settings.json` (e.g. `"1800"`) makes the `UserPromptSubmit` hook re-inject it on that throttle instead. **State the cost before the gate:** each firing adds the whole snapshot — a few thousand characters — to that prompt, so 1800s is a reasonable floor and anything under ~600s is paying repeatedly for a file that rarely changes. The first prompt of a session never fires (`SessionStart` just injected the same content), and `LORE_SKIP` still suppresses everything. Leave it unset for anyone who curates memory between sessions rather than during them.
+
 Finish by re-running `doctor` and `status` and confirming everything is green. Remind the user that settings.json changes need a Claude Code restart, and the SessionStart injection appears from the next session on.
 
 ## Step 5 — backfilling the session backlog

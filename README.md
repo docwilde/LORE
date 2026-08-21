@@ -25,7 +25,8 @@ proposes — never applies — what gets remembered.
    (global, 1375 chars — who the user is, preferences) and per-project `MEMORY.md`
    (2200 chars — environment facts, conventions, workarounds). Injected into context
    once at `SessionStart` as a frozen snapshot (re-injected after `/clear` and
-   compaction). The agent maintains them via `memory add/replace/remove`; a write
+   compaction; set `LORE_REFRESH_SECS` to also re-inject mid-session, so memory
+   curated now is in context now). The agent maintains them via `memory add/replace/remove`; a write
    past the cap fails and lists every entry, forcing consolidation instead of growth.
    The cap is the design: no aging heuristics, no relevance ranking, no drift —
    what fits is what's remembered.

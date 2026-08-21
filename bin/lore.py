@@ -788,6 +788,43 @@ def cmd_dream(args) -> int:
 
 # ---------------------------------------------------------------- inject (SessionStart)
 
+REFRESH_DIR = ROOT / ".refresh"
+REFRESH_STAMP_TTL = 7 * 24 * 3600
+
+
+def refresh_interval() -> int | None:
+    """Seconds between mid-session re-injections; None when opted out.
+
+    Unset means off. The UserPromptSubmit hook ships with the plugin, so a
+    default interval would spend context on every install that never asked for
+    it — the snapshot is a few thousand characters each time it fires.
+    """
+    raw = os.environ.get("LORE_REFRESH_SECS", "").strip()
+    if not raw:
+        return None
+    try:
+        secs = int(raw)
+    except ValueError:
+        return None
+    return secs if secs > 0 else None
+
+
+def _freshness_rule() -> str:
+    """The snapshot's own statement of how current it is."""
+    interval = refresh_interval()
+    if interval is None:
+        return (
+            "- This snapshot is injected once, at session start: a write you make now"
+            " lands in your files immediately but reaches your context next session."
+            " Read it back with lore memory show."
+        )
+    return (
+        f"- This snapshot re-injects every {interval}s (LORE_REFRESH_SECS), so a write"
+        " you make now reaches your context within that window; the refresh supersedes"
+        " every earlier copy in the conversation."
+    )
+
+
 def build_context(cwd: str) -> str:
     slug = project_slug(cwd)
     user_entries = read_entries(memory_path("user", slug))
@@ -836,7 +873,7 @@ def build_context(cwd: str) -> str:
         "- Caps are hard. Over-cap writes fail and list entries; consolidate with"
         ' lore memory replace --scope X --match "old substring" "merged fact".'
         " Consolidate proactively past 80%.",
-        "- This snapshot is frozen for the session; writes land in the next session.",
+        _freshness_rule(),
         '- Recall past work: lore search "query" (FTS5 over all session transcripts);'
         " lore session <id> [--grep term] to read one.",
     ]
@@ -954,6 +991,78 @@ def cmd_inject(args) -> int:
     if motd:
         out["systemMessage"] = motd
     print(json.dumps(out))
+    return 0
+
+
+def _read_stamp(path: Path) -> float | None:
+    try:
+        return float(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_stamp(path: Path, when: float) -> None:
+    try:
+        path.write_text(f"{when:.0f}", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _prune_stamps(now: float) -> None:
+    """Drop stamps from sessions that ended long ago — one file accrues per session."""
+    try:
+        for stamp in REFRESH_DIR.iterdir():
+            if now - stamp.stat().st_mtime > REFRESH_STAMP_TTL:
+                stamp.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def cmd_refresh(args) -> int:
+    """UserPromptSubmit hook: re-inject the snapshot, at most once per interval.
+
+    inject fires once, at SessionStart, so a memory approved mid-session sits in
+    the files without reaching the model until the next session. This re-reads
+    it on a throttle. Off unless LORE_REFRESH_SECS is set (see refresh_interval).
+
+    Every failure path is silent: a hook on the prompt loop that errors or stalls
+    costs more than a stale snapshot does.
+    """
+    if os.environ.get("LORE_SKIP"):
+        return 0
+    interval = refresh_interval()
+    if interval is None:
+        return 0
+    hook = read_hook_input()
+    cwd = args.cwd or hook.get("cwd") or os.getcwd()
+    session = re.sub(r"[^A-Za-z0-9_.-]", "_", str(hook.get("session_id") or "nosession"))
+    now = datetime.now(timezone.utc).timestamp()
+    try:
+        REFRESH_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return 0
+    stamp = REFRESH_DIR / session
+    last = _read_stamp(stamp)
+    if last is None:
+        # First prompt of the session — SessionStart just injected this content.
+        _write_stamp(stamp, now)
+        _prune_stamps(now)
+        return 0
+    if now - last < interval:
+        return 0
+    _write_stamp(stamp, now)
+    print(json.dumps({
+        # The user sees one line; the snapshot itself goes to the model only.
+        "suppressOutput": True,
+        "systemMessage": "lore memory refreshed",
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": (
+                "LORE MEMORY REFRESH — current as of now; supersedes any earlier lore"
+                " snapshot in this conversation.\n\n" + build_context(cwd)
+            ),
+        },
+    }))
     return 0
 
 
@@ -1939,6 +2048,13 @@ def cmd_doctor(args) -> int:
     else:
         print('warn  built-in auto-memory still active — lore replaces it; set'
               ' {"autoMemoryEnabled": false} in ~/.claude/settings.json')
+    interval = refresh_interval()
+    if interval:
+        print(f"ok    mid-session refresh: every {interval}s (LORE_REFRESH_SECS)")
+    else:
+        print('off   mid-session refresh — memory approved mid-session reaches the model'
+              ' next session. Set LORE_REFRESH_SECS (e.g. "1800") in the "env" block of'
+              " ~/.claude/settings.json to re-inject it sooner.")
     return 0 if ok else 1
 
 
@@ -1951,6 +2067,13 @@ def main() -> int:
     sp = sub.add_parser("inject", help="SessionStart hook: emit memory snapshot as context")
     sp.add_argument("--cwd")
     sp.set_defaults(fn=cmd_inject)
+
+    sp = sub.add_parser(
+        "refresh",
+        help="UserPromptSubmit hook: re-inject the snapshot on the LORE_REFRESH_SECS throttle",
+    )
+    sp.add_argument("--cwd")
+    sp.set_defaults(fn=cmd_refresh)
 
     sp = sub.add_parser("memory", help="curated memory: show/add/replace/remove")
     msub = sp.add_subparsers(dest="mcmd", required=True)
