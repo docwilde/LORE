@@ -859,37 +859,37 @@ def build_motd(cwd: str) -> str | None:
 
 
 BANNER_ANDROID = [
-    "      o  °",
-    "    .-------.",
-    "   =| o   o |=      L · O · R E",
-    "    |  ---  |       Lots Of Reconciled Engrams",
-    "    '--. .--'",
-    "    ____| |____",
-    " .-'    '-'    '-.",
-    " \\  ~~~~   ~~~~  /",
-    "  '-.__________.-'",
+    "    ◦ °",
+    "   ▄▀▀▀▀▀▀▀▄",
+    "  ▐▌ ●   ○ ▐▌      L · O · R E",
+    "   █  ▀▀▀  █       Lots Of Reconciled Engrams",
+    "   ▀▄▄▄▄▄▄▄▀",
+    "      ▐▌",
+    "  ▄▄▄▄▄▟▙▄▄▄▄▄",
+    " ▐░░░░░░▌░░░░░░▌",
+    "  ▀▀▀▀▀▀▀▀▀▀▀▀▀",
 ]
 
 BANNER_CLAWD = [
-    "        o  °",
-    "   \\/        \\/",
-    "   ((  _~~~~_ ))",
-    "    \\ ( o  o ) /       L · O · R E",
-    "     \\( \\__/ )/   Lots Of Reconciled Engrams",
-    "       |    |",
-    "      _|____|_",
-    "   .-'  ~~~~  '-.",
-    "   \\  ~~~  ~~~  /",
-    "    '-.________.-'",
+    "      ◦ °",
+    "  ▜▛         ▜▛",
+    "  ▐▙ ▄▀▀▀▀▀▄ ▟▌",
+    "   ▝▌ ●   ● ▐▘      L · O · R E",
+    "    █  ▀▄▄▀  █      Lots Of Reconciled Engrams",
+    "    ▀▄▄▄▄▄▄▄▀",
+    "       ▐▌",
+    "  ▄▄▄▄▄▄▟▙▄▄▄▄▄",
+    " ▐░░░░░░░▌░░░░░░▌",
+    "  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
 ]
 
 
 def render_banner(stats: list[str], art: list[str]) -> str:
     """The mascot, thinking the session's stats in its bubble."""
     w = max(len(s) for s in stats)
-    lines = [" ." + "-" * (w + 1) + "."]
-    lines += ["( " + s.ljust(w) + " )" for s in stats]
-    lines.append(" '" + "-" * (w + 1) + "'")
+    lines = ["╭─" + "─" * w + "─╮"]
+    lines += ["│ " + s.ljust(w) + " │" for s in stats]
+    lines.append("╰─" + "─" * w + "─╯")
     return "\n".join(lines + art)
 
 
