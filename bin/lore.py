@@ -1046,7 +1046,19 @@ def build_digest(messages: list[tuple[str, str, str]]) -> str:
     return digest[-DIGEST_TOTAL_CAP:]
 
 
-def pending_texts() -> list[str]:
+def pending_texts(slug: str | None = None) -> list[str]:
+    """Staged texts a review of `slug` could repeat; everything when slug is None.
+
+    The list is a "do not propose these again" instruction, so it should carry
+    what this review could actually collide with. A project-scoped proposal
+    staged for another project cannot: it is destined for a different memory
+    file and says nothing about this one. User-scoped proposals and skills are
+    global and always count.
+
+    Scoping matters most for a backfill, where one review per session across
+    many projects makes the unscoped list grow past the digest it is attached
+    to — leaving the deriver reading mostly other projects' facts.
+    """
     out = []
     pdir = ROOT / "pending"
     if not pdir.exists():
@@ -1055,6 +1067,9 @@ def pending_texts() -> list[str]:
         try:
             item = json.loads(f.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
+            continue
+        if slug is not None and item.get("scope") == "project" \
+                and item.get("project") != slug:
             continue
         out.append(item.get("text") or item.get("name") or "")
     return [t for t in out if t]
@@ -1177,7 +1192,7 @@ def cmd_review(args) -> int:
         learned=learned,
         user_entries=render_entries(read_entries(memory_path("user", slug))) or "(empty)",
         proj_entries=render_entries(read_entries(memory_path("project", slug))) or "(empty)",
-        pending="\n".join(f"- {t}" for t in pending_texts()) or "(none)",
+        pending="\n".join(f"- {t}" for t in pending_texts(slug)) or "(none)",
         skills=", ".join(sorted(p.parent.name for p in SKILLS_DIR.glob("*/SKILL.md"))) or "(none)",
         slug=slug,
         digest=build_digest(messages),
@@ -1360,7 +1375,7 @@ def derive_conclusions(data: dict, slug: str, session_id: str) -> int:
 def stage_proposals(data: dict, slug: str, session_id: str) -> int:
     pdir = ROOT / "pending"
     pdir.mkdir(parents=True, exist_ok=True)
-    existing = {t.lower() for t in pending_texts()}
+    existing = {t.lower() for t in pending_texts(slug)}
     for scope in ("user", "project"):
         existing.update(e.lower() for e in read_entries(memory_path(scope, slug)))
     staged = 0
