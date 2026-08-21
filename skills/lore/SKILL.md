@@ -52,7 +52,7 @@ Use `lore ask` before re-deriving something past sessions likely concluded. For 
 
 ## Background review & pending proposals
 
-On session end a detached reviewer (cheap model, `--bare`, no tools) digests the session — including its tool calls, so recipes carry the exact commands — and **stages** memory/skill proposals — nothing auto-applies. Learned skills have a lifecycle: sessions that correct one yield an `update` proposal (approve shows the diff), and invocations are counted as a reinforcement signal. If the injected snapshot mentions pending proposals, tell the user and suggest `/lore:pending`.
+On session end a detached reviewer (cheap model, `--bare`, no tools) digests the session — including its tool calls, so recipes carry the exact commands — and **stages** memory/skill proposals — nothing auto-applies. Learned skills have a closed improvement loop: invocations are counted, each run's outcome (success/failure, judged from execution errors and user reaction) lands in `skill_usage.json`, and a recipe with repeated failures draws an `update` proposal fixing the failing step or a `retire` proposal (approve moves it to `skills-retired/`). If the injected snapshot mentions pending proposals, tell the user and suggest `/lore:pending`.
 
 ```sh
 lore pending            # list staged proposals
