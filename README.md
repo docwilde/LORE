@@ -82,11 +82,11 @@ Nothing the background reviewer produces applies itself. The flow, end to end:
    `LORE_ROOT/pending/` (worker log in `LORE_ROOT/logs/`), and a desktop
    notification fires minutes after the session ends: *"2 proposal(s) staged —
    /lore:pending"* (auto-enabled when `notify-send` exists; `LORE_NOTIFY=0` off).
-2. **Every session opens with the lore MOTD** — a harness-displayed status line:
-   `lore: 2 pending (1× skill update, 1× memory) — /lore:pending · +7 beliefs since
-   last start, 3 about you · memory 15% user / 19% project · 3 learned skill(s) ·
-   412 beliefs, 134 sessions indexed`. `LORE_MOTD=0` reduces it to the pending
-   notice alone (which is never suppressed). The MOTD is a hook `systemMessage`,
+2. **Every session opens with the lore MOTD** — the ASCII Reading Android,
+   thinking the session's stats in its thought bubble: pending proposals by
+   kind, new beliefs since last start (yours counted separately), memory
+   usage, learned-skill health, index size. `LORE_MOTD=line` compacts it to
+   one line, `LORE_MOTD=0` to the pending notice alone (never suppressed). The MOTD is a hook `systemMessage`,
    displayed by the harness itself — model-independent; the injected snapshot
    additionally instructs the agent to bring pending items up early. `lore status`
    remains the manual check.
@@ -195,7 +195,7 @@ Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
 | `LORE_REVIEW_MIN_MESSAGES` | 3 | skip review below this many user messages |
 | `LORE_CLAUDE_BIN` | `which claude` | claude binary for the worker |
 | `LORE_SKILLS_DIR` | `~/.claude/skills` | where approved skills install |
-| `LORE_MOTD` | `1` | session-start status line (pending, new beliefs, memory %, skills, index); `0` = pending notice only |
+| `LORE_MOTD` | `banner` | session-start MOTD: `banner` = ASCII Reading Android thinking the stats in its bubble; `line` = one compact line; `0` = pending notice only (never suppressed) |
 | `LORE_NOTIFY` | auto | desktop notification when proposals are staged (`notify-send`); `0` disables |
 | `LORE_SKIP` | unset | set to any value to no-op all hooks (the worker sets it) |
 

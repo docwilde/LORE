@@ -800,9 +800,10 @@ def build_context(cwd: str) -> str:
 
 
 def build_motd(cwd: str) -> str | None:
-    """One harness-displayed line per session start: what waits for review, what
-    lore learned since last time, how full memory is. LORE_MOTD=0 reduces it to
-    the pending notice alone; the pending notice itself is never suppressed."""
+    """Harness-displayed session-start MOTD: what waits for review, what lore
+    learned since last time, how full memory is. LORE_MOTD selects the shape —
+    "banner" (default): ASCII Reading Android thinking the stats in its bubble;
+    "line": one compact line; "0": the never-suppressed pending notice alone."""
     slug = project_slug(cwd)
     parts = []
 
@@ -850,8 +851,32 @@ def build_motd(cwd: str) -> str | None:
 
     n_sessions = conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
     n_beliefs = conn.execute("SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
-    parts.append(f"{n_beliefs} beliefs, {n_sessions} sessions indexed")
-    return "lore: " + " · ".join(parts)
+    parts.append(f"{n_beliefs} beliefs · {n_sessions} sessions indexed")
+    if os.environ.get("LORE_MOTD", "banner") == "line":
+        return "lore: " + " · ".join(parts)
+    return render_banner(parts)
+
+
+BANNER_ART = [
+    "      o  °",
+    "    .-------.",
+    "   =| o   o |=      L · O · R E",
+    "    |  ---  |       Lots Of Reconciled Engrams",
+    "    '--. .--'",
+    "    ____| |____",
+    " .-'    '-'    '-.",
+    " \\  ~~~~   ~~~~  /",
+    "  '-.__________.-'",
+]
+
+
+def render_banner(stats: list[str]) -> str:
+    """The Reading Android, thinking the session's stats in its bubble."""
+    w = max(len(s) for s in stats)
+    lines = [" ." + "-" * (w + 1) + "."]
+    lines += ["( " + s.ljust(w) + " )" for s in stats]
+    lines.append(" '" + "-" * (w + 1) + "'")
+    return "\n".join(lines + BANNER_ART)
 
 
 def cmd_inject(args) -> int:
