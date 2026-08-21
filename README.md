@@ -72,6 +72,50 @@ proposes — never applies — what gets remembered.
    Unlike Honcho there is no standing service — Postgres/Redis/queue are replaced by
    the session-end worker and on-demand subagents over one SQLite file.
 
+## How the loops run
+
+**Skillification — the closed improvement loop:**
+
+```mermaid
+flowchart TD
+    A["Session ends"] --> B["Reviewer digests the session
+(exact commands T: and errors E:)"]
+    B -->|"verified working recipe"| C[/"staged: new skill"/]
+    C -->|"approve"| D["Installed skill
+~/.claude/skills/&lt;name&gt;"]
+    D -->|"auto-triggers on a similar problem"| E["Skill runs in a later session"]
+    E --> F["Reviewer judges the run:
+success / failure / unclear"]
+    F --> G[("Track record
+skill_usage.json")]
+    G -->|"repeated failure, no recent success"| H{"Fixable?"}
+    H -->|"yes"| I[/"staged: update (diff shown)"/]
+    H -->|"no"| J[/"staged: retire"/]
+    I -->|"approve"| D
+    J -->|"approve"| K["skills-retired/"]
+```
+
+**The Honcho split — deriver, dreamer, dialectic:**
+
+```mermaid
+flowchart TD
+    S["Session transcript"] -->|"SessionEnd worker"| DE["Deriver (haiku):
+conclusions with confidence + evidence"]
+    DE --> B[("Belief store
+SQLite: beliefs, evidence trails, FTS5")]
+    B -->|"same-subject beliefs paired by overlap"| DR["Dreamer (sonnet):
+merge / supersede / keep"]
+    DR -->|"reconciled, audit trail kept"| B
+    DR -->|"well-evidenced belief"| P[/"staged: promotion"/]
+    P -->|"approve"| M["Hard-capped core memory
+USER.md / MEMORY.md"]
+    Q["/lore:ask &lt;question&gt;"] --> DI["Dialectic subagent"]
+    DI <-->|"lore ask · belief show · session --grep"| B
+    DI --> A["Cited answer + confidence"]
+```
+
+Trapezoid nodes are the pending gate — nothing crosses one without `/lore:approve`.
+
 ## Install
 
 ```
@@ -85,16 +129,53 @@ so memory writes don't cost a prompt each, ports existing auto-memory entries,
 and primes the session index — each change behind its own confirmation.
 `/lore:doctor` is the read-only version: it reports, fixes nothing.
 
+## Human in the loop
+
+Nothing the background reviewer produces applies itself. The flow, end to end:
+
+1. **Staging notifies you.** The worker runs after `SessionEnd` — the session is
+   already closed, so there is nothing to interrupt. Proposals land as files in
+   `LORE_ROOT/pending/` (worker log in `LORE_ROOT/logs/`), and a desktop
+   notification fires minutes after the session ends: *"2 proposal(s) staged —
+   /lore:pending"* (auto-enabled when `notify-send` exists; `LORE_NOTIFY=0` off).
+2. **The next session opens with a notice — twice.** The hook emits a
+   `systemMessage` the harness displays directly ("lore: 2 pending proposal(s) —
+   /lore:pending to review"), guaranteed and model-independent; and the injected
+   snapshot additionally instructs the agent to bring it up early. `lore status`
+   remains the manual check.
+3. **You review.** `/lore:pending` lists every proposal with its origin session;
+   the agent adds a keep/reject/merge judgment per item but is explicitly forbidden
+   to act without your word.
+4. **You decide.** `/lore:approve <id|all>` applies — memory writes go through the
+   same cap enforcement as everything else, skill updates print a unified diff
+   before overwriting, retires move the skill to `skills-retired/` (never deleted).
+   `/lore:reject` archives the proposal with its verdict. Both leave an audit trail
+   in `pending/archive/`.
+
+The one thing that skips the gate is the belief store — deliberately: beliefs are
+queryable data that never enter context uninvited, so there is nothing to approve.
+The moment a belief tries to become context (promotion into core memory) it passes
+the same pending gate as everything else.
+
 ## Commands
 
-`/lore:ask <question>` · `/lore:pending` · `/lore:approve <id|all>` ·
-`/lore:reject <id|all>` · `/lore:remember <fact>` · `/lore:review` ·
-`/lore:status` · `/lore:doctor` · `/lore:setup`
+| Command | What it does |
+|---|---|
+| `/lore:ask <question>` | Runs the dialectic: a subagent gathers matching beliefs, curated memory and session hits, deepens into evidence trails and raw transcripts, and returns a synthesized answer with confidence and citations. Follow-ups continue the same agent. |
+| `/lore:remember <fact>` | Stores a fact now: the agent picks the scope (user vs project), condenses it to one dense line, and writes it through the cap. |
+| `/lore:pending` | Lists everything the background review staged — memories, skill adds/updates/retires, promotions — each with its origin session, plus the agent's own keep/reject/merge judgment. Decides nothing. |
+| `/lore:approve <id\|all>` | Applies staged proposals: memory writes cap-enforced, skill updates shown as a unified diff before overwriting, retires moved to `skills-retired/`. |
+| `/lore:reject <id\|all>` | Archives proposals unapplied, verdict recorded in `pending/archive/`. |
+| `/lore:review` | Triggers the background review of the current session immediately instead of waiting for session end (`--dry-run` shows what would be sent, spending nothing). |
+| `/lore:status` | Memory usage per scope, session-index and belief-store sizes, pending count, per-role models, learned skills with their track records. |
+| `/lore:doctor` | Read-only diagnosis: environment checks, effective config, allowlist and auto-memory conflicts, unported entries. Reports, fixes nothing. |
+| `/lore:setup` | Applies what doctor found, one change behind its own confirmation each: disable built-in auto-memory, add the permission allowlist, port old entries, prime the index, set per-role models. |
 
 Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
-(stdlib only, no dependencies). `lore config` prints the effective
-configuration; set the env vars below in `~/.claude/settings.json` → `"env"` so
-hooks and commands see them.
+(stdlib only, no dependencies) — `memory`, `search`, `session`, `belief`, `ask`,
+`dream`, `pending`/`approve`/`reject`, `index`, `config`, `status`, `doctor`.
+`lore config` prints the effective configuration; set the env vars below in
+`~/.claude/settings.json` → `"env"` so hooks and commands see them.
 
 ## Configuration (env vars, all optional)
 
@@ -109,6 +190,7 @@ hooks and commands see them.
 | `LORE_REVIEW_MIN_MESSAGES` | 3 | skip review below this many user messages |
 | `LORE_CLAUDE_BIN` | `which claude` | claude binary for the worker |
 | `LORE_SKILLS_DIR` | `~/.claude/skills` | where approved skills install |
+| `LORE_NOTIFY` | auto | desktop notification when proposals are staged (`notify-send`); `0` disables |
 | `LORE_SKIP` | unset | set to any value to no-op all hooks (the worker sets it) |
 
 ## Notes & caveats
@@ -123,6 +205,9 @@ hooks and commands see them.
   sonnet call when new beliefs need reconciling.
 - The name: lore is accumulated knowledge of a craft — and, coincidentally, Data's
   brother in TNG. The logo's amber is a positronic wink at that.
+- **License:** [PolyForm Noncommercial 1.0.0](LICENSE) — free for personal,
+  research and other noncommercial use; commercial use requires the author's
+  consent (a separate license — get in touch).
 - Memory writes made mid-session appear in the *next* session's snapshot (frozen
   snapshot is deliberate, per Hermes — mid-session context edits would thrash the
   prompt cache).
