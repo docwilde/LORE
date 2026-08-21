@@ -72,6 +72,35 @@ proposes — never applies — what gets remembered.
    Unlike Honcho there is no standing service — Postgres/Redis/queue are replaced by
    the session-end worker and on-demand subagents over one SQLite file.
 
+
+## Human in the loop
+
+Nothing the background reviewer produces applies itself. The flow, end to end:
+
+1. **Staging notifies you.** The worker runs after `SessionEnd` — the session is
+   already closed, so there is nothing to interrupt. Proposals land as files in
+   `LORE_ROOT/pending/` (worker log in `LORE_ROOT/logs/`), and a desktop
+   notification fires minutes after the session ends: *"2 proposal(s) staged —
+   /lore:pending"* (auto-enabled when `notify-send` exists; `LORE_NOTIFY=0` off).
+2. **The next session opens with a notice — twice.** The hook emits a
+   `systemMessage` the harness displays directly ("lore: 2 pending proposal(s) —
+   /lore:pending to review"), guaranteed and model-independent; and the injected
+   snapshot additionally instructs the agent to bring it up early. `lore status`
+   remains the manual check.
+3. **You review.** `/lore:pending` lists every proposal with its origin session;
+   the agent adds a keep/reject/merge judgment per item but is explicitly forbidden
+   to act without your word.
+4. **You decide.** `/lore:approve <id|all>` applies — memory writes go through the
+   same cap enforcement as everything else, skill updates print a unified diff
+   before overwriting, retires move the skill to `skills-retired/` (never deleted).
+   `/lore:reject` archives the proposal with its verdict. Both leave an audit trail
+   in `pending/archive/`.
+
+The one thing that skips the gate is the belief store — deliberately: beliefs are
+queryable data that never enter context uninvited, so there is nothing to approve.
+The moment a belief tries to become context (promotion into core memory) it passes
+the same pending gate as everything else.
+
 ## How the loops run
 
 **Skillification — the closed improvement loop:**
@@ -129,33 +158,6 @@ so memory writes don't cost a prompt each, ports existing auto-memory entries,
 and primes the session index — each change behind its own confirmation.
 `/lore:doctor` is the read-only version: it reports, fixes nothing.
 
-## Human in the loop
-
-Nothing the background reviewer produces applies itself. The flow, end to end:
-
-1. **Staging notifies you.** The worker runs after `SessionEnd` — the session is
-   already closed, so there is nothing to interrupt. Proposals land as files in
-   `LORE_ROOT/pending/` (worker log in `LORE_ROOT/logs/`), and a desktop
-   notification fires minutes after the session ends: *"2 proposal(s) staged —
-   /lore:pending"* (auto-enabled when `notify-send` exists; `LORE_NOTIFY=0` off).
-2. **The next session opens with a notice — twice.** The hook emits a
-   `systemMessage` the harness displays directly ("lore: 2 pending proposal(s) —
-   /lore:pending to review"), guaranteed and model-independent; and the injected
-   snapshot additionally instructs the agent to bring it up early. `lore status`
-   remains the manual check.
-3. **You review.** `/lore:pending` lists every proposal with its origin session;
-   the agent adds a keep/reject/merge judgment per item but is explicitly forbidden
-   to act without your word.
-4. **You decide.** `/lore:approve <id|all>` applies — memory writes go through the
-   same cap enforcement as everything else, skill updates print a unified diff
-   before overwriting, retires move the skill to `skills-retired/` (never deleted).
-   `/lore:reject` archives the proposal with its verdict. Both leave an audit trail
-   in `pending/archive/`.
-
-The one thing that skips the gate is the belief store — deliberately: beliefs are
-queryable data that never enter context uninvited, so there is nothing to approve.
-The moment a belief tries to become context (promotion into core memory) it passes
-the same pending gate as everything else.
 
 ## Commands
 
