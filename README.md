@@ -174,7 +174,10 @@ Trapezoid nodes are the pending gate — nothing crosses one without `/lore:appr
 Then run `/lore:setup` — it disables the built-in auto-memory lore replaces (two
 parallel memory systems disagree eventually), adds the permission-allowlist entry
 so memory writes don't cost a prompt each, ports existing auto-memory entries,
-and primes the session index — each change behind its own confirmation.
+primes the session index, and offers to review the backlog of sessions that ended
+before lore existed — each change behind its own confirmation. That last step is
+what fills the belief store on a fresh install: indexing alone only builds search,
+because `review` fires on session end and cannot reach backwards.
 `/lore:doctor` is the read-only version: it reports, fixes nothing.
 
 
@@ -189,8 +192,8 @@ and primes the session index — each change behind its own confirmation.
 | `/lore:reject <id\|all>` | Archives proposals unapplied, verdict recorded in `pending/archive/`. |
 | `/lore:review` | Triggers the background review of the current session immediately instead of waiting for session end (`--dry-run` shows what would be sent, spending nothing). |
 | `/lore:status` | Memory usage per scope, session-index and belief-store sizes, pending count, per-role models, learned skills with their track records. |
-| `/lore:doctor` | Read-only diagnosis: environment checks, effective config, allowlist and auto-memory conflicts, unported entries. Reports, fixes nothing. |
-| `/lore:setup` | Applies what doctor found, one change behind its own confirmation each: disable built-in auto-memory, add the permission allowlist, port old entries, prime the index, set per-role models. |
+| `/lore:doctor` | Read-only diagnosis: environment checks, effective config, allowlist and auto-memory conflicts, unported entries, unreviewed session backlog. Reports, fixes nothing. |
+| `/lore:setup` | Applies what doctor found, one change behind its own confirmation each: disable built-in auto-memory, add the permission allowlist, port old entries, prime the index, backfill-review the session backlog for the projects you pick, set per-role models. |
 
 Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
 (stdlib only, no dependencies) — `memory`, `search`, `session`, `belief`, `ask`,
