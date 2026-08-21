@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/logo.svg" width="140" alt="lore: an android head reading an open tome, a staged memory rising from the page, a thought cloud forming a belief"><br><sub><b>L·O·R·E</b> — Lots Of Reconciled Engrams</sub></p>
 
-# lore
+# lore — Lots Of Reconciled Engrams
 
 Hermes-pattern memory for Claude Code. Replaces the built-in auto-memory with the
 architecture the [Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory)
