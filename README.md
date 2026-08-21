@@ -36,7 +36,8 @@ proposes — never applies — what gets remembered.
    which is what coding-agent recall queries look like. No embeddings, no API calls.
 - **Tier 3 — Background review, staged.** On `SessionEnd` a detached worker digests the
    transcript and runs `claude --bare -p` on a cheap model (`--bare` = no hooks, so
-   no recursion; `--allowedTools ""` = no tool use) to extract at most 5 durable
+   no recursion; `--allowedTools ""` = no tool use — and a retry without `--bare`
+   where that flag cannot read the OAuth credentials) to extract at most 5 durable
    memories and at most 1 reusable skill. Proposals are **staged** in `pending/`,
    surfaced at next session start, and applied only via `lore approve` /
    `/lore:approve`. Approved skills install to `~/.claude/skills/<name>/SKILL.md`,
