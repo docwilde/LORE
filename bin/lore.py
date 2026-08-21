@@ -1297,6 +1297,37 @@ def reviewed_ids() -> set[str]:
     return {r[0] for r in rows}
 
 
+def resolve_projects(terms: list[str], available: dict[str, list[Path]]
+                    ) -> tuple[list[str], list[tuple[str, list[str]]]]:
+    """Project slugs for what the user typed, plus whatever failed to resolve.
+
+    Every slug starts with "-", because project_slug() turns a leading "/" into
+    one — which argparse reads as a flag, so a slug cannot be passed as a plain
+    option value. Matching on a substring sidesteps that entirely and is what
+    anyone would type anyway: "apa" for -home-fabian-repos-contiamo-apa. An
+    exact slug still wins, so the precise form keeps working, and a slug ending
+    in the term wins over one merely containing it — "apa" means the apa repo,
+    not the three projects whose paths pass through it. Only a term that is
+    still ambiguous after both is an error, and it lists the candidates rather
+    than guessing between them.
+    """
+    chosen: list[str] = []
+    bad: list[tuple[str, list[str]]] = []
+    for term in terms:
+        if term in available:
+            chosen.append(term)
+            continue
+        suffix = sorted(s for s in available if s.endswith(term))
+        contains = sorted(s for s in available if term in s)
+        for matches in (suffix, contains):
+            if len(matches) == 1:
+                chosen.append(matches[0])
+                break
+        else:
+            bad.append((term, contains))
+    return list(dict.fromkeys(chosen)), bad
+
+
 def cmd_backfill(args) -> int:
     """Review a backlog of sessions that ended before lore could see them.
 
@@ -1320,13 +1351,19 @@ def cmd_backfill(args) -> int:
             print("\nPass --project <slug> (repeatable) to review one or more.")
         return 0
 
-    unknown = [s for s in args.project if s not in available]
-    if unknown:
-        print(f"unknown project(s): {', '.join(unknown)}", file=sys.stderr)
+    chosen, bad = resolve_projects(args.project, available)
+    if bad:
+        for term, matches in bad:
+            if matches:
+                print(f"'{term}' matches {len(matches)} projects — narrow it:", file=sys.stderr)
+                for m in matches:
+                    print(f"    {m}", file=sys.stderr)
+            else:
+                print(f"'{term}' matches no project (see --list)", file=sys.stderr)
         return 1
 
     done = set() if args.force else reviewed_ids()
-    selected = {s: available[s] for s in args.project}
+    selected = {s: available[s] for s in chosen}
     todo = sum(1 for ts in selected.values() for t in ts if t.stem not in done)
     already = sum(len(ts) for ts in selected.values()) - todo
     if not todo:
@@ -1942,7 +1979,8 @@ def main() -> int:
     sp.set_defaults(fn=cmd_worker)
 
     sp = sub.add_parser("backfill", help="review a backlog of past sessions")
-    sp.add_argument("--project", action="append", help="project slug (repeatable)")
+    sp.add_argument("--project", action="append",
+                    help="project, by slug or any unambiguous substring (repeatable)")
     sp.add_argument("--list", action="store_true", help="list projects and session counts")
     sp.add_argument("--jobs", type=int, default=4, help="projects reviewed in parallel")
     sp.add_argument("--force", action="store_true", help="re-review already-reviewed sessions")
