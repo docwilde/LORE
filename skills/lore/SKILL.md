@@ -7,7 +7,7 @@ description: Maintain and recall persistent memory (Hermes-pattern). Use when th
 
 CLI (always via Bash): `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" <cmd>` — aliased below as `lore`.
 
-The current memory snapshot was injected at session start and is frozen for this session; writes land in the next session. State lives in `~/.claude/lore/` (override: `LORE_ROOT`).
+The current memory snapshot was injected at session start. A write reaches the files at once but reaches your context only at the next injection — next session by default, or within `LORE_REFRESH_SECS` when the mid-session refresh is on; the snapshot's own last rule says which applies. Either way `lore memory show` reads the files live. State lives in `~/.claude/lore/` (override: `LORE_ROOT`).
 
 ## Writing memory
 

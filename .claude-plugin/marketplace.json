@@ -8,8 +8,8 @@
     {
       "name": "lore",
       "source": "./",
-      "description": "Memory for Claude Code that reasons about you and improves itself: Honcho-pattern belief store with deriver, dreamer and dialectic (/lore:ask), automatic skillification with a closed judge/update/retire loop, on a Hermes-pattern core \u2014 hard-capped curated memory, FTS5 session search, staged review.",
-      "version": "0.18.0"
+      "description": "Memory for Claude Code that reasons about you and improves itself: Honcho-pattern belief store with deriver, dreamer and dialectic (/lore:ask), automatic skillification with a closed judge/update/retire loop, on a Hermes-pattern core — hard-capped curated memory, FTS5 session search, staged review.",
+      "version": "0.19.0"
     }
   ]
 }

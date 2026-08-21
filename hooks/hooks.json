@@ -13,6 +13,18 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/bin/lore.py refresh",
+            "timeout": 15,
+            "statusMessage": "Refreshing lore memory"
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [
