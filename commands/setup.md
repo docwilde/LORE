@@ -32,17 +32,18 @@ Say the two costs out loud before the gate:
 - **Tokens.** One deriver call per transcript, each on a digest of up to `DIGEST_TOTAL_CAP` chars from the newest `DIGEST_LAST_N` messages. Give the count for the selection.
 - **Caps, which are the real constraint.** Each session stages up to 5 memories, but `user` holds ~1375 chars and each `project` ~2200 — a handful of entries each. A backfill of any size produces a triage pile to curate down, not a filled memory. Beliefs are the part that scales: they have no cap, so the durable value of a backfill is a queryable belief store for `/lore:ask`, with memory promotions as the exception.
 
-Then, for each selected project, review its transcripts:
+Then, for each selected project, review its transcripts with the dreamer deferred:
 
 ```sh
-python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" review \
+LORE_DEFER_DREAM=1 python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" review \
   --transcript <path> --cwd <cwd> --foreground
 ```
 
-Three rules the loop has to respect:
+Four rules the loop has to respect:
 
 - **Pass `--cwd`, and take it from the transcript, not the directory name.** The slug decides which project's memory the deriver is shown and which project a proposal is tagged to. Slugs are lossy — `project_slug` replaces every non-alphanumeric character with `-`, so a directory name cannot be turned back into a path. Read the real one out of the transcript instead: `grep -o '"cwd":"[^"]*"' <path> | head -1`.
 - **Run sequentially.** Each review is given the currently staged proposals and told not to repeat them, and dedupe is an exact match against that list. Parallel reviews cannot see each other's output and will stage the same fact several times.
 - **Report what was skipped.** Transcripts with fewer than `REVIEW_MIN_MESSAGES` user messages exit silently with status 0, so a quiet run is not the same as a reviewed one. Count them and say so.
+- **Defer the dreamer, and triage between batches.** Two things scale badly over a batch. A review that derives beliefs normally reconciles the whole active belief store immediately, on the expensive model — right for one session at a time, wasteful across N, where the same work is redone against a store that only grows. `LORE_DEFER_DREAM=1` holds it back; run `lore dream` once when the batch ends. Staged proposals grow the same way for a different reason: every review is sent the current pending list so it does not repeat it, so an untriaged batch feeds each run a longer prompt than the last and eventually crowds out the digest itself. Review one project, stop at `/lore:pending`, and start the next batch from an empty one.
 
 Finish with `lore status` for the new pending and belief counts, and send the user to `/lore:pending` — every proposal is still staged, and nothing has been written to memory.

@@ -39,6 +39,12 @@ MEMORY_CAP = int(os.environ.get("LORE_MEMORY_CAP", "2200"))
 REVIEW_MODEL = os.environ.get("LORE_REVIEW_MODEL", "")
 DERIVER_MODEL = os.environ.get("LORE_DERIVER_MODEL", REVIEW_MODEL or "haiku")
 DREAMER_MODEL = os.environ.get("LORE_DREAMER_MODEL", REVIEW_MODEL or "sonnet")
+# Reconciling after every session is right for the one-at-a-time flow it was built
+# for, but wrong for a backfill: the dreamer is the expensive model, it re-reads the
+# whole active belief store on each call, and that store grows monotonically through
+# the batch — so N sessions pay for N increasingly large reconciliations to reach a
+# state one final call would produce. Set for a batch, then run `lore dream` once.
+DEFER_DREAM = os.environ.get("LORE_DEFER_DREAM", "") not in ("", "0")
 DIALECTIC_MODEL = os.environ.get("LORE_DIALECTIC_MODEL", "")
 REVIEW_MIN_MESSAGES = int(os.environ.get("LORE_REVIEW_MIN_MESSAGES", "3"))
 SKILLS_DIR = Path(os.environ.get("LORE_SKILLS_DIR", str(Path.home() / ".claude" / "skills")))
@@ -958,6 +964,27 @@ current entries listed below. Each text <= 200 chars, dense, declarative. When a
 supersedes or merges with an existing entry, use action "replace" with "match" set to a unique \
 substring of that entry.
 
+Durability test, applied to memories and conclusions alike — ask whether the claim will still \
+be true and useful once the current work has shipped. Work in flight is not a durable fact: an \
+MR or PR number, an issue key, a commit SHA, a branch name, a test that is currently failing, a \
+defect that is currently open, "tracked in X", "depends on Y", "not yet done". Each of those \
+becomes false or meaningless on merge. The convention, constraint or lesson such work revealed \
+IS durable — keep that and drop the tracking. Write "graph schema is immutable once merged \
+because the migration encodes it in DB constraints", never "two defects are tracked in !40". \
+The same asymmetry applies to the user scope: a preference held across sessions is durable, \
+whereas one decision, approval or authorization given once in one session is not, and must \
+never be generalized into a standing trait or a permission — recording an approval as though \
+it were a preference invites a later session to act on consent that was never given.
+
+Personal data stays out of both stores. Do NOT record names, email addresses, phone numbers, \
+postal addresses, usernames or account handles of people, customer or client identities, or \
+anything that reads as a credential — no tokens, keys, passwords or connection strings, not \
+even partially or as a description of where one is kept. Memory is injected into every session \
+and beliefs are queryable, so anything landing there outlives the session that saw it. Write \
+the fact without the person: "the reviewer requires a test per finding", not the reviewer's \
+name. The one exception is an identity fact the user stated about themselves for the agent to \
+remember and asked to have kept; nothing inferred, and nothing about a third party.
+
 A skill is a reusable working recipe worked out in this session that would plausibly be \
 repeated. Digest tags: U user, A assistant, T a tool call (exact commands live here), \
 E a tool error. Only propose a recipe the session VERIFIED working — commands succeeded, \
@@ -1276,9 +1303,11 @@ def worker_run(jobfile: Path) -> int:
         print(f"[{utcnow()}] staged {staged} proposal(s), derived {derived} belief(s),"
               f" recorded {outcomes} skill outcome(s)")
         notify_staged(staged)
-        if derived:
+        if derived and not DEFER_DREAM:
             conn = db_connect()
             dream_run(conn, job["project"])
+        elif derived:
+            print("dream deferred (LORE_DEFER_DREAM) — run `lore dream` when the batch ends")
         jobfile.unlink(missing_ok=True)
         return 0
     finally:
