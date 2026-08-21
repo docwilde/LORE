@@ -1,0 +1,15 @@
+{
+  "name": "lore",
+  "owner": {
+    "name": "Fabian Wilde",
+    "email": "fabian.wilde@contiamo.com"
+  },
+  "plugins": [
+    {
+      "name": "lore",
+      "source": "./",
+      "description": "Hermes/Honcho-pattern memory for Claude Code: hard-capped curated MEMORY/USER files injected at session start, FTS5 search over all session transcripts, a background reviewer that stages memory/skill proposals, and a belief store with deriver, dreamer and dialectic (/lore:ask).",
+      "version": "0.6.0"
+    }
+  ]
+}
