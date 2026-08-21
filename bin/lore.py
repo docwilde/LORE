@@ -983,8 +983,9 @@ never be generalized into a standing trait or a permission — recording an appr
 it were a preference invites a later session to act on consent that was never given.
 
 Personal data stays out of both stores. Do NOT record names, email addresses, phone numbers, \
-postal addresses, usernames or account handles of people, customer or client identities, or \
-anything that reads as a credential — no tokens, keys, passwords or connection strings, not \
+postal addresses, usernames or account handles of people, the name of any customer, client, \
+employer or third-party company, or anything that reads as a credential — no tokens, keys, \
+passwords or connection strings, not \
 even partially or as a description of where one is kept. Memory is injected into every session \
 and beliefs are queryable, so anything landing there outlives the session that saw it. Write \
 the fact without the person: "the reviewer requires a test per finding", not the reviewer's \
@@ -1011,8 +1012,25 @@ Additionally, derive up to 10 conclusions for the belief store: observations abo
 (scope "user") or the project (scope "project") that are worth keeping as queryable beliefs \
 even when they don't merit a slot in the small core memory. Each: a declarative claim \
 <= 200 chars, a confidence 0.0-1.0 (how well the session supports it), and a short evidence \
-quote or paraphrase from the digest. Weaker or more situational than memories is fine; \
-task narration is still excluded.
+quote or paraphrase from the digest. What may be weaker than a memory is your CONFIDENCE, \
+expressed in that number — not the reach of the claim. A belief is not the looser store: it \
+is unbounded and nothing retires it, so a claim that goes stale sits there indefinitely and \
+answers questions wrongly, whereas a memory at least competes for a slot. The durability \
+test above applies here in full, and task narration is still excluded.
+
+Three ways a conclusion goes stale, each seen in practice:
+
+1. A durable claim with an expiring tail welded on. "ids are minted only by the writer, never \
+by a caller; a1b2c3d converts 938 of 956 rows" — the first clause is permanent, the second is \
+a commit and a count that both move. Cut the tail. Do not keep a claim intact because part of \
+it is good.
+2. A measurement stated as though timeless. "15 of 31 plugins never used over 10 days" was \
+true when it was counted and is a property of nothing. Either drop the number and claim what \
+it demonstrated, or do not make the claim.
+3. A named third party. An organization, customer, client, or a product belonging to one is \
+out for the same reason a person's name is: write what was learned, not who it concerned. \
+"corporate-design decks need a licensed-font fallback" carries the lesson that naming the \
+client and their brand colour does not.
 
 Current user memory entries:
 {user_entries}
