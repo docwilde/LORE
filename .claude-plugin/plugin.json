@@ -1,7 +1,7 @@
 {
   "name": "lore",
-  "description": "Hermes/Honcho-pattern memory for Claude Code: hard-capped curated MEMORY/USER files injected at session start, FTS5 search over all session transcripts, a background reviewer that stages memory/skill proposals, and a belief store with deriver, dreamer and dialectic (/lore:ask).",
-  "version": "0.7.1",
+  "description": "Memory for Claude Code that reasons about you and improves itself: Honcho-pattern belief store with deriver, dreamer and dialectic (/lore:ask), automatic skillification with a closed judge/update/retire loop, on a Hermes-pattern core \u2014 hard-capped curated memory, FTS5 session search, staged review.",
+  "version": "0.7.2",
   "author": {
     "name": "Fabian Wilde",
     "email": "fabian.wilde@contiamo.com"

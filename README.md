@@ -2,10 +2,22 @@
 
 # lore — Lots Of Reconciled Engrams
 
-Hermes-pattern memory for Claude Code. Replaces the built-in auto-memory with the
-architecture the [Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory)
-uses: small curated memory under hard caps, lexical search over full session history,
-and a background reviewer that proposes — never applies — new memories and skills.
+Memory for Claude Code that **reasons about you and improves itself**.
+
+Every session is derived into confidence-weighted **beliefs** with evidence trails,
+a **dreamer** reconciles them while you sleep, and a **dialectic** agent answers
+questions like *"does this user prefer rebase or merge?"* with citations and a
+confidence — the [Honcho](https://github.com/plastic-labs/honcho) Deriver / Dreamer /
+Dialectic split, run on one SQLite file instead of a standing service. And working
+recipes are **skillified automatically**: a procedure the session verified working
+becomes a real Claude Code skill, every later run of it is judged (execution errors,
+the user calling the result wrong), and its track record drives the closed
+improvement loop — reinforce, update, or retire.
+
+Underneath sits the [Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory)
+memory architecture, replacing the built-in auto-memory: small curated memory under
+hard caps, lexical search over full session history, and a background reviewer that
+proposes — never applies — what gets remembered.
 
 ## The four tiers
 
