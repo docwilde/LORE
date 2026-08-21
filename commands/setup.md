@@ -1,14 +1,48 @@
 ---
 description: Get lore working — run doctor, then fix each finding behind its own gate
-allowed-tools: Bash, Read, Edit
+allowed-tools: Bash, Read, Edit, AskUserQuestion
 ---
 
-Run `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" doctor` and the extra checks from `/lore:doctor` (permissions allowlist, unported auto-memory entries). Then fix what was found, **one change at a time, each behind its own confirmation** — show exactly what will change before changing it:
+Run `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" doctor` and the extra checks from `/lore:doctor` (permissions allowlist, unported auto-memory entries, unreviewed session backlog). Then fix what was found, **one change at a time, each behind its own confirmation** — show exactly what will change before changing it:
 
 1. **Built-in auto-memory still active** → add `"autoMemoryEnabled": false` to `~/.claude/settings.json` (Read it first; create the key without disturbing the rest; valid JSON after).
 2. **No permissions allowlist for the lore CLI** → add `"Bash(python3 */plugins/lore/bin/lore.py *)"` to `permissions.allow` in `~/.claude/settings.json`, so memory writes stop costing a prompt each.
 3. **Unported auto-memory entries** → read each `~/.claude/projects/<slug>/memory/*.md` for the current project, condense each into one dense declarative line, show the list with proposed scopes (user vs project), and on approval `lore memory add` each. Warn that cap errors mean consolidating before continuing.
 4. **Empty session index** → prime it: `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" index` (fast, incremental afterwards).
-5. **Model preferences** (optional, ask) → if the user wants different models per role, add `LORE_DERIVER_MODEL` / `LORE_DREAMER_MODEL` / `LORE_DIALECTIC_MODEL` to the `"env"` block of `~/.claude/settings.json`. Defaults: deriver haiku, dreamer sonnet, dialectic session model.
+5. **Unreviewed session backlog** → see below. Indexing only builds the search tier; every session that ended before lore was installed never fired `review`, so memory and the belief store stay empty until the backlog is reviewed once.
+6. **Model preferences** (optional, ask) → if the user wants different models per role, add `LORE_DERIVER_MODEL` / `LORE_DREAMER_MODEL` / `LORE_DIALECTIC_MODEL` to the `"env"` block of `~/.claude/settings.json`. Defaults: deriver haiku, dreamer sonnet, dialectic session model.
 
 Finish by re-running `doctor` and `status` and confirming everything is green. Remind the user that settings.json changes need a Claude Code restart, and the SessionStart injection appears from the next session on.
+
+## Step 5 — backfilling the session backlog
+
+`review` normally fires once, on SessionEnd. A backlog therefore stays invisible to it forever, which is why a fresh install shows a large session index next to empty memory and a belief store at `0 active / 0 total`.
+
+**Enumerate the backlog per project first.** Top-level transcripts only — the `subagents/` subdirectories are not sessions:
+
+```sh
+find ~/.claude/projects -maxdepth 2 -name '*.jsonl' \
+  | sed 's|.*/projects/||; s|/[^/]*$||' | sort | uniq -c | sort -rn
+```
+
+**Then present the list as a multi-select** (`AskUserQuestion`, `multiSelect: true`) so the user picks which projects and repos to review — never review all of them just because they are indexed. Most people have old scratch directories, one-off repos and other clients' work in `~/.claude/projects/`, and each of those spends tokens and competes for the same caps. Offer the current project on its own as one option, the two or three largest as another, and put the session count next to each so the cost is visible before the choice. **Nothing runs until they choose.**
+
+Say the two costs out loud before the gate:
+
+- **Tokens.** One deriver call per transcript, each on a digest of up to `DIGEST_TOTAL_CAP` chars from the newest `DIGEST_LAST_N` messages. Give the count for the selection.
+- **Caps, which are the real constraint.** Each session stages up to 5 memories, but `user` holds ~1375 chars and each `project` ~2200 — a handful of entries each. A backfill of any size produces a triage pile to curate down, not a filled memory. Beliefs are the part that scales: they have no cap, so the durable value of a backfill is a queryable belief store for `/lore:ask`, with memory promotions as the exception.
+
+Then, for each selected project, review its transcripts:
+
+```sh
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" review \
+  --transcript <path> --cwd <cwd> --foreground
+```
+
+Three rules the loop has to respect:
+
+- **Pass `--cwd`, and take it from the transcript, not the directory name.** The slug decides which project's memory the deriver is shown and which project a proposal is tagged to. Slugs are lossy — `project_slug` replaces every non-alphanumeric character with `-`, so a directory name cannot be turned back into a path. Read the real one out of the transcript instead: `grep -o '"cwd":"[^"]*"' <path> | head -1`.
+- **Run sequentially.** Each review is given the currently staged proposals and told not to repeat them, and dedupe is an exact match against that list. Parallel reviews cannot see each other's output and will stage the same fact several times.
+- **Report what was skipped.** Transcripts with fewer than `REVIEW_MIN_MESSAGES` user messages exit silently with status 0, so a quiet run is not the same as a reviewed one. Count them and say so.
+
+Finish with `lore status` for the new pending and belief counts, and send the user to `/lore:pending` — every proposal is still staged, and nothing has been written to memory.
