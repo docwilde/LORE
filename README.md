@@ -82,10 +82,13 @@ Nothing the background reviewer produces applies itself. The flow, end to end:
    `LORE_ROOT/pending/` (worker log in `LORE_ROOT/logs/`), and a desktop
    notification fires minutes after the session ends: *"2 proposal(s) staged —
    /lore:pending"* (auto-enabled when `notify-send` exists; `LORE_NOTIFY=0` off).
-2. **The next session opens with a notice — twice.** The hook emits a
-   `systemMessage` the harness displays directly ("lore: 2 pending proposal(s) —
-   /lore:pending to review"), guaranteed and model-independent; and the injected
-   snapshot additionally instructs the agent to bring it up early. `lore status`
+2. **Every session opens with the lore MOTD** — a harness-displayed status line:
+   `lore: 2 pending (1× skill update, 1× memory) — /lore:pending · +7 beliefs since
+   last start, 3 about you · memory 15% user / 19% project · 3 learned skill(s) ·
+   412 beliefs, 134 sessions indexed`. `LORE_MOTD=0` reduces it to the pending
+   notice alone (which is never suppressed). The MOTD is a hook `systemMessage`,
+   displayed by the harness itself — model-independent; the injected snapshot
+   additionally instructs the agent to bring pending items up early. `lore status`
    remains the manual check.
 3. **You review.** `/lore:pending` lists every proposal with its origin session;
    the agent adds a keep/reject/merge judgment per item but is explicitly forbidden
@@ -192,6 +195,7 @@ Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
 | `LORE_REVIEW_MIN_MESSAGES` | 3 | skip review below this many user messages |
 | `LORE_CLAUDE_BIN` | `which claude` | claude binary for the worker |
 | `LORE_SKILLS_DIR` | `~/.claude/skills` | where approved skills install |
+| `LORE_MOTD` | `1` | session-start status line (pending, new beliefs, memory %, skills, index); `0` = pending notice only |
 | `LORE_NOTIFY` | auto | desktop notification when proposals are staged (`notify-send`); `0` disables |
 | `LORE_SKIP` | unset | set to any value to no-op all hooks (the worker sets it) |
 
@@ -207,6 +211,11 @@ Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
   sonnet call when new beliefs need reconciling.
 - The name: lore is accumulated knowledge of a craft — and, coincidentally, Data's
   brother in TNG. The logo's amber is a positronic wink at that.
+- **Seeing the background work:** `/lore:review` runs as a harness-tracked
+  background task (visible in the TUI, completion notified in-session). The
+  SessionEnd worker necessarily runs after the TUI is gone — `lore status`
+  lists live workers, and `lore statusline` prints a one-segment status
+  ("lore ⟳ reviewing" / "lore ✉ 2 pending") to embed in a custom statusline.
 - **License:** [PolyForm Noncommercial 1.0.0](LICENSE) — free for personal,
   research and other noncommercial use; commercial use requires the author's
   consent (a separate license — get in touch).

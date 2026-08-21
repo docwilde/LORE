@@ -799,6 +799,61 @@ def build_context(cwd: str) -> str:
     return "\n".join(parts)
 
 
+def build_motd(cwd: str) -> str | None:
+    """One harness-displayed line per session start: what waits for review, what
+    lore learned since last time, how full memory is. LORE_MOTD=0 reduces it to
+    the pending notice alone; the pending notice itself is never suppressed."""
+    slug = project_slug(cwd)
+    parts = []
+
+    pending = [item for _, item in load_pending()]
+    if pending:
+        kinds: dict[str, int] = {}
+        for item in pending:
+            key = item.get("kind", "?")
+            if key == "skill":
+                key = f"skill {item.get('action', 'add')}"
+            kinds[key] = kinds.get(key, 0) + 1
+        detail = ", ".join(f"{n}× {k}" for k, n in sorted(kinds.items()))
+        parts.append(f"{len(pending)} pending ({detail}) — /lore:pending")
+
+    if os.environ.get("LORE_MOTD", "1") == "0":
+        return f"lore: {parts[0]}" if parts else None
+
+    conn = db_connect()
+    state_path = ROOT / "motd_state.json"
+    try:
+        last_seen = json.loads(state_path.read_text(encoding="utf-8")).get("max_belief_id", 0)
+    except (OSError, json.JSONDecodeError):
+        last_seen = 0
+    max_id = conn.execute("SELECT coalesce(max(id), 0) FROM beliefs").fetchone()[0]
+    if max_id > last_seen:
+        new_user = conn.execute(
+            "SELECT count(*) FROM beliefs WHERE id > ? AND subject = 'user'", (last_seen,)
+        ).fetchone()[0]
+        new_total = conn.execute(
+            "SELECT count(*) FROM beliefs WHERE id > ?", (last_seen,)
+        ).fetchone()[0]
+        about = f", {new_user} about you" if new_user else ""
+        parts.append(f"+{new_total} beliefs since last start{about}")
+    state_path.write_text(json.dumps({"max_belief_id": max_id}), encoding="utf-8")
+
+    u = len(render_entries(read_entries(memory_path("user", slug))))
+    p = len(render_entries(read_entries(memory_path("project", slug))))
+    parts.append(f"memory {100 * u // USER_CAP}% user / {100 * p // MEMORY_CAP}% project")
+
+    usage = load_skill_usage()
+    learned = learned_skills()
+    if learned:
+        failing = sum(1 for n in learned if usage.get(n, {}).get("last_outcome") == "failure")
+        parts.append(f"{len(learned)} learned skill(s)" + (f", {failing} failing" if failing else ""))
+
+    n_sessions = conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
+    n_beliefs = conn.execute("SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
+    parts.append(f"{n_beliefs} beliefs, {n_sessions} sessions indexed")
+    return "lore: " + " · ".join(parts)
+
+
 def cmd_inject(args) -> int:
     if os.environ.get("LORE_SKIP"):
         return 0
@@ -810,12 +865,12 @@ def cmd_inject(args) -> int:
             "additionalContext": build_context(cwd),
         }
     }
-    # systemMessage is harness-displayed — the pending notice reaches the user
-    # even when the model never surfaces the snapshot's version of it.
-    pdir = ROOT / "pending"
-    n_pending = len(list(pdir.glob("*.json"))) if pdir.exists() else 0
-    if n_pending:
-        out["systemMessage"] = f"lore: {n_pending} pending proposal(s) — /lore:pending to review"
+    # systemMessage is harness-displayed — the MOTD (and the pending notice in
+    # particular) reaches the user even when the model never surfaces the
+    # snapshot's version of it.
+    motd = build_motd(cwd)
+    if motd:
+        out["systemMessage"] = motd
     print(json.dumps(out))
     return 0
 
@@ -1038,6 +1093,12 @@ def cmd_review(args) -> int:
     tmp.mkdir(parents=True, exist_ok=True)
     jobfile = tmp / f"review-{job['session_id']}.json"
     jobfile.write_text(json.dumps(job), encoding="utf-8")
+    if args.foreground:
+        # Run the worker inline. Under `Bash(..., run_in_background)` this makes
+        # a mid-session review a harness-tracked task: visible in the TUI task
+        # list, completion notification delivered in-session.
+        os.environ["LORE_SKIP"] = "1"
+        return worker_run(jobfile)
     logdir = ROOT / "logs"
     logdir.mkdir(parents=True, exist_ok=True)
     log = open(logdir / f"review-{job['session_id']}.log", "a")
@@ -1095,40 +1156,84 @@ def extract_json(text: str) -> dict | None:
     return None
 
 
-def cmd_worker(args) -> int:
-    jobfile = Path(args.jobfile)
+def worker_dir() -> Path:
+    return ROOT / "worker"
+
+
+def live_workers() -> list[dict]:
+    """Worker state files whose process is still alive; stale files are removed."""
+    out = []
+    if not worker_dir().exists():
+        return out
+    for f in worker_dir().glob("*.json"):
+        try:
+            state = json.loads(f.read_text(encoding="utf-8"))
+            os.kill(int(state["pid"]), 0)
+            out.append(state)
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            f.unlink(missing_ok=True)
+    return out
+
+
+def worker_run(jobfile: Path) -> int:
     job = json.loads(jobfile.read_text(encoding="utf-8"))
     claude = find_claude()
     if not claude:
         print("lore worker: no claude binary found (set LORE_CLAUDE_BIN).")
         return 1
-    print(f"[{utcnow()}] review start session={job['session_id']} deriver={DERIVER_MODEL}")
+    worker_dir().mkdir(parents=True, exist_ok=True)
+    state_file = worker_dir() / f"{job['session_id']}.json"
+    state_file.write_text(json.dumps(
+        {"pid": os.getpid(), "session_id": job["session_id"],
+         "project": job["project"], "started": utcnow()}), encoding="utf-8")
     try:
-        proc = subprocess.run(
-            [claude, "--bare", "-p", job["prompt"], "--model", DERIVER_MODEL,
-             "--allowedTools", ""],
-            capture_output=True, text=True, timeout=600,
-        )
-    except (subprocess.TimeoutExpired, OSError) as e:
-        print(f"claude run failed: {e}")
-        return 1
-    if proc.returncode != 0:
-        print(f"claude exited {proc.returncode}: {proc.stderr[-2000:]}")
-        return 1
-    data = extract_json(proc.stdout)
-    if data is None:
-        print(f"no JSON in output: {proc.stdout[-2000:]}")
-        return 1
-    staged = stage_proposals(data, job["project"], job["session_id"])
-    derived = derive_conclusions(data, job["project"], job["session_id"])
-    outcomes = record_skill_outcomes(data)
-    print(f"[{utcnow()}] staged {staged} proposal(s), derived {derived} belief(s),"
-          f" recorded {outcomes} skill outcome(s)")
-    notify_staged(staged)
-    if derived:
-        conn = db_connect()
-        dream_run(conn, job["project"])
-    jobfile.unlink(missing_ok=True)
+        print(f"[{utcnow()}] review start session={job['session_id']} deriver={DERIVER_MODEL}")
+        try:
+            proc = subprocess.run(
+                [claude, "--bare", "-p", job["prompt"], "--model", DERIVER_MODEL,
+                 "--allowedTools", ""],
+                capture_output=True, text=True, timeout=600,
+                env={**os.environ, "LORE_SKIP": "1"},
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            print(f"claude run failed: {e}")
+            return 1
+        if proc.returncode != 0:
+            print(f"claude exited {proc.returncode}: {proc.stderr[-2000:]}")
+            return 1
+        data = extract_json(proc.stdout)
+        if data is None:
+            print(f"no JSON in output: {proc.stdout[-2000:]}")
+            return 1
+        staged = stage_proposals(data, job["project"], job["session_id"])
+        derived = derive_conclusions(data, job["project"], job["session_id"])
+        outcomes = record_skill_outcomes(data)
+        print(f"[{utcnow()}] staged {staged} proposal(s), derived {derived} belief(s),"
+              f" recorded {outcomes} skill outcome(s)")
+        notify_staged(staged)
+        if derived:
+            conn = db_connect()
+            dream_run(conn, job["project"])
+        jobfile.unlink(missing_ok=True)
+        return 0
+    finally:
+        state_file.unlink(missing_ok=True)
+
+
+def cmd_worker(args) -> int:
+    return worker_run(Path(args.jobfile))
+
+
+def cmd_statusline(args) -> int:
+    """One short segment for a custom statusline. Cheap: file checks only, no db."""
+    workers = live_workers()
+    if workers:
+        print(f"lore ⟳ reviewing ({len(workers)})")
+        return 0
+    pdir = ROOT / "pending"
+    n = len(list(pdir.glob("*.json"))) if pdir.exists() else 0
+    if n:
+        print(f"lore ✉ {n} pending")
     return 0
 
 
@@ -1339,6 +1444,8 @@ def cmd_status(args) -> int:
     print(f"user memory:     {len(user_entries)} entries, {usage_line(user_entries, USER_CAP)}")
     print(f"project memory:  {len(proj_entries)} entries, {usage_line(proj_entries, MEMORY_CAP)}  [{slug}]")
     print(f"pending:         {len(load_pending())}")
+    for w in live_workers():
+        print(f"worker:          reviewing session {w['session_id']} since {w['started']} (pid {w['pid']})")
     conn = db_connect()
     n_sessions = conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
     n_msgs = conn.execute("SELECT count(*) FROM msg").fetchone()[0]
@@ -1459,6 +1566,8 @@ def main() -> int:
     sp.add_argument("--transcript")
     sp.add_argument("--cwd")
     sp.add_argument("--latest", action="store_true", help="review newest transcript of this project")
+    sp.add_argument("--foreground", action="store_true",
+                    help="run the worker inline (for harness-tracked background runs)")
     sp.add_argument("--dry-run", action="store_true", help="print the extraction prompt and exit")
     sp.set_defaults(fn=cmd_review)
 
@@ -1518,6 +1627,9 @@ def main() -> int:
     sp = sub.add_parser("status", help="memory usage, index and pending counts")
     sp.add_argument("--cwd")
     sp.set_defaults(fn=cmd_status)
+
+    sp = sub.add_parser("statusline", help="one short segment for a custom statusline")
+    sp.set_defaults(fn=cmd_statusline)
 
     sp = sub.add_parser("config", help="effective configuration (roles, models, caps, paths)")
     sp.add_argument("--json", action="store_true")
