@@ -1367,11 +1367,25 @@ def stage_proposals(data: dict, slug: str, session_id: str) -> int:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
 
     def put(item: dict) -> None:
+        """Claim the first free id, atomically.
+
+        The stamp only resolves to the second and the counter restarts at 00 on
+        every call, so two workers finishing within the same second would both
+        name their first proposal `<stamp>-00.json` and the later write would
+        replace the earlier one — losing a proposal with no error to show for
+        it. Creating with "x" makes the claim atomic, so a taken id is a
+        FileExistsError to step over rather than a file to overwrite.
+        """
         nonlocal staged
         item |= {"created": utcnow(), "project": slug, "session_id": session_id}
-        (pdir / f"{stamp}-{staged:02d}.json").write_text(
-            json.dumps(item, indent=2), encoding="utf-8"
-        )
+        n = staged
+        while True:
+            try:
+                with open(pdir / f"{stamp}-{n:02d}.json", "x", encoding="utf-8") as fh:
+                    json.dump(item, fh, indent=2)
+                break
+            except FileExistsError:
+                n += 1
         staged += 1
 
     for m in (data.get("memory") or [])[:5]:
