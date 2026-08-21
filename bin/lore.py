@@ -659,6 +659,42 @@ def dream_candidates(conn: sqlite3.Connection, cap: int = 12) -> list[tuple]:
     return [(a, b) for _, a, b in pairs[:cap]]
 
 
+NOT_LOGGED_IN = "not logged in"
+
+
+def run_claude(claude: str, prompt: str, model: str, role: str
+               ) -> subprocess.CompletedProcess[str]:
+    """One headless model call, `--bare` first and without it on an auth refusal.
+
+    `--bare` is what we want: it skips hooks, LSP and plugins, so a call made
+    from inside a SessionEnd hook cannot set another one going. But it also
+    skips loading the OAuth credentials in ~/.claude/.credentials.json, so on a
+    machine authenticated by subscription rather than by ANTHROPIC_API_KEY every
+    bare call exits 1 with "Not logged in" (measured on Claude Code 2.1.238).
+    Both roles run detached and log where nobody looks, so the symptom is a
+    growing session index beside an empty belief store, not an error anyone sees.
+
+    Retrying costs nothing: the refusal happens before the model is reached, so
+    no tokens are spent on it. LORE_SKIP=1 still guards our own re-entry in the
+    fallback, where the SessionStart hooks do run.
+    """
+    def call(bare: bool) -> subprocess.CompletedProcess[str]:
+        cmd = [claude]
+        if bare:
+            cmd.append("--bare")
+        cmd += ["-p", prompt, "--model", model, "--allowedTools", ""]
+        return subprocess.run(
+            cmd, capture_output=True, text=True, timeout=600,
+            env={**os.environ, "LORE_SKIP": "1"},
+        )
+
+    proc = call(bare=True)
+    if proc.returncode != 0 and NOT_LOGGED_IN in (proc.stdout + proc.stderr).lower():
+        print(f"{role}: --bare cannot read the OAuth credentials, retrying without it")
+        proc = call(bare=False)
+    return proc
+
+
 def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int:
     pairs = dream_candidates(conn)
     all_active = conn.execute(
@@ -680,11 +716,7 @@ def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int
         print("no claude binary (set LORE_CLAUDE_BIN).", file=sys.stderr)
         return 1
     try:
-        proc = subprocess.run(
-            [claude, "--bare", "-p", prompt, "--model", DREAMER_MODEL, "--allowedTools", ""],
-            capture_output=True, text=True, timeout=600,
-            env={**os.environ, "LORE_SKIP": "1"},
-        )
+        proc = run_claude(claude, prompt, DREAMER_MODEL, "dreamer")
     except (subprocess.TimeoutExpired, OSError) as e:
         print(f"claude run failed: {e}", file=sys.stderr)
         return 1
@@ -1227,12 +1259,7 @@ def worker_run(jobfile: Path) -> int:
     try:
         print(f"[{utcnow()}] review start session={job['session_id']} deriver={DERIVER_MODEL}")
         try:
-            proc = subprocess.run(
-                [claude, "--bare", "-p", job["prompt"], "--model", DERIVER_MODEL,
-                 "--allowedTools", ""],
-                capture_output=True, text=True, timeout=600,
-                env={**os.environ, "LORE_SKIP": "1"},
-            )
+            proc = run_claude(claude, job["prompt"], DERIVER_MODEL, "deriver")
         except (subprocess.TimeoutExpired, OSError) as e:
             print(f"claude run failed: {e}")
             return 1
