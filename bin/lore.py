@@ -810,6 +810,12 @@ def cmd_inject(args) -> int:
             "additionalContext": build_context(cwd),
         }
     }
+    # systemMessage is harness-displayed — the pending notice reaches the user
+    # even when the model never surfaces the snapshot's version of it.
+    pdir = ROOT / "pending"
+    n_pending = len(list(pdir.glob("*.json"))) if pdir.exists() else 0
+    if n_pending:
+        out["systemMessage"] = f"lore: {n_pending} pending proposal(s) — /lore:pending to review"
     print(json.dumps(out))
     return 0
 
@@ -1048,6 +1054,25 @@ def find_claude() -> str | None:
     return os.environ.get("LORE_CLAUDE_BIN") or shutil.which("claude")
 
 
+def notify_staged(staged: int) -> None:
+    """Desktop notification when the worker stages proposals, so the user hears
+    about them minutes after the session ends instead of at the next start.
+    Auto-enabled when notify-send exists; LORE_NOTIFY=0 turns it off."""
+    if not staged or os.environ.get("LORE_NOTIFY", "auto") == "0":
+        return
+    cmd = shutil.which("notify-send")
+    if not cmd:
+        return
+    try:
+        subprocess.run(
+            [cmd, "-a", "lore", "lore memory review",
+             f"{staged} proposal(s) staged — /lore:pending"],
+            timeout=10, check=False, capture_output=True,
+        )
+    except OSError:
+        pass
+
+
 def extract_json(text: str) -> dict | None:
     text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE)
     start = text.find("{")
@@ -1099,6 +1124,7 @@ def cmd_worker(args) -> int:
     outcomes = record_skill_outcomes(data)
     print(f"[{utcnow()}] staged {staged} proposal(s), derived {derived} belief(s),"
           f" recorded {outcomes} skill outcome(s)")
+    notify_staged(staged)
     if derived:
         conn = db_connect()
         dream_run(conn, job["project"])
