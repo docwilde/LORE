@@ -883,7 +883,9 @@ def render_banner(stats: list[str]) -> str:
     """The wordmark, then the mascot reading its tome, thinking the stats."""
     w = max(len(s) for s in stats)
     ind = " " * 16
-    lines = list(BANNER_WORDMARK) + [""]
+    # leading blank line: the TUI prints its own prefix on the first line,
+    # which would shift the wordmark's top row
+    lines = [""] + list(BANNER_WORDMARK) + [""]
     lines.append(ind + "╭─" + "─" * w + "─╮")
     lines += [ind + "│ " + s.ljust(w) + " │" for s in stats]
     lines.append(ind + "╰─" + "─" * w + "─╯")
