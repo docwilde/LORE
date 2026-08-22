@@ -47,6 +47,14 @@ DREAMER_MODEL = os.environ.get("LORE_DREAMER_MODEL", REVIEW_MODEL or "sonnet")
 # the batch — so N sessions pay for N increasingly large reconciliations to reach a
 # state one final call would produce. Set for a batch, then run `lore dream` once.
 DEFER_DREAM = os.environ.get("LORE_DEFER_DREAM", "") not in ("", "0")
+# DORMANT TIER (2026-08-22): the belief store is unbounded and nothing retires
+# a belief, so claims that stopped being asked about sit in every ask/dream
+# working set forever. Active beliefs untouched for this many days (and not
+# near-certain — those earned permanence) drop to status 'dormant': still in
+# the DB, out of the evidence pack and out of reconciliation. Re-include per
+# call with `belief search --include-dormant` or LORE_INCLUDE_DORMANT=1.
+BELIEF_DORMANT_DAYS = int(os.environ.get("LORE_BELIEF_DORMANT_DAYS", "45"))
+INCLUDE_DORMANT = os.environ.get("LORE_INCLUDE_DORMANT", "") not in ("", "0")
 DIALECTIC_MODEL = os.environ.get("LORE_DIALECTIC_MODEL", "")
 REVIEW_MIN_MESSAGES = int(os.environ.get("LORE_REVIEW_MIN_MESSAGES", "3"))
 SKILLS_DIR = Path(os.environ.get("LORE_SKILLS_DIR", str(Path.home() / ".claude" / "skills")))
@@ -206,8 +214,19 @@ def db_connect() -> sqlite3.Connection:
         "CREATE TABLE IF NOT EXISTS beliefs("
         "id INTEGER PRIMARY KEY, subject TEXT NOT NULL, claim TEXT NOT NULL,"
         "confidence REAL NOT NULL, status TEXT NOT NULL DEFAULT 'active',"
-        "superseded_by INTEGER, resolution TEXT, created TEXT, updated TEXT)"
+        "superseded_by INTEGER, resolution TEXT, created TEXT, updated TEXT,"
+        "last_referenced TEXT)"
     )
+    # last_referenced migration for DBs created before the dormant tier
+    # (2026-08-22). On a fresh DB the CREATE above already carries the column
+    # and the ALTER lands in the except; on an old DB the ALTER adds it and
+    # the backfill from `updated` starts every belief's dormancy clock at its
+    # last real touch instead of at NULL (= instantly sweepable).
+    try:
+        conn.execute("ALTER TABLE beliefs ADD COLUMN last_referenced TEXT")
+        conn.execute("UPDATE beliefs SET last_referenced = updated WHERE last_referenced IS NULL")
+    except sqlite3.OperationalError:
+        pass  # column already present
     conn.execute(
         "CREATE TABLE IF NOT EXISTS belief_evidence("
         "belief_id INTEGER, session_id TEXT, project TEXT, note TEXT, created TEXT)"
@@ -227,6 +246,64 @@ BOILERPLATE = re.compile(
     r"|<task-notification>.*?</task-notification>",
     re.DOTALL,
 )
+
+# SECRET SCRUB (2026-08-22): the transcript already carries any secret the user
+# pasted — nothing here can unpaste it. What lore controls is re-egress: the
+# deriver/dreamer prompts assembled from digests (a pasted key would travel to
+# the model again), and the on-disk FTS index, which otherwise makes every past
+# paste greppable forever. Scrub at both ingestion points so the credential
+# class never leaves the transcript it arrived in. Ordering is load-bearing:
+# PEM before the base64 run (a key body IS one long base64 run), sk-or-v1
+# before the generic sk- prefix (which would eat it under the wrong label),
+# hex before base64 (hex is a subset of the base64 alphabet). The 40-hex rule
+# eats full-length git SHAs — a deliberate trade: a SHA is re-derivable from
+# the repo, a leaked token is not.
+SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("pem", re.compile(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", re.DOTALL)),
+    ("openrouter", re.compile(r"sk-or-v1-[a-f0-9]+")),
+    ("api-key", re.compile(r"sk-[A-Za-z0-9-]{16,}")),
+    ("aws", re.compile(r"AKIA[A-Z0-9]{16}")),
+    ("github", re.compile(r"gh[po]_[A-Za-z0-9]{36}")),
+    ("cloudflare", re.compile(r"cfat_[A-Za-z0-9]{20,}")),
+    ("bearer", re.compile(r"Bearer\s+[A-Za-z0-9._~+/-]{20,}")),
+]
+# Key name kept, value redacted — "GITHUB_TOKEN=[REDACTED:value]" still tells a
+# future search WHICH credential the session dealt with. \w* prefix because the
+# interesting names are compounds (GITHUB_TOKEN, DB_PASSWORD) where \b(token)
+# alone never fires: "_" is a word character, so there is no boundary before it.
+KV_SECRET = re.compile(
+    r"\b(\w*(?:password|passwd|secret|token|api_key|apikey))(\s*[=:]\s*)(\S{8,})",
+    re.IGNORECASE,
+)
+HEX_RUN = re.compile(r"\b[a-fA-F0-9]{40,}\b")
+BASE64_RUN = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])")
+
+
+def _base64_sub(m: re.Match) -> str:
+    run = m.group(0)
+    # A long absolute path is a 40+ run over the same alphabet ("/" is base64).
+    # Digests are full of them via Bash/Read tool lines; redacting paths would
+    # gut the index's main value. Slashes with neither "+" nor "=" anywhere in
+    # the run is path shape, not credential shape — keep it.
+    if "/" in run and "+" not in run and "=" not in run:
+        return run
+    return "[REDACTED:base64]"
+
+
+def scrub_secrets(text: str) -> str:
+    """Credential-shaped substrings replaced with [REDACTED:<kind>].
+
+    Applied per message at both ingestion points (build_digest, index_sessions)
+    rather than once at display: a secret that never lands in state.db or a
+    worker prompt cannot leak from either, whatever new consumer is added later.
+    False positives are accepted by design — a mangled hex string in a digest
+    costs a worse review; a replayed credential costs a rotation.
+    """
+    for kind, pat in SECRET_PATTERNS:
+        text = pat.sub(f"[REDACTED:{kind}]", text)
+    text = KV_SECRET.sub(r"\1\2[REDACTED:value]", text)
+    text = HEX_RUN.sub("[REDACTED:hex]", text)
+    return BASE64_RUN.sub(_base64_sub, text)
 
 
 def extract_text(content) -> str:
@@ -342,9 +419,11 @@ def index_sessions(conn: sqlite3.Connection, force: bool = False) -> tuple[int, 
         proj = jsonl.parent.name
         meta, messages = parse_transcript(jsonl)
         conn.execute("DELETE FROM msg WHERE session_id = ?", (session_id,))
+        # scrub before the row is written, not before it is shown: the index
+        # lives on disk indefinitely and is greppable by anything.
         conn.executemany(
             "INSERT INTO msg(session_id, project, ts, role, content) VALUES(?,?,?,?,?)",
-            [(session_id, proj, ts, role, text) for ts, role, text in messages],
+            [(session_id, proj, ts, role, scrub_secrets(text)) for ts, role, text in messages],
         )
         conn.execute(
             "INSERT OR REPLACE INTO sessions VALUES(?,?,?,?,?,?,?)",
@@ -362,18 +441,62 @@ def fts_expr(query: str, op: str = " ") -> str:
     return op.join('"{}"'.format(t.replace('"', '""')) for t in tokens)
 
 
+# CODE-TOKEN FALLBACK (2026-08-22): unicode61+porter tokenizes for prose —
+# "resolve_workers" indexes as resolve + worker, "state.db" as state + db,
+# "getUserId" as one stemmed blob — so an FTS MATCH on the exact identifier
+# ranks by scattered word co-occurrence instead of the string the user typed.
+# Identifiers are precisely what a session index over coding transcripts is
+# asked for most, so a query that looks like code also gets an exact-substring
+# LIKE scan over the raw message content, merged after the FTS hits.
+CODE_TOKEN = re.compile(r"_|\w\.\w|[a-z][A-Z]")
+
+
+def like_scan(conn: sqlite3.Connection, query: str, scope: str | None, cap: int) -> list[tuple]:
+    """Exact-substring hits: (rowid, session_id, project, ts, role, snippet).
+
+    "%" and "_" are LIKE wildcards and "_" is the very character that routes a
+    query here, so the needle is escaped or every underscore would match any
+    byte and the fallback would be no more exact than the FTS it backstops.
+    """
+    pat = "%" + query.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_") + "%"
+    sql = ("SELECT rowid, session_id, project, ts, role, content FROM msg"
+           " WHERE content LIKE ? ESCAPE '\\'")
+    params: list = [pat]
+    if scope:
+        sql += " AND project = ?"
+        params.append(scope)
+    sql += " LIMIT ?"
+    params.append(cap)
+    out = []
+    for rowid, sid, proj, ts, role, content in conn.execute(sql, params):
+        i = content.lower().find(query.lower())
+        if i < 0:  # LIKE matched case-insensitively on bytes find missed; unlikely
+            i, span = 0, 0
+        else:
+            span = len(query)
+        lo, hi = max(0, i - 60), min(len(content), i + span + 60)
+        snip = (("…" if lo else "") + content[lo:i] + "[" + content[i:i + span] + "]"
+                + content[i + span:hi] + ("…" if hi < len(content) else ""))
+        out.append((rowid, sid, proj, ts, role, snip))
+    return out
+
+
 def cmd_search(args) -> int:
     conn = db_connect()
     index_sessions(conn)
     slug = project_slug(args.cwd or os.getcwd())
     scopes = [None] if args.all else [slug, None]  # project first, then widen
+    exprs = [e for e in dict.fromkeys((fts_expr(args.query), fts_expr(args.query, " OR "))) if e]
+    if not exprs:
+        print("empty query", file=sys.stderr)
+        return 1
+    code_query = bool(CODE_TOKEN.search(args.query))
+    cap = args.limit * 4
     for scope in scopes:
-        for expr in (fts_expr(args.query), fts_expr(args.query, " OR ")):
-            if not expr:
-                print("empty query", file=sys.stderr)
-                return 1
+        fts_rows = []
+        for expr in exprs:
             sql = (
-                "SELECT m.session_id, m.project, m.ts, m.role,"
+                "SELECT m.rowid, m.session_id, m.project, m.ts, m.role,"
                 " snippet(msg, 4, '[', ']', '…', 16), bm25(msg)"
                 " FROM msg m WHERE msg MATCH ?"
             )
@@ -382,17 +505,32 @@ def cmd_search(args) -> int:
                 sql += " AND m.project = ?"
                 params.append(scope)
             sql += " ORDER BY bm25(msg) LIMIT ?"
-            params.append(args.limit * 4)
+            params.append(cap)
             try:
-                rows = conn.execute(sql, params).fetchall()
+                fts_rows = conn.execute(sql, params).fetchall()
             except sqlite3.OperationalError as e:
                 print(f"query error: {e}", file=sys.stderr)
                 return 1
-            if rows:
-                if scope is None and not args.all and scopes[0] is not None:
-                    print(f"(no hits in current project — showing all projects)\n")
-                print_hits(conn, rows, args.limit)
-                return 0
+            if fts_rows:
+                break
+        seen = {r[0] for r in fts_rows}
+        rows = [r[1:] for r in fts_rows]
+        if code_query:
+            # LIKE hits rank strictly after every FTS hit (bm25 sorts
+            # ascending): recall repair, never a reordering of what FTS found.
+            base = (max(r[6] for r in fts_rows) + 1.0) if fts_rows else 0.0
+            for k, (rowid, sid, proj, ts, role, snip) in enumerate(
+                    like_scan(conn, args.query, scope, cap)):
+                if rowid in seen:
+                    continue
+                seen.add(rowid)
+                rows.append((sid, proj, ts, role, snip, base + k))
+        rows = rows[:cap]
+        if rows:
+            if scope is None and not args.all and scopes[0] is not None:
+                print("(no hits in current project — showing all projects)\n")
+            print_hits(conn, rows, args.limit)
+            return 0
     print("no hits.")
     return 0
 
@@ -535,14 +673,17 @@ def cmd_belief(args) -> int:
         return 0
     if args.bcmd == "search":
         rows = []
+        statuses = ("('active','dormant')"
+                    if getattr(args, "include_dormant", False) or INCLUDE_DORMANT
+                    else "('active')")
         for expr in (fts_expr(args.query), fts_expr(args.query, " OR ")):
             if not expr:
                 print("empty query", file=sys.stderr)
                 return 1
             rows = conn.execute(
                 f"SELECT {BELIEF_COLS_B} FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id"
-                " WHERE belief_fts MATCH ? AND b.status = 'active' ORDER BY bm25(belief_fts)"
-                " LIMIT ?",
+                f" WHERE belief_fts MATCH ? AND b.status IN {statuses}"
+                " ORDER BY bm25(belief_fts) LIMIT ?",
                 (expr, args.limit),
             ).fetchall()
             if rows:
@@ -579,14 +720,27 @@ def cmd_ask(args) -> int:
         print("empty question", file=sys.stderr)
         return 1
     print(f"## Beliefs matching: {args.question}")
+    # "conf" is what the deriver asserted at extraction time, calibrated
+    # against nothing — the evidence count on each line is the honest signal.
+    print("(conf = deriver-claimed confidence, uncalibrated; weigh the evidence"
+          " count, which counts independent derivations, not verifications)")
+    statuses = "('active','dormant')" if INCLUDE_DORMANT else "('active')"
     rows = conn.execute(
         f"SELECT {BELIEF_COLS_B} FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id"
-        " WHERE belief_fts MATCH ? AND b.status = 'active' ORDER BY bm25(belief_fts) LIMIT 12",
+        f" WHERE belief_fts MATCH ? AND b.status IN {statuses}"
+        " ORDER BY bm25(belief_fts) LIMIT 12",
         (expr,),
     ).fetchall()
     for row in rows:
         print(format_belief(conn, row))
-    if not rows:
+    if rows:
+        # returned = referenced: the stamp is what keeps a belief that still
+        # answers questions out of the dormant sweep.
+        now = utcnow()
+        conn.executemany("UPDATE beliefs SET last_referenced = ? WHERE id = ?",
+                         [(now, row[0]) for row in rows])
+        conn.commit()
+    else:
         print("(none)")
     print("\n## Curated memory")
     slug = project_slug(args.cwd or os.getcwd())
@@ -711,7 +865,33 @@ def run_claude(claude: str, prompt: str, model: str, role: str
     return proc
 
 
+def dormant_sweep(conn: sqlite3.Connection, days: int = BELIEF_DORMANT_DAYS) -> int:
+    """Move stale active beliefs to 'dormant'; returns how many moved.
+
+    Runs inside dream_run, before reconciliation, so a belief going dormant
+    leaves the candidate set and the prompt in the same pass. confidence >=
+    0.95 is exempt: near-certainty was earned through reinforcement and should
+    not age out just because nobody asked. Timestamps are the ISO-Z strings
+    utcnow() writes; sqlite's datetime('now', '-N day') renders with a space
+    where ours has a 'T', which only matters when the date parts are equal —
+    a boundary-day belief goes dormant one sweep late, never early.
+    """
+    cur = conn.execute(
+        "UPDATE beliefs SET status = 'dormant', updated = ?"
+        " WHERE status = 'active' AND confidence < 0.95"
+        " AND coalesce(last_referenced, updated) < datetime('now', ?)",
+        (utcnow(), f"-{days} day"),
+    )
+    return cur.rowcount
+
+
 def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int:
+    if not dry_run:
+        slept = dormant_sweep(conn)
+        if slept:
+            conn.commit()
+            print(f"{slept} belief(s) went dormant (untouched > {BELIEF_DORMANT_DAYS}d,"
+                  " conf < 0.95) — re-include with --include-dormant")
     pairs = dream_candidates(conn)
     all_active = conn.execute(
         f"SELECT {BELIEF_COLS} FROM beliefs WHERE status = 'active'"
@@ -1187,7 +1367,9 @@ DIGEST_TAGS = {"user": "U", "assistant": "A", "tool": "T", "toolerr": "E"}
 def build_digest(messages: list[tuple[str, str, str]]) -> str:
     lines = []
     for _, role, text in messages[-DIGEST_LAST_N:]:
-        lines.append(f"{DIGEST_TAGS.get(role, '?')}: {one_line(text)[:DIGEST_MSG_TRUNC]}")
+        # scrub before truncation: a secret straddling the cut would otherwise
+        # survive as a partial (and still rotatable) prefix in the deriver call.
+        lines.append(f"{DIGEST_TAGS.get(role, '?')}: {one_line(scrub_secrets(text))[:DIGEST_MSG_TRUNC]}")
     digest = "\n".join(lines)
     return digest[-DIGEST_TOTAL_CAP:]
 
@@ -2074,8 +2256,9 @@ def cmd_status(args) -> int:
     n_msgs = conn.execute("SELECT count(*) FROM msg").fetchone()[0]
     print(f"session index:   {n_sessions} sessions, {n_msgs} messages")
     n_active = conn.execute("SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
+    n_dormant = conn.execute("SELECT count(*) FROM beliefs WHERE status = 'dormant'").fetchone()[0]
     n_total = conn.execute("SELECT count(*) FROM beliefs").fetchone()[0]
-    print(f"belief store:    {n_active} active / {n_total} total")
+    print(f"belief store:    {n_active} active / {n_dormant} dormant / {n_total} total")
     print(f"models:          deriver={DERIVER_MODEL} dreamer={DREAMER_MODEL}"
           f" dialectic={DIALECTIC_MODEL or '(session default)'}"
           f"  (claude: {find_claude() or 'NOT FOUND'})")
@@ -2101,14 +2284,17 @@ def cmd_motd(args) -> int:
     conn = db_connect()
     n_active = conn.execute(
         "SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
+    n_dormant = conn.execute(
+        "SELECT count(*) FROM beliefs WHERE status = 'dormant'").fetchone()[0]
+    n_total = conn.execute("SELECT count(*) FROM beliefs").fetchone()[0]
     d1 = conn.execute(
         "SELECT count(*) FROM beliefs WHERE created >= datetime('now', '-1 day')"
     ).fetchone()[0]
     d7 = conn.execute(
         "SELECT count(*) FROM beliefs WHERE created >= datetime('now', '-7 day')"
     ).fetchone()[0]
-    print(f"beliefs {n_active} active · +{d1} last 24h · +{d7} last 7d · "
-          f"pending {n_pending}")
+    print(f"beliefs {n_active} active / {n_dormant} dormant / {n_total} total · "
+          f"+{d1} last 24h · +{d7} last 7d · pending {n_pending}")
     rows = conn.execute(
         "SELECT subject, claim, confidence FROM beliefs WHERE status='active' "
         "ORDER BY created DESC LIMIT 5").fetchall()
@@ -2183,6 +2369,163 @@ def cmd_doctor(args) -> int:
               ' next session. Set LORE_REFRESH_SECS (e.g. "1800") in the "env" block of'
               " ~/.claude/settings.json to re-inject it sooner.")
     return 0 if ok else 1
+
+
+# ---------------------------------------------------------------- teardown / reset
+
+def render_export(scope: str, slug: str, entries: list[str]) -> str:
+    """One curated scope file in the built-in auto-memory topic-file shape:
+    frontmatter (name, description, metadata.type) + the entries as bullets."""
+    desc = f"Curated lore {scope} memory exported by `lore teardown`"
+    if scope == "project":
+        desc += f" ({slug})"
+    return (
+        "---\n"
+        f"name: lore-export-{scope}\n"
+        f"description: {desc}\n"
+        "metadata:\n"
+        f"  type: {scope}\n"
+        "---\n\n"
+        + render_entries(entries)
+    )
+
+
+def cmd_teardown(args) -> int:
+    """Hand memory back to the built-in system; leave nothing load-bearing behind.
+
+    The reverse of setup, in the same order setup wired things: (a) every
+    non-empty curated scope file becomes a lore-export-<scope>.md in that
+    project's built-in auto-memory dir (user scope files under the CURRENT
+    project — built-in memory has no global tier to receive it), with a pointer
+    appended to an existing MEMORY.md so the next session actually finds it;
+    (b) autoMemoryEnabled goes back to true and the LORE_* env keys setup added
+    disappear from ~/.claude/settings.json; (c) what stays on disk is printed
+    with the one-liner to remove it — deleting state.db is the user's call,
+    never this command's. Idempotent: exports overwrite their own previous
+    output, the pointer appends once, settings writes are skipped when already
+    in the target state.
+    """
+    dry = "would " if args.dry_run else ""
+    slug = project_slug(args.cwd or os.getcwd())
+
+    # (a) exports: user scope -> current project's memory dir; each project
+    # scope -> its own slug's memory dir.
+    exports: list[tuple[str, str, Path, list[str]]] = []
+    user_entries = read_entries(ROOT / "USER.md")
+    if user_entries:
+        exports.append(("user", slug,
+                        PROJECTS_DIR / slug / "memory" / "lore-export-user.md", user_entries))
+    proj_root = ROOT / "projects"
+    if proj_root.exists():
+        for d in sorted(p for p in proj_root.iterdir() if p.is_dir()):
+            entries = read_entries(d / "MEMORY.md")
+            if entries:
+                exports.append(("project", d.name,
+                                d.name and PROJECTS_DIR / d.name / "memory" / "lore-export-project.md",
+                                entries))
+    if not exports:
+        print("no curated entries to export.")
+    for scope, target_slug, target, entries in exports:
+        print(f"{dry}export {len(entries)} {scope} entr{'y' if len(entries) == 1 else 'ies'}"
+              f" -> {target}")
+        if not args.dry_run:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(render_export(scope, target_slug, entries), encoding="utf-8")
+        memory_md = target.parent / "MEMORY.md"
+        pointer = (f"- [lore export ({scope})]({target.name}) — curated lore memory"
+                   " returned by `lore teardown`")
+        if memory_md.exists():
+            try:
+                present = pointer in memory_md.read_text(encoding="utf-8")
+            except OSError:
+                present = True  # unreadable: do not guess, do not append
+            if not present:
+                print(f"{dry}append pointer to {memory_md}")
+                if not args.dry_run:
+                    with memory_md.open("a", encoding="utf-8") as fh:
+                        fh.write(f"\n{pointer}\n")
+
+    # (b) settings: re-enable built-in auto-memory, drop the LORE_* env keys.
+    settings_path = Path.home() / ".claude" / "settings.json"
+    settings = None
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            print(f"warn: cannot parse {settings_path} — fix it by hand:"
+                  ' set {"autoMemoryEnabled": true}, remove LORE_* from "env".')
+    if isinstance(settings, dict):
+        env = settings.get("env") if isinstance(settings.get("env"), dict) else {}
+        lore_keys = sorted(k for k in env if k.startswith("LORE_"))
+        needs_flip = settings.get("autoMemoryEnabled") is not True
+        if needs_flip:
+            print(f"{dry}set autoMemoryEnabled: true in {settings_path}")
+        for k in lore_keys:
+            print(f"{dry}remove env.{k} from {settings_path}")
+        if not args.dry_run and (needs_flip or lore_keys):
+            settings["autoMemoryEnabled"] = True
+            for k in lore_keys:
+                del settings["env"][k]
+            settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    elif settings is None and not settings_path.exists():
+        print(f"no {settings_path} — nothing to flip.")
+
+    # (c) what stays, and how to be rid of it.
+    print("\nleft in place (lore never deletes data it derived):")
+    print(f"  session index + beliefs: {ROOT / 'state.db'}")
+    print(f"  curated files, pending/, logs: {ROOT}")
+    print(f"  delete everything: rm -rf {ROOT}")
+    if args.dry_run:
+        print("\n(dry run — nothing was written)")
+    return 0
+
+
+def cmd_reset(args) -> int:
+    """Drop derived state and recreate it empty. Curated memory files are
+    markdown under LORE_ROOT, not rows in state.db — no flag here touches them."""
+    if not (args.index or args.beliefs or args.all):
+        print("refusing: say what to reset —\n"
+              "  --index    drop + recreate the session FTS index (msg, sessions, files)\n"
+              "  --beliefs  drop + recreate the belief tables\n"
+              "  --all      recreate the whole state.db\n"
+              "Curated memory files are never touched.", file=sys.stderr)
+        return 1
+    conn = db_connect()
+
+    def count(table: str) -> int:
+        try:
+            return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        except sqlite3.OperationalError:
+            return 0
+
+    if args.all:
+        n_msg, n_sess, n_bel = count("msg"), count("sessions"), count("beliefs")
+        conn.close()
+        for suffix in ("", "-wal", "-shm"):
+            (ROOT / f"state.db{suffix}").unlink(missing_ok=True)
+        db_connect().close()  # recreate empty immediately
+        print(f"state.db recreated — dropped {n_sess} sessions / {n_msg} messages"
+              f" / {n_bel} beliefs. Curated memory files untouched.")
+        return 0
+    if args.index:
+        # `files` goes too: it is the incremental-index stamp cache, and left
+        # behind it would tell the next index run every transcript is
+        # unchanged — a reset that silently never refills.
+        n_msg, n_sess, n_files = count("msg"), count("sessions"), count("files")
+        for t in ("msg", "sessions", "files"):
+            conn.execute(f"DROP TABLE IF EXISTS {t}")
+        print(f"index reset — dropped {n_sess} sessions / {n_msg} messages"
+              f" / {n_files} file stamps.")
+    if args.beliefs:
+        n_bel, n_ev = count("beliefs"), count("belief_evidence")
+        for t in ("beliefs", "belief_evidence", "belief_fts", "dream_reviewed"):
+            conn.execute(f"DROP TABLE IF EXISTS {t}")
+        print(f"beliefs reset — dropped {n_bel} beliefs / {n_ev} evidence rows.")
+    conn.commit()
+    conn.close()
+    db_connect().close()  # recreate the dropped tables empty
+    print("curated memory files untouched.")
+    return 0
 
 
 # ---------------------------------------------------------------- main
