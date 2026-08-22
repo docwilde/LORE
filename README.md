@@ -32,7 +32,7 @@ and labeled "anecdote, not a curve" below that.
 
 - **Tier 1 — Curated core memory, hard-capped, human-directed.** `USER.md`
   (global, 2750 chars — who the user is, preferences) and `MEMORY.md`
-  (per-project, 4400 chars — environment, conventions, workarounds) inject
+  (per-project, 8800 chars — environment, conventions, workarounds) inject
   once at `SessionStart` as a frozen snapshot, re-injected after `/clear`
   and compaction (`LORE_REFRESH_SECS` re-injects mid-session too). The
   agent writes directly via `memory add/replace/remove`
@@ -245,6 +245,18 @@ variables only; `/lore:config` toggles the stage switches interactively).
 Hook-read switches apply from a session's next hook fire; a restart
 refreshes everything.
 
+## Hooks
+
+Four Claude Code hook events drive everything automatic; each one exits
+silently under its stage switch, and `LORE_SKIP` masters them all:
+
+| Event | Fires | Runs | Switch |
+|---|---|---|---|
+| `SessionStart` (startup, resume, `/clear`, compact) | once per session (re)start | `lore inject` — the curated memory snapshot into context | `LORE_DISABLE_INJECT` |
+| `UserPromptSubmit` | every prompt | `lore refresh` — re-injects the snapshot at most every `LORE_REFRESH_SECS`; plus `lore index --live` when `LORE_STREAM_INDEX=1` | `LORE_DISABLE_INJECT` / `LORE_DISABLE_INDEX` |
+| `PreCompact` | before the harness summarizes a long session | `lore review` — derives beliefs from the transcript at the moment detail would be lost | `LORE_DISABLE_PRECOMPACT` (or `LORE_DISABLE_REVIEW`) |
+| `SessionEnd` | session close | `lore review` — the detached review worker: digest, deriver, staged proposals, dreamer | `LORE_DISABLE_REVIEW` |
+
 ## Configuration (env vars, all optional)
 
 Each tier is an independent switch. The five `LORE_DISABLE_*` rows are the
@@ -253,7 +265,7 @@ kill switches, all default unset; `LORE_SKIP` sits above all of them.
 | Variable | Default | Meaning |
 |---|---|---|
 | `LORE_ROOT` | `~/.claude/lore` | all state (memory files, state.db, pending, logs) |
-| `LORE_USER_CAP` / `LORE_MEMORY_CAP` | 2750 / 4400 | hard caps in chars |
+| `LORE_USER_CAP` / `LORE_MEMORY_CAP` | 2750 / 8800 | hard caps in chars |
 | `LORE_REVIEW_MODEL` | unset | umbrella override for both headless roles |
 | `LORE_DERIVER_MODEL` | `haiku` | session-end reviewer/deriver — extraction is easy |
 | `LORE_DREAMER_MODEL` | `sonnet` | belief reconciliation + promotions — the judgment-heavy role |
