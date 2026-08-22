@@ -764,6 +764,11 @@ def cmd_session(args) -> int:
 # ---------------------------------------------------------------- belief store
 
 def belief_subject(scope: str, slug: str) -> str:
+    # "user-model" stays literal: it is its own belief category (interaction
+    # model), counted separately and snapshot-injected -- never folded into
+    # the user scope or a project subject.
+    if scope == "user-model":
+        return "user-model"
     return "user" if scope == "user" else f"project:{slug}"
 
 
@@ -1808,7 +1813,8 @@ whereas one decision, approval or authorization given once in one session is not
 never be generalized into a standing trait or a permission — recording an approval as though \
 it were a preference invites a later session to act on consent that was never given.
 
-INTERACTION MODEL (a conclusions sub-channel, subject "user-model"): also derive how this \
+INTERACTION MODEL (a conclusions sub-channel -- emit these as conclusions entries with \
+"scope":"user-model"): also derive how this \
 user works and wants to be worked with -- communication preferences (terse vs narrated, when \
 they want evidence vs summary), reaction patterns (what draws pushback, what earns trust), \
 decision style, energy/focus patterns visible in the transcript. Ground every claim in \
@@ -1902,7 +1908,7 @@ _SCHEMA_SKILLS = ('"skills":[{{"name":"kebab-name","action":"add|update|retire",
                   '"description":"when to use","body":"markdown"}}],'
                   '"skill_outcomes":[{{"name":"kebab-name","outcome":'
                   '"success|failure|unclear","reason":"short evidence"}}]')
-_SCHEMA_CONCLUSIONS = ('"conclusions":[{{"scope":"user|project","claim":"...",'
+_SCHEMA_CONCLUSIONS = ('"conclusions":[{{"scope":"user|project|user-model","claim":"...",'
                        '"confidence":0.8,"evidence":"short quote"}}]')
 
 
@@ -2691,7 +2697,10 @@ def derive_conclusions(data: dict, slug: str, session_id: str) -> int:
             continue
         scope = c.get("scope")
         claim = one_line(str(c.get("claim") or ""))[:300]
-        if scope not in ("user", "project") or not claim:
+        # user-model admitted since 0.27.1: the INTERACTION MODEL prompt
+        # channel asked for it while this gate silently dropped it -- the
+        # 0.26.0 user-model category never received a single belief.
+        if scope not in ("user", "project", "user-model") or not claim:
             continue
         try:
             confidence = float(c.get("confidence") or 0.6)
