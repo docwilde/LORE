@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.26.0 — 2026-08-22
+- **Stage 7 — act-time consult (opt-in, `LORE_CONSULT=1`):** `lore consult "<topic>"` splits matching beliefs into STEER (outcome-calibrated, n>=3 — may shape the decision) and CITE ONLY (deriver-claimed — mention, never follow). The ledger is the admission ticket to the act-time loop.
+- **User-model beliefs as a separate category:** the deriver gains an interaction-model channel (subject `user-model`: communication preferences, reaction patterns, decision style — grounded in observed behavior, never diagnostic); they count separately in status (`N user-model / M world`), self-refresh `last_referenced` when injected, and render as a labeled snapshot section — transparency instead of a gate for response-shaping; actions still require curated or calibrated.
+- Digest defaults raised again: 300→500 messages, 100k→250k chars (the char cap was the binding constraint — raising only LAST_N silently shows the deriver the tail).
+- README conciseness pass: active voice, Tier-3 lifecycle as bullets, act-time containment documented in Human in the loop.
+
+
 ## 0.25.0 — 2026-08-22
 - Graduated skill-update gate: `update` needs 1 recorded outcome when the last failure is a hard execution error at the same repo HEAD as the last success (drift excluded), 2 otherwise; `retire` keeps 3. Outcomes now carry an (outcome, HEAD, reason) trail so the gate reasons about which runs failed where. Rationale: outcomes are sparse by design (explicit evidence only) — a flat n>=3 let a broken skill misfire for weeks.
 
