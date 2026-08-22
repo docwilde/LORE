@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.29.0 — 2026-08-22
+- **`lore pending --cluster`** — token-overlap grouping (greedy Jaccard, no LLM) turns a big-backfill pile into a per-theme view; plain `pending` now suggests it past 50 proposals; the `/lore:pending` skill uses it by default for large piles. Skills are never clustered into the memory lane.
+- **Retrieval ladder formalized in the snapshot rules**: (1) snapshot → (2) belief store (`lore ask` / `belief search`) → (3) session index (`lore search`) → (4) re-derive only when all three miss. Answers "where does the agent look when the snapshot doesn't have it" with a defined order instead of an instinct.
+- Help card caught up (caps 2750/8800, digest 500/250k, `LORE_CONSULT` opt-in listed).
+
 ## 0.28.0 — 2026-08-22
 - **Project memory cap doubled: 4400 → 8800 chars** (`LORE_MEMORY_CAP` default). A day of heavy backfill triage showed 4400 forcing lossy consolidation of facts worth keeping; user cap stays 2750.
 - **Hooks reference table in the README** — all four events (SessionStart, UserPromptSubmit, PreCompact, SessionEnd), what each runs, and its kill switch, in one place.
