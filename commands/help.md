@@ -22,8 +22,10 @@ Show this reference card, formatted as below, nothing else:
 | `/lore:doctor` | environment checks, read-only |
 | `/lore:setup` | first-run wiring: disable auto-memory, allowlist, port, backfill |
 | `/lore:help` | this card |
+| `lore teardown [--dry-run]` (CLI) | hand memory back: export curated files to built-in auto-memory, re-enable it |
+| `lore reset --index\|--beliefs\|--all` (CLI) | drop + recreate derived state (index/beliefs); curated files never touched |
 
 **Flow:** sessions end → deriver stages proposals → you triage in `/lore:pending` → dreamer reconciles beliefs. Nothing writes to memory without approval.
 
 **CLI:** `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" <cmd>` — extra: `search`, `session <id>`, `index`, `dream`, `memory add|replace|remove|list`.
-**Env knobs:** `LORE_USER_CAP` / `LORE_MEMORY_CAP` (2750/4400), `LORE_DIGEST_LAST_N` / `LORE_DIGEST_TOTAL_CAP` (300/100k), `LORE_REFRESH_SECS`, `LORE_DEFER_DREAM`, `LORE_NOTIFY`, `LORE_SKIP`.
+**Env knobs:** `LORE_USER_CAP` / `LORE_MEMORY_CAP` (2750/4400), `LORE_DIGEST_LAST_N` / `LORE_DIGEST_TOTAL_CAP` (300/100k), `LORE_REFRESH_SECS`, `LORE_DEFER_DREAM`, `LORE_BELIEF_DORMANT_DAYS` (45) / `LORE_INCLUDE_DORMANT`, `LORE_NOTIFY`, `LORE_SKIP`.

@@ -51,3 +51,7 @@ Four rules the loop has to respect:
 - **Defer the dreamer, and triage between batches.** Two things scale badly over a batch. A review that derives beliefs normally reconciles the whole active belief store immediately, on the expensive model — right for one session at a time, wasteful across N, where the same work is redone against a store that only grows. `LORE_DEFER_DREAM=1` holds it back; run `lore dream` once when the batch ends. Staged proposals grow the same way for a different reason: every review is sent the current pending list so it does not repeat it, so an untriaged batch feeds each run a longer prompt than the last and eventually crowds out the digest itself. Review one project, stop at `/lore:pending`, and start the next batch from an empty one.
 
 Finish with `lore status` for the new pending and belief counts, and send the user to `/lore:pending` — every proposal is still staged, and nothing has been written to memory.
+
+## Uninstalling
+
+Everything this setup wires is reversed by `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" teardown`: it exports the curated memory files into the built-in auto-memory format (one `lore-export-<scope>.md` per scope, pointer appended to any existing `MEMORY.md`), sets `autoMemoryEnabled` back to `true`, removes the `LORE_*` env keys from `~/.claude/settings.json`, and prints what remains on disk with the one-liner to delete it. Run with `--dry-run` first to show the plan; nothing is deleted by teardown itself.
