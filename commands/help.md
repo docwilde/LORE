@@ -1,0 +1,29 @@
+---
+description: One-screen reference card for all lore commands and the memory model
+allowed-tools: []
+---
+
+Show this reference card, formatted as below, nothing else:
+
+## lore — memory that reasons about you and improves itself
+
+**Memory model:** two hard-capped curated scopes — `user` (who you are, preferences) and `project` (per-repo environment facts, workarounds) — plus an uncapped **belief store** (derived conclusions, queryable) and an FTS5 **session index** (full transcript search).
+
+| command | what it does |
+|---|---|
+| `/lore:status` | totals: memory fill, pending, index, beliefs, models |
+| `/lore:motd` | delta view: beliefs added 24h/7d, newest claims, pending |
+| `/lore:pending` | list staged proposals with judgment lines |
+| `/lore:approve` / `/lore:reject` | act on proposals (ids or `all`) |
+| `/lore:remember <fact>` | store a fact now (auto-picks scope) |
+| `/lore:ask <question>` | dialectic: synthesized, cited answer from beliefs |
+| `/lore:review` | review this session's newest window now |
+| `/lore:backfill [full\|project\|path]` | page WHOLE transcripts through the deriver (newest-first, `--workers`) |
+| `/lore:doctor` | environment checks, read-only |
+| `/lore:setup` | first-run wiring: disable auto-memory, allowlist, port, backfill |
+| `/lore:help` | this card |
+
+**Flow:** sessions end → deriver stages proposals → you triage in `/lore:pending` → dreamer reconciles beliefs. Nothing writes to memory without approval.
+
+**CLI:** `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" <cmd>` — extra: `search`, `session <id>`, `index`, `dream`, `memory add|replace|remove|list`.
+**Env knobs:** `LORE_USER_CAP` / `LORE_MEMORY_CAP` (2750/4400), `LORE_DIGEST_LAST_N` / `LORE_DIGEST_TOTAL_CAP` (300/100k), `LORE_REFRESH_SECS`, `LORE_DEFER_DREAM`, `LORE_NOTIFY`, `LORE_SKIP`.
