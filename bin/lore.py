@@ -1850,7 +1850,9 @@ def cmd_review(args) -> int:
     if job is None:
         return 0
     if args.dry_run:
-        print(prompt)
+        # was print(prompt) — NameError since the prompt moved into the job
+        # dict when build_review_job was split out (caught 2026-08-22).
+        print(job["prompt"])
         return 0
     tmp = ROOT / "tmp"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -2421,7 +2423,7 @@ def cmd_teardown(args) -> int:
             entries = read_entries(d / "MEMORY.md")
             if entries:
                 exports.append(("project", d.name,
-                                d.name and PROJECTS_DIR / d.name / "memory" / "lore-export-project.md",
+                                PROJECTS_DIR / d.name / "memory" / "lore-export-project.md",
                                 entries))
     if not exports:
         print("no curated entries to export.")
@@ -2627,6 +2629,8 @@ def main() -> int:
     bp = bsub.add_parser("search")
     bp.add_argument("query")
     bp.add_argument("--limit", type=int, default=10)
+    bp.add_argument("--include-dormant", action="store_true",
+                    help="also match beliefs the dormant sweep parked")
     bp.add_argument("--cwd")
     bp.set_defaults(fn=cmd_belief)
     bp = bsub.add_parser("show")
@@ -2670,6 +2674,20 @@ def main() -> int:
 
     sp = sub.add_parser("doctor", help="environment checks")
     sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser(
+        "teardown",
+        help="hand memory back: export curated files to built-in auto-memory, re-enable it",
+    )
+    sp.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
+    sp.add_argument("--cwd")
+    sp.set_defaults(fn=cmd_teardown)
+
+    sp = sub.add_parser("reset", help="drop + recreate derived state (never curated memory)")
+    sp.add_argument("--index", action="store_true", help="session FTS index tables")
+    sp.add_argument("--beliefs", action="store_true", help="belief tables")
+    sp.add_argument("--all", action="store_true", help="the whole state.db")
+    sp.set_defaults(fn=cmd_reset)
 
     args = p.parse_args()
     return args.fn(args)
