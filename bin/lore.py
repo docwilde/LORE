@@ -1587,8 +1587,8 @@ def cmd_review(args) -> int:
         # deriver in DIGEST_LAST_N-message windows instead of reviewing only
         # the newest window. Sequential on purpose: each window's job is
         # built right before it runs, so its "do not repeat" pending list
-        # includes everything the previous windows staged. Oldest window
-        # first — later windows carry the corrections.
+        # includes everything the previous windows staged. Newest window
+        # first — recency is authority; see ordering note at items.reverse().
         _, _all = parse_transcript(Path(transcript), include_tools=True)
         n = len(_all)
         if n == 0:
@@ -1614,7 +1614,14 @@ def cmd_review(args) -> int:
             print(f"-- window {k}/{len(wins)} messages {lo}:{hi}")
             return worker_run(wfile)
 
+        # NEWEST FIRST (2026-08-22): the newest window carries the session's
+        # corrected, final understanding — stage it first and every older
+        # window's deriver sees those facts in its do-not-repeat list, so
+        # stale earlier-session variants get suppressed instead of staged
+        # ahead of their corrections. (Dedupe is semantic via the prompt,
+        # not exact-match, so this ordering is what makes it bite.)
         items = [(k, lo, hi) for k, (lo, hi) in enumerate(wins, 1)]
+        items.reverse()
         if workers == 1:
             # Sequential: each window's job is built right before it runs, so
             # its do-not-repeat pending list includes what earlier windows
