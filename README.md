@@ -212,10 +212,12 @@ because `review` fires on session end and cannot reach backwards.
 | `/lore:status` | Memory usage per scope, session-index and belief-store sizes, pending count, per-role models, learned skills with their track records. |
 | `/lore:doctor` | Read-only diagnosis: environment checks, effective config, allowlist and auto-memory conflicts, unported entries, unreviewed session backlog. Reports, fixes nothing. |
 | `/lore:setup` | Applies what doctor found, one change behind its own confirmation each: disable built-in auto-memory, add the permission allowlist, port old entries, prime the index, backfill-review the session backlog for the projects you pick, set per-role models. |
+| `/lore:motd` | Delta view: beliefs added in the last 24h/7d, the newest claims verbatim, pending count — what changed since you last looked. |
+| `/lore:help` | One-screen reference card: commands + the memory model. |
 
 Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
 (stdlib only, no dependencies) — `memory`, `search`, `session`, `belief`, `ask`,
-`dream`, `pending`/`approve`/`reject`, `index`, `config`, `status`, `doctor`.
+`dream`, `pending`/`approve`/`reject`, `index` (`--live` streams the running session), `config`, `status`, `motd`, `snapshot` (scoped memory block for subagent prompts), `teardown` (full uninstall: exports curated memory back to built-in format), `reset` (`--index|--beliefs|--all`), `doctor`.
 `lore config` prints the effective configuration; set the env vars below in
 `~/.claude/settings.json` → `"env"` so hooks and commands see them.
 
@@ -224,7 +226,7 @@ Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
 | Variable | Default | Meaning |
 |---|---|---|
 | `LORE_ROOT` | `~/.claude/lore` | all state (memory files, state.db, pending, logs) |
-| `LORE_USER_CAP` / `LORE_MEMORY_CAP` | 1375 / 2200 | hard caps in chars (Hermes' numbers) |
+| `LORE_USER_CAP` / `LORE_MEMORY_CAP` | 2750 / 4400 | hard caps in chars |
 | `LORE_REVIEW_MODEL` | unset | umbrella override for both headless roles |
 | `LORE_DERIVER_MODEL` | `haiku` | session-end reviewer/deriver — extraction is easy |
 | `LORE_DREAMER_MODEL` | `sonnet` | belief reconciliation + promotions — the judgment-heavy role |
