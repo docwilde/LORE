@@ -70,9 +70,16 @@ everything to built-in auto-memory in one command.
 - **Tier 4 — Belief store + dialectic** (after [Honcho](https://github.com/plastic-labs/honcho)'s
    Deriver/Dreamer/Dialectic split). The same review call **derives** up to
    10 confidence-weighted conclusions per session straight into SQLite
-   (`beliefs` + evidence trail + FTS) — no approval gate, since a belief
-   never enters context uninvited ([what that costs](#human-in-the-loop)).
-   Restating an active claim reinforces it instead of duplicating. When new
+   (`beliefs` + evidence trail + FTS) — no approval gate, since world
+   beliefs never enter context uninvited ([what that costs](#human-in-the-loop)).
+   Restating an active claim reinforces it instead of duplicating. Beliefs
+   carry one of two categories, counted separately in `lore status`:
+   **world beliefs** — projects, systems, environment — and **user-model
+   beliefs** (`subject: user-model`) — how the user works, decides and
+   communicates, grounded in cited behavior, never diagnostic. The top
+   user-model beliefs ride into the snapshot as interaction-model lines
+   that shape tone and approach; they never authorize actions, and each
+   injection stamps `last_referenced` so the influence is auditable. When new
    beliefs land, the **dreamer** pairs same-subject beliefs by token
    overlap and has the cheap model reconcile them: merge duplicates,
    supersede the loser of a contradiction (`superseded_by`, `resolution`
@@ -109,8 +116,13 @@ dialectic reads beliefs solely on demand, via `/lore:ask`, and labels every
 confidence as deriver-claimed until the outcomes ledger calibrates it. This
 is deliberate: the belief store is the system's largest hallucination
 surface, so influence must be earned — through the pending gate into
-memory, or, planned, through outcome calibration before any act-time
-consult.
+memory, or through the outcomes ledger before the act-time consult:
+`lore consult` (stage 7, opt-in via `LORE_CONSULT=1`) answers **STEER**
+only for beliefs with a calibrated outcome record (≥3 logged outcomes),
+everything else **CITE ONLY** — mention, never follow. The one deliberate
+exception is the user-model tier above: those beliefs shape tone and
+approach from the snapshot, labeled as such, and still never gate or
+authorize an action.
 
 The cost: a belief is live the moment it's derived, the store is unbounded,
 and nothing expires — a claim true when written sits there indefinitely,
