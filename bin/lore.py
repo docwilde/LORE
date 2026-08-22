@@ -54,8 +54,8 @@ PROJECTS_DIR = Path(os.environ.get("LORE_PROJECTS_DIR", str(Path.home() / ".clau
 
 MSG_TRUNC = 4000          # chars kept per indexed message
 DIGEST_MSG_TRUNC = 700    # chars kept per message in the review digest
-DIGEST_TOTAL_CAP = 28000  # chars kept for the whole digest
-DIGEST_LAST_N = 140       # newest messages considered for the digest (tool lines included)
+DIGEST_TOTAL_CAP = int(os.environ.get("LORE_DIGEST_TOTAL_CAP", "100000"))  # chars kept for the whole digest
+DIGEST_LAST_N = int(os.environ.get("LORE_DIGEST_LAST_N", "300"))  # newest messages considered for the digest (tool lines included)
 
 
 def utcnow() -> str:
@@ -694,9 +694,13 @@ def run_claude(claude: str, prompt: str, model: str, role: str
         cmd = [claude]
         if bare:
             cmd.append("--bare")
-        cmd += ["-p", prompt, "--model", model, "--allowedTools", ""]
+        # Prompt via STDIN, never argv: a dreamer prompt over a large
+        # belief store exceeds ARG_MAX (live E2BIG at 515 beliefs,
+        # 2026-08-22). `claude -p` with no inline prompt reads stdin.
+        cmd += ["-p", "--model", model, "--allowedTools", ""]
         return subprocess.run(
             cmd, capture_output=True, text=True, timeout=600,
+            input=prompt,
             env={**os.environ, "LORE_SKIP": "1"},
         )
 
@@ -1296,7 +1300,17 @@ def record_skill_usage(messages: list[tuple[str, str, str]]) -> None:
         save_skill_usage(usage)
 
 
-def build_review_job(transcript: Path, slug: str) -> dict | None:
+RECENCY_NOTE = (
+    "\nNOTE: this digest is an OLDER slice of a longer session; the "
+    "already-staged proposals above reflect NEWER session state. Recency "
+    "wins: on any conflict or overlap with a staged proposal, defer to the "
+    "staged version and do not re-propose this slice's variant.\n")
+
+
+def build_review_job(transcript: Path, slug: str,
+                     span: "tuple[int, int] | None" = None,
+                     part: "str | None" = None,
+                     older: bool = False) -> dict | None:
     """The deriver job for one transcript, or None when it is too short to review.
 
     Split out of cmd_review so a batch runs the same prompt, the same
@@ -1307,7 +1321,15 @@ def build_review_job(transcript: Path, slug: str) -> dict | None:
     user_msgs = sum(1 for _, role, _ in messages if role == "user")
     if user_msgs < REVIEW_MIN_MESSAGES:
         return None
-    record_skill_usage(messages)
+    if span is not None:
+        # --full backfill window: digest exactly this slice. Skill usage was
+        # recorded by the first window; recording it once per window would
+        # multiply every skill's use count by the page count.
+        messages = messages[span[0]:span[1]]
+        if not messages:
+            return None
+    else:
+        record_skill_usage(messages)
     usage = load_skill_usage()
     learned = "\n".join(
         f"- {name} ({skill_record(usage.get(name, {}))}): {desc}"
@@ -1322,7 +1344,10 @@ def build_review_job(transcript: Path, slug: str) -> dict | None:
         slug=slug,
         digest=build_digest(messages),
     )
-    return {"prompt": prompt, "project": slug, "session_id": transcript.stem}
+    if older:
+        prompt += RECENCY_NOTE
+    sid = transcript.stem if part is None else f"{transcript.stem}-{part}"
+    return {"prompt": prompt, "project": slug, "session_id": sid}
 
 
 WORKER_MARKERS = (
@@ -1571,6 +1596,65 @@ def cmd_review(args) -> int:
     if not transcript or not Path(transcript).exists():
         print("no transcript to review.", file=sys.stderr)
         return 0  # never block session end
+    if getattr(args, "full", False):
+        # FULL BACKFILL (2026-08-22): page the WHOLE transcript through the
+        # deriver in DIGEST_LAST_N-message windows instead of reviewing only
+        # the newest window. Sequential on purpose: each window's job is
+        # built right before it runs, so its "do not repeat" pending list
+        # includes everything the previous windows staged. Newest window
+        # first — recency is authority; see ordering note at items.reverse().
+        _, _all = parse_transcript(Path(transcript), include_tools=True)
+        n = len(_all)
+        if n == 0:
+            print("no messages to review.", file=sys.stderr)
+            return 0
+        record_skill_usage(_all)
+        wins = [(i, min(i + DIGEST_LAST_N, n)) for i in range(0, n, DIGEST_LAST_N)]
+        workers = max(1, getattr(args, "workers", 1) or 1)
+        print(f"full backfill: {n} messages, {len(wins)} window(s) of "
+              f"{DIGEST_LAST_N}, workers={workers}")
+        os.environ["LORE_SKIP"] = "1"
+        tmp = ROOT / "tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+
+        def _run_window(k_lo_hi):
+            k, lo, hi = k_lo_hi
+            wjob = build_review_job(Path(transcript), slug, span=(lo, hi),
+                                    part=f"w{k:03d}",
+                                    older=(hi < n))
+            if wjob is None:
+                return 0
+            wfile = tmp / f"review-{wjob['session_id']}.json"
+            wfile.write_text(json.dumps(wjob), encoding="utf-8")
+            print(f"-- window {k}/{len(wins)} messages {lo}:{hi}")
+            return worker_run(wfile)
+
+        # NEWEST FIRST (2026-08-22): the newest window carries the session's
+        # corrected, final understanding — stage it first and every older
+        # window's deriver sees those facts in its do-not-repeat list, so
+        # stale earlier-session variants get suppressed instead of staged
+        # ahead of their corrections. (Dedupe is semantic via the prompt,
+        # not exact-match, so this ordering is what makes it bite.)
+        items = [(k, lo, hi) for k, (lo, hi) in enumerate(wins, 1)]
+        items.reverse()
+        if workers == 1:
+            # Sequential: each window's job is built right before it runs, so
+            # its do-not-repeat pending list includes what earlier windows
+            # staged. Zero duplicate risk, longest wall clock.
+            rc = 0
+            for it in items:
+                rc = _run_window(it) or rc
+            return rc
+        # Parallel: windows cannot see each other's staged proposals (each
+        # reads pending at its own build time), so duplicates ARE possible —
+        # a triage cost, not a correctness one (id claiming is atomic).
+        # Deliberate trade, same as the documented cross-project batch case.
+        from concurrent.futures import ThreadPoolExecutor
+        rc = 0
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for r in ex.map(_run_window, items):
+                rc = r or rc
+        return rc
     job = build_review_job(Path(transcript), slug)
     if job is None:
         return 0
@@ -2113,6 +2197,13 @@ def main() -> int:
     sp.add_argument("--foreground", action="store_true",
                     help="run the worker inline (for harness-tracked background runs)")
     sp.add_argument("--dry-run", action="store_true", help="print the extraction prompt and exit")
+    sp.add_argument("--workers", type=int, default=1,
+                    help="parallel deriver calls for --full windows (>1 can "
+                         "stage duplicates across windows; triage cost only)")
+    sp.add_argument("--full", action="store_true",
+                    help="page the WHOLE transcript through the deriver in "
+                         "DIGEST_LAST_N-message windows (foreground; use with "
+                         "LORE_DEFER_DREAM=1 and run `lore dream` after)")
     sp.set_defaults(fn=cmd_review)
 
     sp = sub.add_parser("_worker")
