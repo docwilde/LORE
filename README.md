@@ -153,16 +153,12 @@ cooperating.
 
 ```mermaid
 flowchart TD
-    A["Session ends"] --> B["Reviewer digests the session
-(exact commands T: and errors E:)"]
+    A["Session ends"] --> B["Reviewer digests the session<br/>(exact commands T: and errors E:)"]
     B -->|"verified working recipe"| C[/"staged: new skill"/]
-    C -->|"approve"| D["Installed skill
-~/.claude/skills/&lt;name&gt;"]
+    C -->|"approve"| D["Installed skill<br/>~/.claude/skills/&lt;name&gt;"]
     D -->|"auto-triggers on a similar problem"| E["Skill runs in a later session"]
-    E --> F["Reviewer judges the run:
-success / failure / unclear"]
-    F --> G[("Track record
-skill_usage.json")]
+    E --> F["Reviewer judges the run:<br/>success / failure / unclear"]
+    F --> G[("Track record<br/>skill_usage.json")]
     G -->|"repeated failure, no recent success"| H{"Fixable?"}
     H -->|"yes"| I[/"staged: update (diff shown)"/]
     H -->|"no"| J[/"staged: retire"/]
@@ -174,16 +170,12 @@ skill_usage.json")]
 
 ```mermaid
 flowchart TD
-    S["Session transcript"] -->|"SessionEnd worker"| DE["Deriver (haiku):
-conclusions with confidence + evidence"]
-    DE --> B[("Belief store
-SQLite: beliefs, evidence trails, FTS5")]
-    B -->|"same-subject beliefs paired by overlap"| DR["Dreamer (sonnet):
-merge / supersede / keep"]
+    S["Session transcript"] -->|"SessionEnd worker"| DE["Deriver (haiku):<br/>conclusions with confidence + evidence"]
+    DE --> B[("Belief store<br/>SQLite: beliefs, evidence trails, FTS5")]
+    B -->|"same-subject beliefs paired by overlap"| DR["Dreamer (sonnet):<br/>merge / supersede / keep"]
     DR -->|"reconciled, audit trail kept"| B
     DR -->|"well-evidenced belief"| P[/"staged: promotion"/]
-    P -->|"approve"| M["Hard-capped core memory
-USER.md / MEMORY.md"]
+    P -->|"approve"| M["Hard-capped core memory<br/>USER.md / MEMORY.md"]
     Q["/lore:ask &lt;question&gt;"] --> DI["Dialectic subagent"]
     DI <-->|"lore ask · belief show · session --grep"| B
     DI --> A["Cited answer + confidence"]
