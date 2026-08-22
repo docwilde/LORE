@@ -366,6 +366,7 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("github", re.compile(r"gh[posru]_[A-Za-z0-9]{36,}")),
     ("gcp", re.compile(r"AIza[A-Za-z0-9_-]{35}")),
     ("slack", re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}")),
+    ("slack-app", re.compile(r"xapp-[0-9]-[A-Za-z0-9-]{20,}")),
     ("npm", re.compile(r"npm_[A-Za-z0-9]{36}")),
     ("pypi", re.compile(r"pypi-AgEIcHlwaS[A-Za-z0-9_-]{16,}")),
     ("cloudflare", re.compile(r"cfat_[A-Za-z0-9]{20,}")),
@@ -599,10 +600,11 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
                     continue
                 text = extract_text(d.get("message", {}).get("content", ""))
                 if text:
-                    # scrub before the row is written, same contract as
-                    # index_sessions: the index is on disk forever.
+                    # scrub BEFORE truncating (0.31.1, Codex): a secret near the
+                    # MSG_TRUNC boundary would otherwise survive as a raw partial
+                    # -- the same fix index_sessions got, its streaming twin missed.
                     new_rows.append((session_id, proj, d.get("timestamp") or "",
-                                     d["type"], scrub_secrets(text[:MSG_TRUNC])))
+                                     d["type"], scrub_secrets(text)[:MSG_TRUNC]))
     except OSError:
         return 0, start
     if new_rows:
@@ -1414,12 +1416,18 @@ def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int
         print(f"dream produced no JSON: {(proc.stdout or proc.stderr)[-1000:]}", file=sys.stderr)
         return 1
     valid_ids = {r[0] for r in all_active}
+    consumed: set = set()  # ids already transitioned this run (0.31.1, Codex):
+    # valid_ids is a stale snapshot, so two resolutions naming the same pair
+    # (supersede_a then supersede_b) would leave A superseded-by-B AND B
+    # superseded-by-A -- no active survivor. Consuming ids blocks the second.
     changed = 0
     for res in (data.get("resolutions") or [])[:20]:
         if not isinstance(res, dict):
             continue
         a, b = res.get("a"), res.get("b")
         decision = res.get("decision")
+        if a in consumed or b in consumed:
+            continue
         if a not in valid_ids or b not in valid_ids or a == b:
             continue
         reason = str(res.get("reason") or "")
@@ -1436,13 +1444,17 @@ def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int
             # re-pointed there too.
             record_outcome(conn, nid, "confirmed", "dream",
                            note=f"independent duplicates [{a}]+[{b}] merged: {reason}")
+            consumed.update((a, b))
             changed += 1
             print(f"merged [{a}]+[{b}] -> [{nid}]")
         elif decision in ("supersede_a", "supersede_b"):
             loser, winner = (a, b) if decision == "supersede_a" else (b, a)
+            consumed.add(loser)  # the winner may still merge/supersede again,
+            # but the loser is now terminal and must not be re-transitioned
             if res.get("claim"):
                 conn.execute("UPDATE beliefs SET claim = ?, confidence = ?, updated = ?"
-                             " WHERE id = ?", (one_line(str(res["claim"])), conf, utcnow(), winner))
+                             " WHERE id = ? AND status = 'active'",
+                             (one_line(str(res["claim"])), conf, utcnow(), winner))
                 conn.execute("DELETE FROM belief_fts WHERE belief_id = ?", (winner,))
                 conn.execute("INSERT INTO belief_fts(belief_id, claim) VALUES(?,?)",
                              (winner, one_line(str(res["claim"]))))
@@ -2866,7 +2878,7 @@ def stage_proposals(data: dict, slug: str, session_id: str,
             continue
         existing.add(text.lower())
         put({"kind": "memory", "scope": scope, "action": action,
-             "match": str(m.get("match") or ""), "text": text})
+             "match": scrub_secrets(str(m.get("match") or "")), "text": text})
     skill_items = (data.get("skills") or [])[:1]
     # skills kill switch (2026-08-22): the prompt already dropped the skills
     # channel, but a jobfile built before the switch flipped can still carry a
@@ -2880,7 +2892,10 @@ def stage_proposals(data: dict, slug: str, session_id: str,
         if not isinstance(s, dict):
             continue
         name = re.sub(r"[^a-z0-9-]", "-", str(s.get("name") or "").lower()).strip("-")
-        body = str(s.get("body") or "").strip()
+        # scrub model-authored skill body (0.31.1, Codex): on approval this
+        # installs verbatim as a durable SKILL.md; a transcript credential the
+        # model echoed here would otherwise persist and be shown at approval.
+        body = scrub_secrets(str(s.get("body") or "")).strip()
         # "update"/"retire" only mean something for a skill lore itself installed
         action = s.get("action") if s.get("action") in ("update", "retire") and name in learned_skills() else "add"
         if action in ("update", "retire"):
@@ -2910,7 +2925,8 @@ def stage_proposals(data: dict, slug: str, session_id: str,
         if not name or (not body and action != "retire"):
             continue
         put({"kind": "skill", "name": name, "action": action,
-             "description": one_line(str(s.get("description") or ""))[:300], "body": body})
+             "description": one_line(scrub_secrets(str(s.get("description") or "")))[:300],
+             "body": body})
     return staged
 
 

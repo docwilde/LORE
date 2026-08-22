@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.31.1 — 2026-08-22 (Codex cross-review)
+- **Fix: `index_live` truncated before scrubbing** (the streaming twin of the 0.31.0 index_sessions fix, missed then) -- a secret near the cut survived as a raw partial.
+- **Fix: staged skill `body`+`description` and replace-proposal `match` were persisted unscrubbed** -- on approval a skill body installs verbatim as a durable SKILL.md; all model-output fields now scrubbed at the write site.
+- **Fix: dreamer could still orphan a belief via multi-resolution** -- two resolutions naming the same pair (supersede_a then supersede_b) left both terminal with no survivor; the loop now consumes ids and the winner-claim update is status=active guarded. Completes the 0.30.1 exclude_ids fix.
+- Slack `xapp-` app tokens added to the scrubber.
+- Found by an independent Codex (GPT) review pass after the Claude code-review + security audit; cross-family caught what same-family missed.
+
 ## 0.31.0 — 2026-08-22 (security audit remediations)
 - **Fix (audit CRITICAL): the user-model tier was never injected.** `interaction_model_lines()` existed since 0.26.0 but `build_context()` never called it -- the interaction-model beliefs derived but never reached context. Now wired in as a labeled "Interaction model (derived, uncalibrated)" section after user memory; shapes tone/approach, never authorizes actions.
 - **Fix (audit HIGH): deriver OUTPUT is now scrubbed.** `scrub_secrets` ran on ingestion only; a secret shape missed on input could be echoed by the model into a permanent belief/memory. Belief claim+evidence and staged memory text are scrubbed at the write site.
