@@ -74,6 +74,30 @@ def project_slug(cwd: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
 
 
+def agent_id() -> str:
+    """PER-AGENT IDENTITY (2026-08-22): who is deriving right now.
+
+    LORE_AGENT_ID names the agent; "main" when unset. Read per call, never
+    frozen into a module constant at import: the --full backfill names each
+    window and a subagent process sets its own id in its environment. The id
+    travels in the review job dict, lands on every staged proposal as
+    `derived_by`, and stamps every recorded skill outcome — so the pending
+    pile says WHO concluded what, not just when.
+    """
+    return os.environ.get("LORE_AGENT_ID", "").strip() or "main"
+
+
+SCOPES = ("user", "project", "all")
+
+
+def effective_scope(value: "str | None") -> str:
+    """ROLE-SCOPED VIEW (2026-08-22): explicit --scope beats LORE_SCOPE beats
+    "all". Read per call like agent_id(); an unknown value degrades to "all"
+    rather than erroring — a hook must never fail over a typo in settings."""
+    scope = (value or os.environ.get("LORE_SCOPE", "")).strip() or "all"
+    return scope if scope in SCOPES else "all"
+
+
 def read_hook_input() -> dict:
     """Hook payload from stdin, {} when run interactively."""
     if sys.stdin.isatty():
@@ -192,7 +216,19 @@ def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(ROOT / "state.db")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, stamp TEXT)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS files("
+        "path TEXT PRIMARY KEY, stamp TEXT, lines_indexed INTEGER)")
+    # lines_indexed migration for DBs created before the streaming index
+    # (2026-08-22): per-file count of transcript lines `index --live` has
+    # already consumed, so a prompt-time pass reads only the tail. Same shape
+    # as the beliefs migration below: fresh DBs carry the column in the CREATE
+    # and the ALTER lands in the except; old DBs get it added. NULL means
+    # "never live-indexed" — the first --live pass then owns the whole file.
+    try:
+        conn.execute("ALTER TABLE files ADD COLUMN lines_indexed INTEGER")
+    except sqlite3.OperationalError:
+        pass  # column already present
     conn.execute(
         "CREATE TABLE IF NOT EXISTS reviewed("
         "session_id TEXT PRIMARY KEY, project TEXT, ts TEXT)"
@@ -430,10 +466,96 @@ def index_sessions(conn: sqlite3.Connection, force: bool = False) -> tuple[int, 
             (session_id, proj, meta["cwd"], meta["title"], meta["first_ts"],
              meta["last_ts"], len(messages)),
         )
-        conn.execute("INSERT OR REPLACE INTO files VALUES(?,?)", (key, stamp))
+        # lines_indexed intentionally resets to NULL here: the full parse does
+        # not count file lines, and NULL tells the next --live pass to re-own
+        # the file from the top (delete + reread) instead of double-inserting.
+        conn.execute("INSERT OR REPLACE INTO files(path, stamp) VALUES(?,?)", (key, stamp))
         indexed += 1
     conn.commit()
     return indexed, skipped
+
+
+def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
+    """STREAMING INDEX (2026-08-22): incrementally index a GROWING transcript;
+    returns (new_msg_rows, lines_consumed).
+
+    index_sessions() re-parses a whole file whenever its stamp moves — the
+    wrong cost for the current session's transcript, which grows on every
+    prompt. This reads only the lines past the per-file lines_indexed count,
+    scrubs and inserts just those into the msg FTS table, and advances the
+    count: idempotent and cheap enough for a UserPromptSubmit hook.
+
+    Two edges carry the correctness. A trailing line without its newline is an
+    append still in flight — left uncounted so the next pass reads it whole,
+    never half-consumed. And lines_indexed NULL/0 means the file was never
+    live-indexed (or a full reindex just reset it): the first live pass then
+    deletes whatever full-index rows exist for the session before rereading
+    from the top, so the two paths can interleave without double-inserting.
+    The stamp is written too, so a later index_sessions() sees the file as
+    current and does not redo what the live path already holds.
+    """
+    # resolve before keying: index_sessions stamps absolute PROJECTS_DIR paths,
+    # and a relative path here would fork a second files row for the same file —
+    # each row re-owning the transcript in turn, redoing the other's work.
+    transcript = Path(transcript).resolve()
+    try:
+        st = transcript.stat()
+    except OSError:
+        return 0, 0
+    key = str(transcript)
+    session_id = transcript.stem
+    proj = transcript.parent.name
+    row = conn.execute("SELECT lines_indexed FROM files WHERE path = ?", (key,)).fetchone()
+    start = int(row[0]) if row and row[0] else 0
+    if start == 0:
+        conn.execute("DELETE FROM msg WHERE session_id = ?", (session_id,))
+    consumed = start
+    new_rows: list[tuple] = []
+    try:
+        with transcript.open(encoding="utf-8") as fh:
+            for i, raw in enumerate(fh, 1):
+                if i <= start:
+                    continue
+                if not raw.endswith("\n"):
+                    break  # partial tail of an in-flight append; next pass gets it whole
+                consumed = i
+                try:
+                    d = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(d, dict) or d.get("type") not in ("user", "assistant") \
+                        or d.get("isMeta"):
+                    continue
+                text = extract_text(d.get("message", {}).get("content", ""))
+                if text:
+                    # scrub before the row is written, same contract as
+                    # index_sessions: the index is on disk forever.
+                    new_rows.append((session_id, proj, d.get("timestamp") or "",
+                                     d["type"], scrub_secrets(text[:MSG_TRUNC])))
+    except OSError:
+        return 0, start
+    if new_rows:
+        conn.executemany(
+            "INSERT INTO msg(session_id, project, ts, role, content) VALUES(?,?,?,?,?)",
+            new_rows)
+        # keep the sessions row usable by print_hits; the exact recount is one
+        # indexed lookup, cheaper than tracking a delta through the delete path.
+        n = conn.execute("SELECT count(*) FROM msg WHERE session_id = ?",
+                         (session_id,)).fetchone()[0]
+        cur = conn.execute(
+            "UPDATE sessions SET messages = ?, last_ts = coalesce(?, last_ts)"
+            " WHERE session_id = ?",
+            (n, new_rows[-1][2] or None, session_id))
+        if cur.rowcount == 0:
+            conn.execute("INSERT INTO sessions VALUES(?,?,?,?,?,?,?)",
+                         (session_id, proj, None, None,
+                          new_rows[0][2] or None, new_rows[-1][2] or None, n))
+    if consumed != start or row is None:
+        conn.execute(
+            "INSERT OR REPLACE INTO files(path, stamp, lines_indexed) VALUES(?,?,?)",
+            (key, f"{st.st_mtime}:{st.st_size}", consumed))
+    conn.commit()
+    return len(new_rows), consumed
 
 
 def fts_expr(query: str, op: str = " ") -> str:
@@ -1009,7 +1131,13 @@ def _freshness_rule() -> str:
     )
 
 
-def build_context(cwd: str) -> str:
+def build_context(cwd: str, scope: str = "all") -> str:
+    """The memory snapshot block. `scope` (role-scoped view, 2026-08-22)
+    narrows it to one tier: "user" renders only user memory, "project" only
+    project memory, "all" both. The belief hint rides only "all"/"project" —
+    beliefs are keyed by project subject, so a user-only view has no claim on
+    them. Shared by inject (hook JSON envelope), refresh, and snapshot (bare
+    text for subagent prompts) — one rendering, three carriers."""
     slug = project_slug(cwd)
     user_entries = read_entries(memory_path("user", slug))
     proj_entries = read_entries(memory_path("project", slug))
@@ -1020,26 +1148,34 @@ def build_context(cwd: str) -> str:
         "LORE MEMORY — curated, hard-capped, Hermes-pattern. You maintain it.",
         f'CLI (run via Bash): lore() {{ python3 "{me}" "$@"; }}',
         "",
-        f"## User memory ({usage_line(user_entries, USER_CAP)})",
-        render_entries(user_entries).rstrip() or "(empty)",
-        "",
-        f"## Project memory ({usage_line(proj_entries, MEMORY_CAP)}) — {slug}",
-        render_entries(proj_entries).rstrip() or "(empty)",
-        "",
     ]
+    if scope in ("all", "user"):
+        parts += [
+            f"## User memory ({usage_line(user_entries, USER_CAP)})",
+            render_entries(user_entries).rstrip() or "(empty)",
+            "",
+        ]
+    if scope in ("all", "project"):
+        parts += [
+            f"## Project memory ({usage_line(proj_entries, MEMORY_CAP)}) — {slug}",
+            render_entries(proj_entries).rstrip() or "(empty)",
+            "",
+        ]
     if pending:
         parts.append(
             f"{len(pending)} staged proposal(s) from background review — surface this to the "
             f"user once early in the session and suggest /lore:pending."
         )
         parts.append("")
-    try:
-        conn = db_connect()
-        n_beliefs = conn.execute(
-            "SELECT count(*) FROM beliefs WHERE status = 'active'"
-        ).fetchone()[0]
-    except sqlite3.Error:
-        n_beliefs = 0
+    n_beliefs = 0
+    if scope in ("all", "project"):
+        try:
+            conn = db_connect()
+            n_beliefs = conn.execute(
+                "SELECT count(*) FROM beliefs WHERE status = 'active'"
+            ).fetchone()[0]
+        except sqlite3.Error:
+            n_beliefs = 0
     if n_beliefs:
         parts.append(
             f"Belief store: {n_beliefs} active beliefs (derived, uncurated)."
@@ -1168,7 +1304,7 @@ def cmd_inject(args) -> int:
     out = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": build_context(cwd),
+            "additionalContext": build_context(cwd, effective_scope(getattr(args, "scope", None))),
         }
     }
     # systemMessage is harness-displayed — the MOTD (and the pending notice in
@@ -1178,6 +1314,16 @@ def cmd_inject(args) -> int:
     if motd:
         out["systemMessage"] = motd
     print(json.dumps(out))
+    return 0
+
+
+def cmd_snapshot(args) -> int:
+    """SNAPSHOT FOR SUBAGENTS (2026-08-22): the same block cmd_inject renders,
+    as bare text — no hook JSON envelope, no MOTD. Meant to be prepended to a
+    subagent's prompt so it starts from the same memory the main session got;
+    --scope narrows to one tier for role-scoped agents. Rendering is
+    build_context, shared with inject/refresh, never a second copy."""
+    print(build_context(args.cwd or os.getcwd(), effective_scope(args.scope)))
     return 0
 
 
@@ -1246,7 +1392,10 @@ def cmd_refresh(args) -> int:
             "hookEventName": "UserPromptSubmit",
             "additionalContext": (
                 "LORE MEMORY REFRESH — current as of now; supersedes any earlier lore"
-                " snapshot in this conversation.\n\n" + build_context(cwd)
+                " snapshot in this conversation.\n\n"
+                # no --scope flag here, but LORE_SCOPE still applies: a refresh
+                # must not widen what inject narrowed.
+                + build_context(cwd, effective_scope(None))
             ),
         },
     }))
@@ -1462,7 +1611,8 @@ def repo_head(cwd: "str | None" = None) -> "str | None":
         return None
 
 
-def record_skill_outcomes(data: dict, cwd: "str | None" = None) -> int:
+def record_skill_outcomes(data: dict, cwd: "str | None" = None,
+                          agent: "str | None" = None) -> int:
     """Close the loop: store the reviewer's per-run success/failure verdicts, so the
     next review sees each recipe's track record and can propose update or retire."""
     learned = learned_skills()
@@ -1487,6 +1637,12 @@ def record_skill_outcomes(data: dict, cwd: "str | None" = None) -> int:
         if head:
             rec.setdefault("heads", []).append(head)
             rec["heads"] = rec["heads"][-10:]
+        # per-agent identity (2026-08-22): who judged this run, kept alongside
+        # the HEAD stamp and trimmed the same way — a backfill window's verdict
+        # weighs differently from a live session's when the judge reads the
+        # track record.
+        rec.setdefault("by", []).append(agent or agent_id())
+        rec["by"] = rec["by"][-10:]
         recorded += 1
     if recorded:
         save_skill_usage(usage)
@@ -1524,7 +1680,8 @@ def build_review_job(transcript: Path, slug: str,
                      span: "tuple[int, int] | None" = None,
                      part: "str | None" = None,
                      older: bool = False,
-                     cwd_hint: "str | None" = None) -> dict | None:
+                     cwd_hint: "str | None" = None,
+                     agent: "str | None" = None) -> dict | None:
     """The deriver job for one transcript, or None when it is too short to review.
 
     Split out of cmd_review so a batch runs the same prompt, the same
@@ -1561,7 +1718,11 @@ def build_review_job(transcript: Path, slug: str,
     if older:
         prompt += RECENCY_NOTE
     sid = transcript.stem if part is None else f"{transcript.stem}-{part}"
-    return {"prompt": prompt, "project": slug, "session_id": sid, "cwd": str(cwd_hint or "")}
+    # `agent` is claimed at job-build time and rides the job dict from here on:
+    # the worker may run minutes later in a process whose LORE_AGENT_ID says
+    # nothing about who ASKED for this review.
+    return {"prompt": prompt, "project": slug, "session_id": sid,
+            "cwd": str(cwd_hint or ""), "agent": agent or agent_id()}
 
 
 WORKER_MARKERS = (
@@ -1833,9 +1994,14 @@ def cmd_review(args) -> int:
 
         def _run_window(k_lo_hi):
             k, lo, hi = k_lo_hi
+            # window provenance (2026-08-22): each window derives as its own
+            # agent (backfill-w<k>), passed explicitly rather than through
+            # os.environ — the environment is shared across --workers threads,
+            # so an env hand-off would race; the job dict cannot.
             wjob = build_review_job(Path(transcript), slug, cwd_hint=cwd, span=(lo, hi),
                                     part=f"w{k:03d}",
-                                    older=(hi < n))
+                                    older=(hi < n),
+                                    agent=f"backfill-w{k}")
             if wjob is None:
                 return 0
             wfile = tmp / f"review-{wjob['session_id']}.json"
@@ -2019,9 +2185,11 @@ def worker_run(jobfile: Path) -> int:
         if data is None:
             print(f"no JSON in output: {proc.stdout[-2000:]}")
             return 1
-        staged = stage_proposals(data, job["project"], job["session_id"])
+        staged = stage_proposals(data, job["project"], job["session_id"],
+                                 derived_by=job.get("agent"))
         derived = derive_conclusions(data, job["project"], job["session_id"])
-        outcomes = record_skill_outcomes(data, cwd=job.get("cwd") or None)
+        outcomes = record_skill_outcomes(data, cwd=job.get("cwd") or None,
+                                         agent=job.get("agent"))
         print(f"[{utcnow()}] staged {staged} proposal(s), derived {derived} belief(s),"
               f" recorded {outcomes} skill outcome(s)")
         notify_staged(staged)
@@ -2079,7 +2247,8 @@ def derive_conclusions(data: dict, slug: str, session_id: str) -> int:
     return derived
 
 
-def stage_proposals(data: dict, slug: str, session_id: str) -> int:
+def stage_proposals(data: dict, slug: str, session_id: str,
+                    derived_by: "str | None" = None) -> int:
     pdir = ROOT / "pending"
     pdir.mkdir(parents=True, exist_ok=True)
     existing = {t.lower() for t in pending_texts(slug)}
@@ -2099,7 +2268,8 @@ def stage_proposals(data: dict, slug: str, session_id: str) -> int:
         FileExistsError to step over rather than a file to overwrite.
         """
         nonlocal staged
-        item |= {"created": utcnow(), "project": slug, "session_id": session_id}
+        item |= {"created": utcnow(), "project": slug, "session_id": session_id,
+                 "derived_by": derived_by or agent_id()}
         n = staged
         while True:
             try:
@@ -2176,7 +2346,9 @@ def cmd_pending(args) -> int:
         else:
             print(f"{pid}  skill/{item.get('action', 'add')}  {item.get('name')}")
             print(f"    {item.get('description')}")
-        print(f"    from session {item.get('session_id')} [{item.get('project')}]")
+        by = item.get("derived_by")
+        print(f"    from session {item.get('session_id')} [{item.get('project')}]"
+              + (f" [by {by}]" if by else ""))
     print(f"\n{len(items)} pending. approve: lore approve <id>|all   reject: lore reject <id>|all")
     return 0
 
@@ -2345,6 +2517,20 @@ def cmd_motd(args) -> int:
 
 def cmd_index(args) -> int:
     conn = db_connect()
+    if getattr(args, "live", None) is not None:
+        # --live with no value (or an empty "$TRANSCRIPT_PATH") falls back to
+        # the hook payload's transcript_path; a missing transcript is a no-op —
+        # a hook on the prompt loop must never fail over a file that is not
+        # there yet.
+        target = args.live or read_hook_input().get("transcript_path") or ""
+        if not target or not Path(target).exists():
+            return 0
+        added, consumed = index_live(conn, Path(target))
+        # stdout of a UserPromptSubmit hook is injected as context on exit 0,
+        # so the live path reports only when run interactively.
+        if sys.stdin.isatty():
+            print(f"live: +{added} message(s), {consumed} line(s) consumed")
+        return 0
     indexed, skipped = index_sessions(conn, force=args.force)
     print(f"indexed {indexed}, unchanged {skipped}")
     return 0
@@ -2572,7 +2758,14 @@ def main() -> int:
 
     sp = sub.add_parser("inject", help="SessionStart hook: emit memory snapshot as context")
     sp.add_argument("--cwd")
+    sp.add_argument("--scope", choices=SCOPES, help="render only this tier (default: LORE_SCOPE or all)")
     sp.set_defaults(fn=cmd_inject)
+
+    sp = sub.add_parser("snapshot",
+                        help="print the memory snapshot as plain text (prepend to a subagent prompt)")
+    sp.add_argument("--cwd")
+    sp.add_argument("--scope", choices=SCOPES, help="render only this tier (default: LORE_SCOPE or all)")
+    sp.set_defaults(fn=cmd_snapshot)
 
     sp = sub.add_parser(
         "refresh",
@@ -2610,6 +2803,10 @@ def main() -> int:
 
     sp = sub.add_parser("index", help="(re)index session transcripts")
     sp.add_argument("--force", action="store_true")
+    sp.add_argument("--live", nargs="?", const="", metavar="TRANSCRIPT",
+                    help="incrementally index one growing transcript (new complete lines"
+                         " only); with no value, transcript_path comes from the hook"
+                         " payload on stdin")
     sp.set_defaults(fn=cmd_index)
 
     sp = sub.add_parser("review", help="SessionEnd hook: stage memory/skill proposals")

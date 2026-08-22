@@ -238,6 +238,9 @@ Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
 | `LORE_NOTIFY` | auto | desktop notification when proposals are staged (`notify-send`); `0` disables |
 | `LORE_NOTIFY_ICON` | shipped `assets/logo.svg` | notification icon: an icon-theme name, or a path that exists |
 | `LORE_DEFER_DREAM` | unset | hold back the per-review belief reconciliation; run `lore dream` once instead |
+| `LORE_AGENT_ID` | `main` | names the deriving agent; staged proposals carry it as `derived_by`, skill outcomes record it, `lore pending` shows `[by <agent>]` (the `--full` backfill stamps each window `backfill-w<k>`) |
+| `LORE_SCOPE` | `all` | default tier for `snapshot`/`inject` when `--scope` is not given: `user`, `project` or `all` |
+| `LORE_STREAM_INDEX` | unset | `1` streams the growing transcript into the session index on every prompt (`lore index --live` via the UserPromptSubmit hook; new complete lines only, off by default) |
 | `LORE_SKIP` | unset | set to any value to no-op all hooks (the worker sets it) |
 
 ## Notes & caveats
