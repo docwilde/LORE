@@ -860,7 +860,8 @@ def cmd_ask(args) -> int:
     # "conf" is what the deriver asserted at extraction time, calibrated
     # against nothing — the evidence count on each line is the honest signal.
     print("(conf = deriver-claimed confidence, uncalibrated; weigh the evidence"
-          " count, which counts independent derivations, not verifications)")
+          " count, which counts independent derivations, not verifications."
+          " cal = Beta-posterior over recorded outcomes, shown from 3 outcomes up)")
     statuses = "('active','dormant')" if INCLUDE_DORMANT else "('active')"
     rows = conn.execute(
         f"SELECT {BELIEF_COLS_B} FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id"
@@ -869,7 +870,14 @@ def cmd_ask(args) -> int:
         (expr,),
     ).fetchall()
     for row in rows:
-        print(format_belief(conn, row))
+        line = format_belief(conn, row)
+        # CALIBRATED LABEL (2026-08-22): once a belief has 3+ ledger outcomes
+        # the empirical record outweighs the self-report enough to show — the
+        # uncalibrated conf stays on the line so the two can be compared.
+        c, x, _s = outcome_counts(conn, row[0])
+        if c + x + _s >= 3:
+            line += f"  cal={calibrated_confidence(row[3], c, x):.2f}"
+        print(line)
     if rows:
         # returned = referenced: the stamp is what keeps a belief that still
         # answers questions out of the dormant sweep.
@@ -895,6 +903,192 @@ def cmd_ask(args) -> int:
     else:
         print("(none)")
     print("Deepen: lore belief show <id> (evidence trail), lore session <id> --grep <term>.")
+    return 0
+
+
+# ---------------------------------------------------------------- outcomes ledger / calibration
+
+# Two recorded contradictions retire a belief from the working set (status
+# 'dormant', whatever its last_referenced): one contradiction can be the
+# corrector being wrong, two independent ones mean the claim answers
+# questions wrongly TODAY and must stop doing so before any dream pass
+# happens to reconcile it away.
+CONTRADICTIONS_TO_DORMANT = 2
+
+
+def record_outcome(conn: sqlite3.Connection, belief_id: int, event: str, source: str,
+                   session_id: "str | None" = None, agent: "str | None" = None,
+                   note: "str | None" = None) -> None:
+    """One ledger row; the single write path for every source (dream/user/audit),
+    so the dormancy trigger below cannot be bypassed by one of them."""
+    conn.execute(
+        "INSERT INTO belief_outcomes(belief_id, event, source, session_id, agent, note, created)"
+        " VALUES(?,?,?,?,?,?,?)",
+        (belief_id, event, source, session_id, agent or agent_id(),
+         one_line(note or "")[:300] or None, utcnow()),
+    )
+    if event == "contradicted":
+        n = conn.execute(
+            "SELECT count(*) FROM belief_outcomes WHERE belief_id = ? AND event = 'contradicted'",
+            (belief_id,),
+        ).fetchone()[0]
+        if n >= CONTRADICTIONS_TO_DORMANT:
+            # status guard: a superseded/retracted belief keeps its terminal
+            # status — only an active one is pulled from the working set.
+            conn.execute(
+                "UPDATE beliefs SET status = 'dormant', updated = ?"
+                " WHERE id = ? AND status = 'active'",
+                (utcnow(), belief_id),
+            )
+
+
+def outcome_counts(conn: sqlite3.Connection, belief_id: int) -> tuple[int, int, int]:
+    """(confirms, contradicts, stales) for one belief."""
+    row = conn.execute(
+        "SELECT coalesce(sum(event = 'confirmed'), 0),"
+        " coalesce(sum(event = 'contradicted'), 0), coalesce(sum(event = 'stale'), 0)"
+        " FROM belief_outcomes WHERE belief_id = ?",
+        (belief_id,),
+    ).fetchone()
+    return int(row[0]), int(row[1]), int(row[2])
+
+
+def calibrated_confidence(prior: float, confirms: int, contradicts: int) -> float:
+    """Beta posterior mean over the deriver's claimed confidence.
+
+    The prior counts as 2 pseudo-observations split by the claimed number
+    (alpha = prior*2 + confirms, beta = (1-prior)*2 + contradicts): with no
+    outcomes the value IS the prior, and each real outcome outweighs the
+    self-report a little more. Prior strength 2 is deliberately weak — three
+    contradictions drag a 0.9 claim under 0.4.
+    """
+    alpha = prior * 2 + confirms
+    beta = (1 - prior) * 2 + contradicts
+    return alpha / (alpha + beta)
+
+
+def cmd_outcome(args) -> int:
+    """Manual/pushback path: the user (or the agent relaying the user's
+    correction) records what actually happened to a cited belief."""
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT id, claim, status FROM beliefs WHERE id = ?", (args.id,)
+    ).fetchone()
+    if not row:
+        print("no such belief.", file=sys.stderr)
+        return 1
+    record_outcome(conn, args.id, args.event, "user", note=args.note)
+    conn.commit()
+    c, x, s = outcome_counts(conn, args.id)
+    status = conn.execute("SELECT status FROM beliefs WHERE id = ?", (args.id,)).fetchone()[0]
+    print(f"belief {args.id}: {args.event} recorded "
+          f"({c} confirmed / {x} contradicted / {s} stale, status {status}).")
+    if status != row[2]:
+        print(f"belief {args.id} went {status}: "
+              f"{CONTRADICTIONS_TO_DORMANT} contradictions retire a claim from the working set.")
+    return 0
+
+
+# Best-effort machine checks for `lore audit` — CLI-only, no LLM. A path-shaped
+# fragment is tested for existence; a KEY=value or --flag token is grepped in
+# the project repo. Both prove presence, not truth: PASS means "the referent
+# still exists", FAIL means "the claim points at something that is gone" —
+# which is exactly the staleness the ledger wants to catch.
+AUDIT_PATH = re.compile(r"/[\w./~-]+/[\w./-]+")
+AUDIT_TOKEN = re.compile(r"\b[A-Za-z_]\w*=[^\s'\"]+|--[a-z][\w-]+")
+
+
+def audit_check(claim: str, cwd: str) -> tuple[str, str]:
+    """(verdict, detail): PASS / FAIL / UNCHECKABLE for one claim.
+
+    Path beats token when both appear — existence is the cheaper and stronger
+    signal. Trailing sentence punctuation is stripped from a matched path
+    ("lives at /opt/x/y." would otherwise never exist). A token grep outside a
+    git repo (or with git missing) is UNCHECKABLE, never FAIL: absence of a
+    checkable repo says nothing about the claim.
+    """
+    m = AUDIT_PATH.search(claim)
+    if m:
+        p = Path(os.path.expanduser(m.group(0).rstrip(".,;:")))
+        return ("PASS" if p.exists() else "FAIL", f"path {p}")
+    m = AUDIT_TOKEN.search(claim)
+    if m:
+        token = m.group(0).rstrip(".,;:")
+        try:
+            r = subprocess.run(["git", "grep", "-q", "-F", token], cwd=cwd,
+                               capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return ("UNCHECKABLE", f"git grep unavailable for {token!r}")
+        if r.returncode == 0:
+            return ("PASS", f"git grep {token!r} in {cwd}")
+        if r.returncode == 1:
+            return ("FAIL", f"git grep {token!r} in {cwd}: no match")
+        return ("UNCHECKABLE", f"{cwd} is not a git repo")
+    return ("UNCHECKABLE", "no machine-checkable fragment")
+
+
+def cmd_audit(args) -> int:
+    """Sample active beliefs and feed the ledger for free where a check is
+    mechanical; the printed layout doubles as a verification worksheet for
+    the UNCHECKABLE remainder (which records nothing — a claim no machine
+    can test must not be scored by one)."""
+    conn = db_connect()
+    cwd = getattr(args, "cwd", None) or os.getcwd()
+    rows = conn.execute(
+        f"SELECT {BELIEF_COLS} FROM beliefs WHERE status = 'active'"
+        " ORDER BY RANDOM() LIMIT ?",
+        (args.sample,),
+    ).fetchall()
+    if not rows:
+        print("no active beliefs to audit.")
+        return 0
+    recorded = 0
+    for bid, subject, claim, conf, _status in rows:
+        verdict, detail = audit_check(claim, cwd)
+        print(f"[{bid}] ({subject}, conf {conf:.2f}) {claim}")
+        print(f"      {verdict} — {detail}")
+        if verdict == "PASS":
+            record_outcome(conn, bid, "confirmed", "audit", note=detail)
+            recorded += 1
+        elif verdict == "FAIL":
+            record_outcome(conn, bid, "stale", "audit", note=detail)
+            recorded += 1
+    conn.commit()
+    print(f"\naudited {len(rows)} belief(s), recorded {recorded} outcome(s);"
+          " UNCHECKABLE records nothing.")
+    return 0
+
+
+def cmd_stats(args) -> int:
+    """Calibration display: does a deriver-claimed 0.9 outperform a 0.6?
+
+    Buckets over ALL beliefs, not only active — a belief contradicted into
+    dormancy is precisely the evidence the curve exists to show, and dropping
+    it would bias every bucket upward. Empirical precision counts stale in
+    the denominator: a stale claim answered questions wrongly, whichever
+    event name retired it.
+    """
+    conn = db_connect()
+    total = conn.execute("SELECT count(*) FROM belief_outcomes").fetchone()[0]
+    rows = conn.execute(
+        "SELECT round(b.confidence, 1) AS bucket, count(DISTINCT b.id), count(o.id),"
+        " coalesce(sum(o.event = 'confirmed'), 0),"
+        " coalesce(sum(o.event = 'contradicted'), 0), coalesce(sum(o.event = 'stale'), 0)"
+        " FROM beliefs b LEFT JOIN belief_outcomes o ON o.belief_id = b.id"
+        " GROUP BY bucket ORDER BY bucket"
+    ).fetchall()
+    print("claimed  n_beliefs  n_outcomes  precision")
+    for bucket, nb, no, c, x, s in rows:
+        prec = f"{c / (c + x + s):.2f}" if (c + x + s) else "    -"
+        print(f"{bucket:>7.1f}  {nb:>9}  {no:>10}  {prec:>9}")
+    print(f"\nledger total: {total} outcome row(s)")
+    if total < 100:
+        # loud on purpose: below ~100 outcomes the per-bucket precision is a
+        # handful of coin flips, and a confident-looking table would invite
+        # exactly the overtrust this ledger exists to end.
+        print(f"!!! UNCALIBRATED — n={total}, display gate at 100 !!!")
+        print("!!! per-bucket precision below is anecdote, not a curve — keep"
+              " recording outcomes (lore outcome / lore audit) !!!")
     return 0
 
 
@@ -1074,6 +1268,12 @@ def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int
                                    f"merge of {a}+{b}: {reason}")
             belief_supersede(conn, a, nid, reason)
             belief_supersede(conn, b, nid, reason)
+            # LEDGER (2026-08-22): two independent derivations landing on the
+            # same claim is a confirmation the dreamer noticed for free — it
+            # accrues to the survivor, whose evidence rows the supersede just
+            # re-pointed there too.
+            record_outcome(conn, nid, "confirmed", "dream",
+                           note=f"independent duplicates [{a}]+[{b}] merged: {reason}")
             changed += 1
             print(f"merged [{a}]+[{b}] -> [{nid}]")
         elif decision in ("supersede_a", "supersede_b"):
@@ -1085,6 +1285,12 @@ def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int
                 conn.execute("INSERT INTO belief_fts(belief_id, claim) VALUES(?,?)",
                              (winner, one_line(str(res["claim"]))))
             belief_supersede(conn, loser, winner, reason)
+            # LEDGER (2026-08-22): a refuted belief was wrong while it was
+            # active — that is a contradiction outcome, recorded on the loser
+            # AFTER belief_supersede so the dormancy trigger's status guard
+            # sees 'superseded' and leaves the terminal status in place.
+            record_outcome(conn, loser, "contradicted", "dream",
+                           note=f"superseded by [{winner}]: {reason}")
             changed += 1
             print(f"superseded [{loser}] by [{winner}]: {reason}")
         else:
@@ -1286,20 +1492,23 @@ BANNER_WORDMARK = [
     "           Lots Of Reconciled Engrams",
 ]
 
+# The crab (2026-08-22, replacing the reading android): claws OUT TO THE
+# SIDES at body height -- top-mounted claws read as bunny ears. The rising
+# dot trail is the belief motif shared with logo.svg and assets/banner.png.
 BANNER_MASCOT = [
-    "              ◌",
-    "            ∘",
-    "          ·",
-    "    ▐▛███▜▌",
-    "   ▝▜█████▛▘",
-    " ▗▄▄▄▄▄▄▖▗▄▄▄▄▄▄▖",
-    " ▐ ┄┄┄┄ ▌▐ ┄┄┄┄ ▌",
-    " ▝▀▀▀▀▀▀▘▝▀▀▀▀▀▀▘",
+    "                    ◌",
+    "                  ∘",
+    "                ·",
+    "       ▄▄█████▄▄",
+    " ▟▀▖ ▄██ ◉   ◉ ██▄ ▗▀▙",
+    " ▜▄▘ ▀██▄ ▽ ▄▄██▀  ▚▄▛",
+    "       ▀▀█████▀▀",
+    "      ▞▘▐▌   ▐▌▝▚",
 ]
 
 
 def render_banner(stats: list[str]) -> str:
-    """The wordmark, then the mascot reading its tome, thinking the stats."""
+    """The wordmark, then the crab, its belief trail rising to the stats."""
     w = max(len(s) for s in stats)
     ind = " " * 16
     # leading blank line: the TUI prints its own prefix on the first line,
@@ -2898,6 +3107,23 @@ def main() -> int:
     sp.add_argument("question")
     sp.add_argument("--cwd")
     sp.set_defaults(fn=cmd_ask)
+
+    sp = sub.add_parser("outcome",
+                        help="record what happened to a belief (calibration ledger)")
+    sp.add_argument("id", type=int)
+    sp.add_argument("event", choices=("confirmed", "contradicted", "stale"))
+    sp.add_argument("--note", help="short gist of the evidence, e.g. the user's correction")
+    sp.set_defaults(fn=cmd_outcome)
+
+    sp = sub.add_parser("audit",
+                        help="sample active beliefs, machine-check what can be, feed the ledger")
+    sp.add_argument("--sample", type=int, default=10)
+    sp.add_argument("--cwd")
+    sp.set_defaults(fn=cmd_audit)
+
+    sp = sub.add_parser("stats",
+                        help="calibration curve: empirical precision per claimed-confidence bucket")
+    sp.set_defaults(fn=cmd_stats)
 
     sp = sub.add_parser("dream", help="reconcile duplicate/contradicting beliefs, stage promotions")
     sp.add_argument("--dry-run", action="store_true")
