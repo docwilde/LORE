@@ -268,3 +268,37 @@ class TestUserModelConclusions(DBTest):
     def test_belief_subject_keeps_user_model_literal(self):
         self.assertEqual(lore.belief_subject("user-model", "any-slug"),
                          "user-model")
+
+
+class TestDreamMergeSupersede(DBTest):
+    """0.30.1 regression (code-review CRITICAL #1/#3): a dreamer merge whose
+    text equals a source belief must not make that source supersede itself and
+    vanish; belief_supersede must never self-supersede or touch a terminal
+    belief."""
+
+    def test_merge_claim_equal_to_source_keeps_a_survivor(self):
+        conn = self.connect()
+        a, _ = lore.belief_insert(conn, "project:-t", "alpha fact", 0.8, "s1", "-t", None)
+        b, _ = lore.belief_insert(conn, "project:-t", "beta fact", 0.8, "s2", "-t", None)
+        # merged text identical to belief a's claim (the poison case)
+        nid, _ = lore.belief_insert(conn, "project:-t", "alpha fact", 0.9,
+                                    None, "-t", f"merge of {a}+{b}", exclude_ids={a, b})
+        self.assertNotIn(nid, {a, b})
+        lore.belief_supersede(conn, a, nid, "merged")
+        lore.belief_supersede(conn, b, nid, "merged")
+        active = [r[0] for r in conn.execute(
+            "SELECT id FROM beliefs WHERE status='active' AND subject='project:-t'").fetchall()]
+        self.assertEqual(active, [nid])  # exactly one survivor, the merged belief
+
+    def test_supersede_is_noop_on_self_and_on_terminal(self):
+        conn = self.connect()
+        a, _ = lore.belief_insert(conn, "project:-t2", "x", 0.8, "s", "-t2", None)
+        b, _ = lore.belief_insert(conn, "project:-t2", "y", 0.8, "s", "-t2", None)
+        lore.belief_supersede(conn, a, a, "self")  # no-op
+        self.assertEqual(conn.execute(
+            "SELECT status FROM beliefs WHERE id=?", (a,)).fetchone()[0], "active")
+        lore.belief_supersede(conn, a, b, "first")   # a -> superseded by b
+        lore.belief_supersede(conn, a, b, "second")  # already terminal: no-op
+        row = conn.execute("SELECT status, resolution FROM beliefs WHERE id=?", (a,)).fetchone()
+        self.assertEqual(row[0], "superseded")
+        self.assertEqual(row[1], "first")  # not overwritten by the second call

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.30.1 — 2026-08-22
+- **Fix (code-review CRITICAL): dreamer merge could vanish a belief.** A merged claim textually equal to one of its two source beliefs made `belief_insert` reuse that source id, so the caller superseded it by itself -- both sources terminal, no active survivor, the fact gone from ask/list/snapshot. `belief_insert` gains `exclude_ids` (the merge passes both sources); `belief_supersede` now refuses self-supersede and only transitions an ACTIVE belief. Regression-tested.
+- **Fix (code-review CRITICAL): dreamer had no lock.** `dream_run` now takes a non-blocking flock (`dream.lock`); a second dreamer racing the same DB skips instead of writing conflicting transitions on a stale snapshot. POSIX flock; no-op where fcntl is absent.
+- `marketplace.json` version drift fixed (was 0.26.0, now tracks plugin.json).
+
 ## 0.30.0 — 2026-08-22
 - Banner graphical elements (wordmark, crab + belief trail) render in Claude orange (#D97757, truecolor) on real terminals; `LORE_MOTD_COLOR=1/0` forces; the SessionStart hook path stays plain automatically (stdout captured, not a tty).
 - README "What you see at session start" rewritten for the current banner (crab, stats box, motd parity) — it still showed the retired reading-android mascot.
