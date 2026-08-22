@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.27.0 — 2026-08-22
+- **PreCompact review:** compaction now triggers the same detached review worker as SessionEnd, deriving beliefs from the transcript at the exact moment its detail is about to be summarized away. SessionEnd's newest-window digest cannot see what compaction dropped, and SessionEnd itself may fire hours later or never (crash) — long sessions were the least-captured ones. A session that compacts and later ends is derived twice; belief reinforcement absorbs the overlap. Opt out alone with `LORE_DISABLE_PRECOMPACT=1`; `LORE_DISABLE_REVIEW` and `LORE_SKIP` cover it too.
+- `plugin.json` version field caught up (had been stuck at 0.19.0 while the marketplace registry advanced).
+
 ## 0.26.0 — 2026-08-22
 - **Stage 7 — act-time consult (opt-in, `LORE_CONSULT=1`):** `lore consult "<topic>"` splits matching beliefs into STEER (outcome-calibrated, n>=3 — may shape the decision) and CITE ONLY (deriver-claimed — mention, never follow). The ledger is the admission ticket to the act-time loop.
 - **User-model beliefs as a separate category:** the deriver gains an interaction-model channel (subject `user-model`: communication preferences, reaction patterns, decision style — grounded in observed behavior, never diagnostic); they count separately in status (`N user-model / M world`), self-refresh `last_referenced` when injected, and render as a labeled snapshot section — transparency instead of a gate for response-shaping; actions still require curated or calibrated.
