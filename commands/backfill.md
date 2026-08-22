@@ -19,7 +19,7 @@ the current project.
    (default 300), one deriver call (haiku) per window. For anything over ~20
    windows, gate on the user's go with AskUserQuestion.
 3. Run each transcript sequentially:
-   `LORE_DEFER_DREAM=1 LORE_NOTIFY=0 python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" review --transcript <path> --cwd <cwd> --foreground --full`
+   `LORE_DEFER_DREAM=1 LORE_NOTIFY=0 python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" review --transcript <path> --cwd <cwd> --foreground --full --workers 4`
 4. After the batch: `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" dream` once,
    then `status`, then send the user to `/lore:pending` for triage. Warn that a
    many-window backfill can stage a large triage pile — that is expected; the

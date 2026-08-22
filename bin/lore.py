@@ -1596,20 +1596,42 @@ def cmd_review(args) -> int:
             return 0
         record_skill_usage(_all)
         wins = [(i, min(i + DIGEST_LAST_N, n)) for i in range(0, n, DIGEST_LAST_N)]
-        print(f"full backfill: {n} messages, {len(wins)} window(s) of {DIGEST_LAST_N}")
+        workers = max(1, getattr(args, "workers", 1) or 1)
+        print(f"full backfill: {n} messages, {len(wins)} window(s) of "
+              f"{DIGEST_LAST_N}, workers={workers}")
         os.environ["LORE_SKIP"] = "1"
         tmp = ROOT / "tmp"
         tmp.mkdir(parents=True, exist_ok=True)
-        rc = 0
-        for k, (lo, hi) in enumerate(wins, 1):
+
+        def _run_window(k_lo_hi):
+            k, lo, hi = k_lo_hi
             wjob = build_review_job(Path(transcript), slug, span=(lo, hi),
                                     part=f"w{k:03d}")
             if wjob is None:
-                continue
+                return 0
             wfile = tmp / f"review-{wjob['session_id']}.json"
             wfile.write_text(json.dumps(wjob), encoding="utf-8")
             print(f"-- window {k}/{len(wins)} messages {lo}:{hi}")
-            rc = worker_run(wfile) or rc
+            return worker_run(wfile)
+
+        items = [(k, lo, hi) for k, (lo, hi) in enumerate(wins, 1)]
+        if workers == 1:
+            # Sequential: each window's job is built right before it runs, so
+            # its do-not-repeat pending list includes what earlier windows
+            # staged. Zero duplicate risk, longest wall clock.
+            rc = 0
+            for it in items:
+                rc = _run_window(it) or rc
+            return rc
+        # Parallel: windows cannot see each other's staged proposals (each
+        # reads pending at its own build time), so duplicates ARE possible —
+        # a triage cost, not a correctness one (id claiming is atomic).
+        # Deliberate trade, same as the documented cross-project batch case.
+        from concurrent.futures import ThreadPoolExecutor
+        rc = 0
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for r in ex.map(_run_window, items):
+                rc = r or rc
         return rc
     job = build_review_job(Path(transcript), slug)
     if job is None:
@@ -2153,6 +2175,9 @@ def main() -> int:
     sp.add_argument("--foreground", action="store_true",
                     help="run the worker inline (for harness-tracked background runs)")
     sp.add_argument("--dry-run", action="store_true", help="print the extraction prompt and exit")
+    sp.add_argument("--workers", type=int, default=1,
+                    help="parallel deriver calls for --full windows (>1 can "
+                         "stage duplicates across windows; triage cost only)")
     sp.add_argument("--full", action="store_true",
                     help="page the WHOLE transcript through the deriver in "
                          "DIGEST_LAST_N-message windows (foreground; use with "
