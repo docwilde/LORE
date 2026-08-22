@@ -238,3 +238,33 @@ class TestAuditSampler(DBTest):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestUserModelConclusions(DBTest):
+    """0.27.1 regression: scope 'user-model' conclusions must land as
+    subject 'user-model' beliefs, not be silently dropped (the 0.26.0 bug:
+    the INTERACTION MODEL prompt channel asked for the scope while
+    derive_conclusions only admitted user/project)."""
+
+    def test_user_model_scope_is_written(self):
+        n = lore.derive_conclusions(
+            {"conclusions": [
+                {"scope": "user-model", "claim": "prefers terse status updates",
+                 "confidence": 0.7, "evidence": "asked for TLDRs twice"},
+                {"scope": "user", "claim": "runs pilots himself",
+                 "confidence": 0.8},
+                {"scope": "bogus", "claim": "dropped", "confidence": 0.5},
+            ]},
+            "slugx", "sess-um-1")
+        self.assertEqual(n, 2)
+        conn = self.connect()
+        subjects = {r[0] for r in conn.execute(
+            "SELECT subject FROM beliefs WHERE claim IN "
+            "('prefers terse status updates', 'runs pilots himself')"
+        ).fetchall()}
+        self.assertIn("user-model", subjects)
+        self.assertIn("user", subjects)
+
+    def test_belief_subject_keeps_user_model_literal(self):
+        self.assertEqual(lore.belief_subject("user-model", "any-slug"),
+                         "user-model")

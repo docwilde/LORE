@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.27.1 — 2026-08-22
+- **Fix: user-model beliefs were never written.** The 0.26.0 interaction-model prompt channel asked for subject `user-model`, but the conclusions JSON schema only offered `scope:"user|project"` and `derive_conclusions` silently dropped any other scope — a full-session backfill produced 0 user-model beliefs. Schema now offers `user|project|user-model`, the write-site gate admits it, and `belief_subject` keeps the literal `user-model` subject. Found by measuring (450 rebuilt beliefs, 0 user-model), not by review.
+
 ## 0.27.0 — 2026-08-22
 - **PreCompact review:** compaction now triggers the same detached review worker as SessionEnd, deriving beliefs from the transcript at the exact moment its detail is about to be summarized away. SessionEnd's newest-window digest cannot see what compaction dropped, and SessionEnd itself may fire hours later or never (crash) — long sessions were the least-captured ones. A session that compacts and later ends is derived twice; belief reinforcement absorbs the overlap. Opt out alone with `LORE_DISABLE_PRECOMPACT=1`; `LORE_DISABLE_REVIEW` and `LORE_SKIP` cover it too.
 - `plugin.json` version field caught up (had been stuck at 0.19.0 while the marketplace registry advanced).
