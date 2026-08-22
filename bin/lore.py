@@ -54,8 +54,8 @@ PROJECTS_DIR = Path(os.environ.get("LORE_PROJECTS_DIR", str(Path.home() / ".clau
 
 MSG_TRUNC = 4000          # chars kept per indexed message
 DIGEST_MSG_TRUNC = 700    # chars kept per message in the review digest
-DIGEST_TOTAL_CAP = 28000  # chars kept for the whole digest
-DIGEST_LAST_N = 140       # newest messages considered for the digest (tool lines included)
+DIGEST_TOTAL_CAP = int(os.environ.get("LORE_DIGEST_TOTAL_CAP", "28000"))  # chars kept for the whole digest
+DIGEST_LAST_N = int(os.environ.get("LORE_DIGEST_LAST_N", "140"))  # newest messages considered for the digest (tool lines included)
 
 
 def utcnow() -> str:
