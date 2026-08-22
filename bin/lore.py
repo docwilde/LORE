@@ -31,8 +31,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(os.environ.get("LORE_ROOT", str(Path.home() / ".claude" / "lore")))
-USER_CAP = int(os.environ.get("LORE_USER_CAP", "1375"))
-MEMORY_CAP = int(os.environ.get("LORE_MEMORY_CAP", "2200"))
+USER_CAP = int(os.environ.get("LORE_USER_CAP", "2750"))
+MEMORY_CAP = int(os.environ.get("LORE_MEMORY_CAP", "4400"))
 # Per-role models for the three Honcho roles. LORE_REVIEW_MODEL is the
 # umbrella override for the two headless roles; per-role defaults differ —
 # extraction is easy (haiku), reconciliation is the judgment-heavy role
