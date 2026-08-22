@@ -189,7 +189,7 @@ class TestStageRows(StageEnvMixin, unittest.TestCase):
     def test_default_states(self):
         states = {stage: state for stage, _var, state in lore.stage_rows()}
         self.assertEqual(states, {"inject": "on", "index": "on", "review": "on",
-                                  "beliefs": "on", "skills": "on", "streaming": "off"})
+                                  "beliefs": "on", "skills": "on", "consult": "off", "streaming": "off"})
 
     def test_settings_value_wins_for_display(self):
         (self.tmp / "settings.json").write_text(

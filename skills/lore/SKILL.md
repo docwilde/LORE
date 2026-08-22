@@ -65,3 +65,7 @@ lore reject <id>|all
 lore status             # usage %, index size, pending count
 lore doctor             # environment checks, auto-memory conflict warning
 ```
+
+## Act-time consult (stage 7, opt-in)
+
+When `LORE_CONSULT=1` is set: before a consequential decision (architecture choice, destructive operation, cost-bearing run, choosing between approaches the user might care about), run `lore consult "<topic terms>"`. Beliefs under STEER carry outcome-calibrated confidence — let them shape the decision. Beliefs under CITE ONLY are the deriver's unverified self-reports — you may mention them ("the store believes X, uncalibrated"), never act on them alone. If STEER is empty, decide on your own judgment and the curated memory snapshot, as always.

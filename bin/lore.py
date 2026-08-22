@@ -62,8 +62,8 @@ PROJECTS_DIR = Path(os.environ.get("LORE_PROJECTS_DIR", str(Path.home() / ".clau
 
 MSG_TRUNC = 4000          # chars kept per indexed message
 DIGEST_MSG_TRUNC = 700    # chars kept per message in the review digest
-DIGEST_TOTAL_CAP = int(os.environ.get("LORE_DIGEST_TOTAL_CAP", "100000"))  # chars kept for the whole digest
-DIGEST_LAST_N = int(os.environ.get("LORE_DIGEST_LAST_N", "300"))  # newest messages considered for the digest (tool lines included)
+DIGEST_TOTAL_CAP = int(os.environ.get("LORE_DIGEST_TOTAL_CAP", "250000"))  # chars kept for the whole digest
+DIGEST_LAST_N = int(os.environ.get("LORE_DIGEST_LAST_N", "500"))  # newest messages considered for the digest (tool lines included)
 
 
 def utcnow() -> str:
@@ -128,6 +128,12 @@ STAGE_SWITCHES = {
     "review": "LORE_DISABLE_REVIEW",
     "beliefs": "LORE_DISABLE_BELIEFS",
     "skills": "LORE_DISABLE_SKILLS",
+}
+
+# Opt-in stages (enable-var semantics, inverse of STAGE_SWITCHES): shown in
+# the config table but never routed through stage_disabled().
+OPT_IN_STAGES = {
+    "consult": "LORE_CONSULT",
 }
 
 
@@ -1113,6 +1119,43 @@ def cmd_audit(args) -> int:
     return 0
 
 
+def cmd_consult(args) -> int:
+    """ACT-TIME CONSULT (2026-08-22, stage 7, opt-in via LORE_CONSULT=1):
+    before a consequential decision the agent queries the belief store --
+    but influence is earned, not asserted. Beliefs with outcome-calibrated
+    confidence (>= 3 ledger rows) print under STEER and may shape the
+    decision; everything else prints under CITE ONLY and may be mentioned,
+    never followed. The ledger is the admission ticket to the act-time
+    loop. No LLM call: pure retrieval, the agent reasons over the split."""
+    conn = db_connect()
+    q = " ".join(args.query)
+    rows = conn.execute(
+        "SELECT b.id, b.subject, b.claim, b.confidence, "
+        "(SELECT count(*) FROM belief_outcomes o WHERE o.belief_id = b.id) AS n_out, "
+        "(SELECT sum(CASE WHEN o.event='confirmed' THEN 1 ELSE 0 END) FROM belief_outcomes o WHERE o.belief_id = b.id) AS n_conf "
+        "FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id "
+        "WHERE belief_fts MATCH ? AND b.status = 'active' "
+        "ORDER BY bm25(belief_fts) LIMIT ?", (fts_expr(q, " OR "), args.limit)).fetchall()
+    if not rows:
+        print("no matching active beliefs.")
+        return 0
+    steer, cite = [], []
+    for bid, subj, claim, conf, n_out, n_conf in rows:
+        n_out = n_out or 0
+        if n_out >= 3:
+            cal = calibrated_confidence(conf, n_conf or 0, n_out - (n_conf or 0))
+            steer.append(f"  [{bid}] cal={cal:.2f} (n={n_out}) {one_line(claim)[:140]}")
+        else:
+            cite.append(f"  [{bid}] conf={conf:.2f} (uncalibrated, n={n_out}) {one_line(claim)[:140]}")
+    if steer:
+        print("STEER (outcome-calibrated -- may shape the decision):")
+        print("\n".join(steer))
+    if cite:
+        print("CITE ONLY (deriver-claimed -- mention, never follow):")
+        print("\n".join(cite))
+    return 0
+
+
 def cmd_stats(args) -> int:
     """Calibration display: does a deriver-claimed 0.9 outperform a 0.6?
 
@@ -1410,6 +1453,31 @@ def _freshness_rule() -> str:
         " you make now reaches your context within that window; the refresh supersedes"
         " every earlier copy in the conversation."
     )
+
+
+def interaction_model_lines(limit: int = 5) -> "list[str]":
+    """Top active user-model beliefs for the snapshot's Interaction model
+    section (2026-08-22). Transparency IS the safeguard here: the user sees
+    the derived model of them that is active, labeled uncalibrated, every
+    session -- response-shaping earns visibility, not a gate; actions still
+    require curated memory or calibrated beliefs."""
+    try:
+        conn = db_connect()
+        rows = conn.execute(
+            "SELECT b.id, claim, confidence,"
+            " (SELECT count(*) FROM belief_outcomes o WHERE o.belief_id = b.id)"
+            " FROM beliefs b WHERE status = 'active' AND subject = 'user-model'"
+            " ORDER BY confidence DESC, updated DESC LIMIT ?", (limit,)).fetchall()
+        if rows:
+            conn.execute(
+                "UPDATE beliefs SET last_referenced = ? WHERE id IN (%s)"
+                % ",".join(str(r[0]) for r in rows), (utcnow(),))
+            conn.commit()
+        rows = [r[1:] for r in rows]
+    except Exception:                                   # noqa: BLE001
+        return []
+    return [f"- {one_line(c)[:160]} (conf {v:.2f}{', n=' + str(n) if n else ''})"
+            for c, v, n in rows]
 
 
 def build_context(cwd: str, scope: str = "all") -> str:
@@ -1739,6 +1807,14 @@ The same asymmetry applies to the user scope: a preference held across sessions 
 whereas one decision, approval or authorization given once in one session is not, and must \
 never be generalized into a standing trait or a permission — recording an approval as though \
 it were a preference invites a later session to act on consent that was never given.
+
+INTERACTION MODEL (a conclusions sub-channel, subject "user-model"): also derive how this \
+user works and wants to be worked with -- communication preferences (terse vs narrated, when \
+they want evidence vs summary), reaction patterns (what draws pushback, what earns trust), \
+decision style, energy/focus patterns visible in the transcript. Ground every claim in \
+observed behavior from THIS digest; never diagnose, never speculate about mental state beyond \
+what the user themselves expressed. These shape the agent's tone and approach in later \
+sessions; they never authorize actions.
 
 Personal data stays out of both stores. Do NOT record names, email addresses, phone numbers, \
 postal addresses, usernames or account handles of people, the name of any customer, client, \
@@ -2862,7 +2938,8 @@ def cmd_status(args) -> int:
     n_active = conn.execute("SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
     n_dormant = conn.execute("SELECT count(*) FROM beliefs WHERE status = 'dormant'").fetchone()[0]
     n_total = conn.execute("SELECT count(*) FROM beliefs").fetchone()[0]
-    print(f"belief store:    {n_active} active / {n_dormant} dormant / {n_total} total")
+    n_um = conn.execute("SELECT count(*) FROM beliefs WHERE status='active' AND subject='user-model'").fetchone()[0]
+    print(f"belief store:    {n_active} active ({n_um} user-model / {n_active - n_um} world) / {n_dormant} dormant / {n_total} total")
     print(f"models:          deriver={DERIVER_MODEL} dreamer={DREAMER_MODEL}"
           f" dialectic={DIALECTIC_MODEL or '(session default)'}"
           f"  (claude: {find_claude() or 'NOT FOUND'})")
@@ -2971,7 +3048,9 @@ def stage_rows() -> list[tuple[str, str, str]]:
 
     rows = [(stage, var, "off" if val(var) not in ("", "0") else "on")
             for stage, var in STAGE_SWITCHES.items()]
-    # streaming is the one opt-IN stage: on only when explicitly "1".
+    # Opt-IN stages: on only when explicitly "1".
+    for stage, var in OPT_IN_STAGES.items():
+        rows.append((stage, var, "on" if val(var) == "1" else "off"))
     rows.append(("streaming", "LORE_STREAM_INDEX",
                  "on" if val("LORE_STREAM_INDEX") == "1" else "off"))
     return rows
@@ -3396,6 +3475,10 @@ def main() -> int:
     sp.add_argument("--cwd")
     sp.set_defaults(fn=cmd_audit)
 
+    sp = sub.add_parser("consult", help="act-time belief consult: calibrated beliefs STEER, uncalibrated CITE ONLY")
+    sp.add_argument("query", nargs="+")
+    sp.add_argument("--limit", type=int, default=8)
+    sp.set_defaults(fn=cmd_consult)
     sp = sub.add_parser("stats",
                         help="calibration curve: empirical precision per claimed-confidence bucket")
     sp.set_defaults(fn=cmd_stats)
