@@ -2078,6 +2078,40 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_motd(args) -> int:
+    """One-screen greeting: the DELTA view. `status` answers "what is the
+    state"; motd answers "what changed since I last looked" — beliefs added
+    in the last 24h/7d and the newest claims verbatim. Everything else it
+    would show is status's job, so it stays thin on purpose."""
+    slug = project_slug(args.cwd or os.getcwd())
+    user_entries = read_entries(memory_path("user", slug))
+    proj_entries = read_entries(memory_path("project", slug))
+    print(f"memory  user {usage_line(user_entries, USER_CAP)} · "
+          f"project {usage_line(proj_entries, MEMORY_CAP)}")
+    n_pending = len(load_pending())
+    conn = db_connect()
+    n_active = conn.execute(
+        "SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
+    d1 = conn.execute(
+        "SELECT count(*) FROM beliefs WHERE created >= datetime('now', '-1 day')"
+    ).fetchone()[0]
+    d7 = conn.execute(
+        "SELECT count(*) FROM beliefs WHERE created >= datetime('now', '-7 day')"
+    ).fetchone()[0]
+    print(f"beliefs {n_active} active · +{d1} last 24h · +{d7} last 7d · "
+          f"pending {n_pending}")
+    rows = conn.execute(
+        "SELECT subject, claim, confidence FROM beliefs WHERE status='active' "
+        "ORDER BY created DESC LIMIT 5").fetchall()
+    if rows:
+        print("newest beliefs:")
+        for subj, claim, conf in rows:
+            print(f"  [{conf:.1f}] {subj}: {one_line(claim)[:110]}")
+    if n_pending:
+        print(f"-> {n_pending} proposal(s) await triage: /lore:pending")
+    return 0
+
+
 def cmd_index(args) -> int:
     conn = db_connect()
     indexed, skipped = index_sessions(conn, force=args.force)
@@ -2271,6 +2305,9 @@ def main() -> int:
     sp = sub.add_parser("status", help="memory usage, index and pending counts")
     sp.add_argument("--cwd")
     sp.set_defaults(fn=cmd_status)
+    sp = sub.add_parser("motd", help="delta view: what changed since you last looked")
+    sp.add_argument("--cwd")
+    sp.set_defaults(fn=cmd_motd)
 
     sp = sub.add_parser("statusline", help="one short segment for a custom statusline")
     sp.set_defaults(fn=cmd_statusline)
