@@ -1082,6 +1082,9 @@ a runbook begging to exist. Propose it as a skill whose body contains the EXACT 
 commands in order, plus each failure mode hit on the way (wrong flag, wrong env var, wrong \
 path) as a "do not do X" line. Never propose a skill for a single-command fix.
 
+A skill is a runbook someone would otherwise re-derive: >= 3 steps, environment-specific \
+flags, ordering constraints. If the fix fits in one memory line, propose memory, not a skill.
+
 A durable memory is a fact that will matter in FUTURE sessions: a user preference or identity \
 fact (scope "user"), or a project environment fact, convention, workaround, or correction \
 (scope "project"). NOT task narration, NOT one-off state, NOT anything already covered by the \
