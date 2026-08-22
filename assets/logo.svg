@@ -1,22 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="lore">
-<title>lore</title>
-<rect x="0" y="0" width="256" height="256" rx="56" fill="#12141d"/>
-<!-- thought trail rising to a forming belief -->
-<circle cx="164" cy="66" r="3.5" fill="#f5b942" fill-opacity="0.65"/>
-<circle cx="178" cy="48" r="5.5" fill="#f5b942" fill-opacity="0.85"/>
-<circle cx="196" cy="28" r="9" fill="none" stroke="#f5b942" stroke-width="5.5"/>
-<!-- the reader: solid blob, twin-wink eyes -->
-<rect x="76" y="72" width="104" height="58" rx="26" fill="#f5b942"/>
-<circle cx="110" cy="101" r="7.5" fill="#12141d"/>
-<circle cx="146" cy="101" r="7" fill="none" stroke="#12141d" stroke-width="5"/>
-<!-- the open tome, dashed page lines -->
-<g stroke="#f5b942" stroke-width="7" fill="none" stroke-linejoin="round">
-  <rect x="50" y="152" width="72" height="50" rx="9"/>
-  <rect x="134" y="152" width="72" height="50" rx="9"/>
-</g>
-<g stroke="#f5b942" stroke-width="4.5" stroke-linecap="round" stroke-opacity="0.55" stroke-dasharray="7 8">
-  <path d="M64 170 H108 M64 184 H108"/>
-  <path d="M148 170 H192 M148 184 H192"/>
-</g>
-<text x="128" y="240" text-anchor="middle" font-family="monospace" font-size="32" font-weight="bold" letter-spacing="10" fill="#f5b942">LORE</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="LORE: crab mascot with pincers, a belief trail rising from its claw">
+<title>LORE</title>
+<rect width="256" height="256" rx="56" fill="#1a1512"/>
+<!-- arms: short, close; claws = real pincers with notch -->
+<path d="M76 168 Q60 164 56 152" fill="none" stroke="#da7756" stroke-width="10" stroke-linecap="round"/>
+<path d="M180 168 Q196 164 200 152" fill="none" stroke="#da7756" stroke-width="10" stroke-linecap="round"/>
+<path d="M56 152 q-14 -18 2 -28 q10 -6 16 2 l-8 8 z" fill="#da7756"/>
+<path d="M200 152 q14 -18 -2 -28 q-10 -6 -16 2 l8 8 z" fill="#da7756"/>
+<!-- segmented legs, two joints each -->
+<path d="M88 194 L76 204 L70 216 M104 200 L97 211 L94 222 M168 194 L180 204 L186 216 M152 200 L159 211 L162 222" fill="none" stroke="#da7756" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+<!-- body with shell highlight -->
+<ellipse cx="128" cy="160" rx="56" ry="42" fill="#da7756"/>
+<path d="M84 146 Q128 118 172 146" fill="none" stroke="#e89b80" stroke-width="6" stroke-linecap="round"/>
+<!-- eye stalks -->
+<path d="M108 122 L104 110 M148 122 L152 110" stroke="#da7756" stroke-width="7" stroke-linecap="round"/>
+<circle cx="103" cy="106" r="9" fill="#da7756"/>
+<circle cx="153" cy="106" r="9" fill="#da7756"/>
+<!-- eyes on body: big + highlights -->
+<circle cx="107" cy="150" r="12" fill="#1a1512"/>
+<circle cx="149" cy="150" r="12" fill="#1a1512"/>
+<circle cx="111" cy="146" r="4.5" fill="#ffffff"/>
+<circle cx="153" cy="146" r="4.5" fill="#ffffff"/>
+<path d="M116 178 Q128 188 140 178" fill="none" stroke="#1a1512" stroke-width="6" stroke-linecap="round"/>
+<!-- belief trail -->
+<circle cx="200" cy="112" r="4" fill="#da7756" fill-opacity="0.55"/>
+<circle cx="211" cy="90" r="6" fill="#da7756" fill-opacity="0.75"/>
+<circle cx="221" cy="64" r="9" fill="#da7756"/>
 </svg>

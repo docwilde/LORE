@@ -1,29 +1,27 @@
-<p align="center"><img src="assets/logo.svg" width="140" alt="LORE: the reader blob over its open tome, a thought trail rising to a forming belief"><br><sub><b>L·O·R·E</b> — Lots Of Reconciled Engrams</sub></p>
+<p align="center"><img src="assets/logo.svg" width="140" alt="LORE: the coral crab, a belief trail rising from its claw"><br><sub><b>L·O·R·E</b> — Lots Of Reconciled Engrams</sub></p>
 
 # LORE — Lots Of Reconciled Engrams
 
 Memory for Claude Code that **reasons about you and improves itself**.
 
-Every session is derived into confidence-weighted **beliefs** with evidence trails,
-a **dreamer** reconciles them while you sleep, and a **dialectic** agent answers
-questions like *"does this user prefer rebase or merge?"* with citations and a
-confidence — the [Honcho](https://github.com/plastic-labs/honcho) Deriver / Dreamer /
-Dialectic split, run on one SQLite file instead of a standing service. And working
-recipes are **skillified automatically**: a procedure the session verified working
-becomes a real Claude Code skill, every later run of it is judged (execution errors,
-the user calling the result wrong), and its track record drives the closed
-improvement loop — reinforce, update, or retire.
+Sessions are derived into confidence-weighted **beliefs** with evidence trails; a
+**dreamer** reconciles them in the background; a **dialectic** agent answers
+questions like *"does this user prefer rebase or merge?"* with citations and an
+honestly-labeled confidence — the [Honcho](https://github.com/plastic-labs/honcho)
+Deriver / Dreamer / Dialectic split on one SQLite file, no standing service.
+Working procedures are **skillified**: a fumbled-then-fixed command trail becomes a
+real Claude Code skill, every later run is judged, and the track record drives
+update-or-retire — every transition through a human-approved pending gate.
 
 Underneath sits the [Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory)
-memory architecture, replacing the built-in auto-memory: small curated memory under
-hard caps, lexical search over full session history, and a background reviewer that
-proposes — never applies — what gets remembered.
+pattern: small curated memory under hard caps, lexical search over full session
+history, and a reviewer that proposes — never applies.
 
 ## Features
 
 - **Tier 1 — Curated core memory, hard-capped.** Two markdown files: `USER.md`
-   (global, 1375 chars — who the user is, preferences) and per-project `MEMORY.md`
-   (2200 chars — environment facts, conventions, workarounds). Injected into context
+   (global, 2750 chars — who the user is, preferences) and per-project `MEMORY.md`
+   (4400 chars — environment facts, conventions, workarounds). Injected into context
    once at `SessionStart` as a frozen snapshot (re-injected after `/clear` and
    compaction; set `LORE_REFRESH_SECS` to also re-inject mid-session, so memory
    curated now is in context now). The agent maintains them via `memory add/replace/remove`; a write

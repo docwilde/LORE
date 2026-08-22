@@ -71,7 +71,22 @@ def utcnow() -> str:
 
 
 def project_slug(cwd: str) -> str:
-    return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+    """Slug for the PROJECT a cwd belongs to — the git repo root when inside
+    one, the cwd itself otherwise. WHY (2026-08-22 incident): a session run
+    from re_ab_harness/viz and one run from re_ab_harness got two different
+    project memories; 22 curated entries were invisible to half the sessions
+    of the same repo. Git toplevel is the identity of a project, not the
+    subdirectory someone happened to start in. Non-repo cwds keep the old
+    behavior byte-identically."""
+    root = str(cwd)
+    try:
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=root,
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            root = r.stdout.strip()
+    except OSError:
+        pass
+    return re.sub(r"[^A-Za-z0-9]", "-", root)
 
 
 def agent_id() -> str:
