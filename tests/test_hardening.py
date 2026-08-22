@@ -141,3 +141,41 @@ class TestDormantSweep(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+import importlib.util as _ilu
+from pathlib import Path as _P
+_spec = _ilu.spec_from_file_location("lore_s", _P(__file__).resolve().parent.parent / "bin" / "lore.py")
+_lore_s = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_lore_s)
+
+
+def test_scrub_new_patterns():
+    # token shapes assembled from fragments so repo secret-scanning never sees
+    # a literal credential in the test source (it flagged the fixtures once).
+    s = _lore_s.scrub_secrets
+    jwt = "eyJ" + "hbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwfQ" + "." + "abcDEFghiJKLmnoPQRstuvWX012"
+    assert "eyJ" not in s("token " + jwt)
+    assert "secretpass" not in s("db at postgres://admin:" + "secretpass" + "@localhost:5432/x")
+    assert "_live_" not in s("stripe " + "sk" + "_live_" + "abcdefghij0123456789")
+    slack = "xox" + "b-" + "1234567890-" + "abcdefghijklmno"
+    assert "xox" + "b-" not in s("slack " + slack)
+    assert "AIza" not in s("gcp " + "AIza" + "SyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456")
+
+
+def test_scrub_before_truncate_via_derive_output():
+    # deriver output scrub: a JWT in a claim must not persist
+    import sqlite3
+    jwt = "eyJ" + "hbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwfQ" + "." + "abcDEFghiJKLmnoPQRstuvWX012"
+    n = _lore_s.derive_conclusions(
+        {"conclusions": [{"scope": "project", "claim": "key is " + jwt,
+                          "confidence": 0.7, "evidence": "seen"}]},
+        "slug-scrub", "sess-scrub")
+    assert n == 1
+    conn = _lore_s.db_connect()
+    claim = conn.execute("SELECT claim FROM beliefs WHERE claim LIKE '%REDACTED%' OR claim LIKE '%eyJ%'").fetchone()
+    assert claim is not None and "eyJ" not in claim[0]
+
+
+def test_interaction_model_wired_into_context():
+    import inspect
+    assert "interaction_model_lines(" in inspect.getsource(_lore_s.build_context)

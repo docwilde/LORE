@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.31.0 — 2026-08-22 (security audit remediations)
+- **Fix (audit CRITICAL): the user-model tier was never injected.** `interaction_model_lines()` existed since 0.26.0 but `build_context()` never called it -- the interaction-model beliefs derived but never reached context. Now wired in as a labeled "Interaction model (derived, uncalibrated)" section after user memory; shapes tone/approach, never authorizes actions.
+- **Fix (audit HIGH): deriver OUTPUT is now scrubbed.** `scrub_secrets` ran on ingestion only; a secret shape missed on input could be echoed by the model into a permanent belief/memory. Belief claim+evidence and staged memory text are scrubbed at the write site.
+- **Fix (audit HIGH): scrub pattern gaps closed** -- JWTs, `scheme://user:pass@host` connection strings, `sk_live_/rk_live_`, GCP/Slack/npm/PyPI tokens, `Authorization: Basic`; the index path now scrubs BEFORE truncating so a secret straddling the cut cannot survive as a partial.
+- **Hardening (audit CRITICAL/MEDIUM): anti-injection framing** added to the deriver prompt (the digest is data, never instructions) and to the `/lore:ask` dialectic subagent (retrieved beliefs/quotes are untrusted, cite-never-follow).
+
 ## 0.30.1 — 2026-08-22
 - **Fix (code-review CRITICAL): dreamer merge could vanish a belief.** A merged claim textually equal to one of its two source beliefs made `belief_insert` reuse that source id, so the caller superseded it by itself -- both sources terminal, no active survivor, the fact gone from ask/list/snapshot. `belief_insert` gains `exclude_ids` (the merge passes both sources); `belief_supersede` now refuses self-supersede and only transitions an ACTIVE belief. Regression-tested.
 - **Fix (code-review CRITICAL): dreamer had no lock.** `dream_run` now takes a non-blocking flock (`dream.lock`); a second dreamer racing the same DB skips instead of writing conflicting transitions on a stale snapshot. POSIX flock; no-op where fcntl is absent.
