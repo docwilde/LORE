@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.21.0 — 2026-08-22
+- Per-agent identity: `LORE_AGENT_ID` names the deriving agent (`main` when unset); the review job dict carries it, every staged proposal records it as `derived_by`, skill outcomes stamp it alongside the repo HEAD, `lore pending` prints `[by <agent>]`, and `review --full` stamps each window `backfill-w<k>`.
+- `lore snapshot [--scope user|project|all]`: the inject memory block as plain text (no hook envelope) for prepending to subagent prompts; rendering shared with inject/refresh.
+- Role-scoped view: `--scope` on `snapshot` and `inject` (default `all`; env default `LORE_SCOPE`) renders one tier only; the belief hint line rides only `all`/`project`.
+- Streaming index: `lore index --live <transcript>` reads only lines past the per-file `lines_indexed` count (new `files` column), scrubs and inserts just those into the msg FTS table — idempotent, partial trailing lines deferred to the next pass; wired as a UserPromptSubmit hook, off unless `LORE_STREAM_INDEX=1`.
+
 ## 0.20.0 — 2026-08-22
 - Full-transcript backfill: `review --full` pages the whole session through the deriver in `DIGEST_LAST_N`-message windows, newest first (recency is authority; older windows defer to staged facts on conflict), with `--workers N` for parallel windows; `/lore:backfill` command.
 - Digest defaults raised 140→300 messages, 28k→100k chars; overridable via `LORE_DIGEST_LAST_N` / `LORE_DIGEST_TOTAL_CAP`.

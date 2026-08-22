@@ -21,6 +21,12 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/bin/lore.py refresh",
             "timeout": 15,
             "statusMessage": "Refreshing lore memory"
+          },
+          {
+            "type": "command",
+            "command": "[ \"$LORE_STREAM_INDEX\" = \"1\" ] && python3 \"${CLAUDE_PLUGIN_ROOT}\"/bin/lore.py index --live \"$TRANSCRIPT_PATH\" || true",
+            "timeout": 15,
+            "statusMessage": "Streaming session into lore index"
           }
         ]
       }
