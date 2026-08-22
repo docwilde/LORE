@@ -13,9 +13,19 @@ Working procedures are **skillified**: a fumbled-then-fixed command trail become
 real Claude Code skill, every later run is judged, and the track record drives
 update-or-retire — every transition through a human-approved pending gate.
 
+Confidence is **measured, not asserted**: an outcomes ledger records every
+reconciliation, correction and audit check against each belief, and `lore stats`
+prints per-bucket empirical precision — gated until n≥100, labeled "anecdote,
+not a curve" below it. Skill updates pass graduated evidence guards (a hard
+failure at the HEAD that used to succeed needs one observation; ambiguity needs
+two; retirement three).
+
 Underneath sits the [Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory)
 pattern: small curated memory under hard caps, lexical search over full session
-history, and a reviewer that proposes — never applies.
+history, and a reviewer that proposes — never applies. And it **adopts in
+slices**: six independent stage switches (`/lore:config` — inject, index,
+review, beliefs, skills, streaming), with `lore teardown` reverting everything
+to built-in auto-memory in one command.
 
 ## Features
 
