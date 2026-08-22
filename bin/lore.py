@@ -1076,6 +1076,12 @@ REVIEW_PROMPT = """You are the background memory reviewer for a coding agent (He
 memory). Below is a digest of a finished session. Extract at most 5 durable memories and at \
 most 1 reusable skill.
 
+THE FUMBLE SIGNAL (strongest skill trigger): watch for a multi-step procedure where the same \
+command was retried with corrected flags/env until it finally worked. That correction trail is \
+a runbook begging to exist. Propose it as a skill whose body contains the EXACT final working \
+commands in order, plus each failure mode hit on the way (wrong flag, wrong env var, wrong \
+path) as a "do not do X" line. Never propose a skill for a single-command fix.
+
 A durable memory is a fact that will matter in FUTURE sessions: a user preference or identity \
 fact (scope "user"), or a project environment fact, convention, workaround, or correction \
 (scope "project"). NOT task narration, NOT one-off state, NOT anything already covered by the \
