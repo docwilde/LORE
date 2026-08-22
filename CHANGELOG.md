@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.32.0 — 2026-08-23
+- **lore_core: the implementation is now an importable package** (config/scrub/store/memory/beliefs/deriver/dreamer/dialectic/pending/context); `bin/lore.py` is a thin CLI shim over it. One source of truth for the plugin and the DOXA terminal daemon. Byte-identical CLI (A/B-diffed across 25 commands), 68 tests unchanged and green. Extraction fixed two latent `__file__`-path bugs and guards test isolation with a sys.modules purge in the shim.
+
 ## 0.31.1 — 2026-08-22 (Codex cross-review)
 - **Fix: `index_live` truncated before scrubbing** (the streaming twin of the 0.31.0 index_sessions fix, missed then) -- a secret near the cut survived as a raw partial.
 - **Fix: staged skill `body`+`description` and replace-proposal `match` were persisted unscrubbed** -- on approval a skill body installs verbatim as a durable SKILL.md; all model-output fields now scrubbed at the write site.

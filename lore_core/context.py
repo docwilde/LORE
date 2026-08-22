@@ -1,0 +1,452 @@
+"""Tier 1 + delta view: the memory snapshot injected at SessionStart/refresh
+(build_context, shared verbatim by cmd_inject, cmd_snapshot and cmd_refresh),
+the SessionStart MOTD (build_motd / cmd_motd) and its ASCII banner, and the
+mid-session refresh throttle (refresh_interval, the per-session stamp files).
+Near the top of the package's dependency graph -- pulls from memory, beliefs,
+store, pending and deriver (for skill usage/learned-skill bookkeeping shown
+in the MOTD).
+"""
+
+import json
+import os
+import re
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from .beliefs import interaction_model_lines
+from .config import (
+    MEMORY_CAP,
+    ROOT,
+    USER_CAP,
+    effective_scope,
+    one_line,
+    project_slug,
+    read_hook_input,
+    stage_disabled,
+)
+from .deriver import learned_skills, load_skill_usage
+from .memory import memory_path, read_entries, render_entries, usage_line
+from .pending import load_pending
+from .store import db_connect
+
+
+__all__ = [
+    'REFRESH_DIR',
+    'REFRESH_STAMP_TTL',
+    'refresh_interval',
+    'build_context',
+    'build_motd',
+    'BANNER_WORDMARK',
+    'BANNER_MASCOT',
+    'render_banner',
+    'cmd_inject',
+    'cmd_snapshot',
+    'cmd_refresh',
+    'cmd_motd',
+]
+
+REFRESH_DIR = ROOT / ".refresh"
+REFRESH_STAMP_TTL = 7 * 24 * 3600
+
+
+def refresh_interval() -> int | None:
+    """Seconds between mid-session re-injections; None when opted out.
+
+    Unset means off. The UserPromptSubmit hook ships with the plugin, so a
+    default interval would spend context on every install that never asked for
+    it — the snapshot is a few thousand characters each time it fires.
+    """
+    raw = os.environ.get("LORE_REFRESH_SECS", "").strip()
+    if not raw:
+        return None
+    try:
+        secs = int(raw)
+    except ValueError:
+        return None
+    return secs if secs > 0 else None
+
+
+def _freshness_rule() -> str:
+    """The snapshot's own statement of how current it is."""
+    interval = refresh_interval()
+    if interval is None:
+        return (
+            "- This snapshot is injected once, at session start: a write you make now"
+            " lands in your files immediately but reaches your context next session."
+            " Read it back with lore memory show."
+        )
+    return (
+        f"- This snapshot re-injects every {interval}s (LORE_REFRESH_SECS), so a write"
+        " you make now reaches your context within that window; the refresh supersedes"
+        " every earlier copy in the conversation."
+    )
+
+
+def build_context(cwd: str, scope: str = "all") -> str:
+    """The memory snapshot block. `scope` (role-scoped view, 2026-08-22)
+    narrows it to one tier: "user" renders only user memory, "project" only
+    project memory, "all" both. The belief hint rides only "all"/"project" —
+    beliefs are keyed by project subject, so a user-only view has no claim on
+    them. Shared by inject (hook JSON envelope), refresh, and snapshot (bare
+    text for subagent prompts) — one rendering, three carriers."""
+    slug = project_slug(cwd)
+    user_entries = read_entries(memory_path("user", slug))
+    proj_entries = read_entries(memory_path("project", slug))
+    pending = sorted((ROOT / "pending").glob("*.json")) if (ROOT / "pending").exists() else []
+    # bin/lore.py is what the agent should invoke, not this module: __file__
+    # here is lore_core/context.py since the extraction (2026-08-22), so the
+    # CLI entry point is derived from the package layout (lore_core/ and
+    # bin/ are always siblings under the repo root) rather than from
+    # __file__ directly -- byte-identical to the pre-extraction path.
+    me = str((Path(__file__).resolve().parent.parent / "bin" / "lore.py"))
+
+    parts = [
+        "LORE MEMORY — curated, hard-capped, Hermes-pattern. You maintain it.",
+        f'CLI (run via Bash): lore() {{ python3 "{me}" "$@"; }}',
+        "",
+    ]
+    if scope in ("all", "user"):
+        parts += [
+            f"## User memory ({usage_line(user_entries, USER_CAP)})",
+            render_entries(user_entries).rstrip() or "(empty)",
+            "",
+        ]
+        # Interaction model (2026-08-22, wired 0.31.0 -- the helper existed but
+        # was never called, so the user-model tier derived beliefs that never
+        # reached context). Labeled uncalibrated; shapes tone/approach only,
+        # never authorizes an action -- the transparency IS the safeguard.
+        im = interaction_model_lines()
+        if im:
+            parts += [
+                "## Interaction model (derived, uncalibrated — shapes tone/approach,"
+                " never authorizes actions):",
+                *im,
+                "",
+            ]
+    if scope in ("all", "project"):
+        parts += [
+            f"## Project memory ({usage_line(proj_entries, MEMORY_CAP)}) — {slug}",
+            render_entries(proj_entries).rstrip() or "(empty)",
+            "",
+        ]
+    if pending:
+        parts.append(
+            f"{len(pending)} staged proposal(s) from background review — surface this to the "
+            f"user once early in the session and suggest /lore:pending."
+        )
+        parts.append("")
+    n_beliefs = 0
+    if scope in ("all", "project"):
+        try:
+            conn = db_connect()
+            n_beliefs = conn.execute(
+                "SELECT count(*) FROM beliefs WHERE status = 'active'"
+            ).fetchone()[0]
+        except sqlite3.Error:
+            n_beliefs = 0
+    if n_beliefs:
+        parts.append(
+            f"Belief store: {n_beliefs} active beliefs (derived, uncurated)."
+            ' Query before re-deriving what past sessions concluded:'
+            ' lore ask "question" — or /lore:ask for a synthesized answer.'
+        )
+        parts.append("")
+    parts += [
+        "Rules:",
+        "- When you learn a durable fact (user preference, environment fact, workaround,"
+        " correction), store it immediately:"
+        ' lore memory add --scope user|project "dense declarative fact"',
+        "- user scope = who the user is, preferences, style. project scope = this repo's"
+        " environment facts, conventions, workarounds.",
+        "- Caps are hard. Over-cap writes fail and list entries; consolidate with"
+        ' lore memory replace --scope X --match "old substring" "merged fact".'
+        " Consolidate proactively past 80%.",
+        _freshness_rule(),
+        "- RETRIEVAL LADDER when you need a fact about this user, project or"
+        " past work: (1) this snapshot -- already in context, costs nothing;"
+        ' (2) the belief store -- lore ask "question" or lore belief search;'
+        ' (3) the session index -- lore search "query", then lore session <id>'
+        " [--grep term]; (4) only if all three miss, re-derive or measure"
+        " fresh. Never re-measure what step 2 or 3 already holds.",
+    ]
+    return "\n".join(parts)
+
+
+def build_motd(cwd: str) -> str | None:
+    """Harness-displayed session-start MOTD: what waits for review, what lore
+    learned since last time, how full memory is. LORE_MOTD selects the shape —
+    "banner" (default): ASCII Reading Android thinking the stats in its bubble;
+    "line": one compact line; "0": the never-suppressed pending notice alone."""
+    slug = project_slug(cwd)
+    parts = []
+
+    pending = [item for _, item in load_pending()]
+    if pending:
+        kinds: dict[str, int] = {}
+        for item in pending:
+            key = item.get("kind", "?")
+            if key == "skill":
+                key = f"skill {item.get('action', 'add')}"
+            kinds[key] = kinds.get(key, 0) + 1
+        detail = ", ".join(f"{n}× {k}" for k, n in sorted(kinds.items()))
+        parts.append(f"{len(pending)} pending ({detail}) — /lore:pending")
+
+    if os.environ.get("LORE_MOTD", "1") == "0":
+        return f"lore: {parts[0]}" if parts else None
+
+    conn = db_connect()
+    state_path = ROOT / "motd_state.json"
+    try:
+        last_seen = json.loads(state_path.read_text(encoding="utf-8")).get("max_belief_id", 0)
+    except (OSError, json.JSONDecodeError):
+        last_seen = 0
+    max_id = conn.execute("SELECT coalesce(max(id), 0) FROM beliefs").fetchone()[0]
+    if max_id > last_seen:
+        new_user = conn.execute(
+            "SELECT count(*) FROM beliefs WHERE id > ? AND subject = 'user'", (last_seen,)
+        ).fetchone()[0]
+        new_total = conn.execute(
+            "SELECT count(*) FROM beliefs WHERE id > ?", (last_seen,)
+        ).fetchone()[0]
+        about = f", {new_user} about you" if new_user else ""
+        parts.append(f"+{new_total} beliefs since last start{about}")
+    state_path.write_text(json.dumps({"max_belief_id": max_id}), encoding="utf-8")
+
+    u = len(render_entries(read_entries(memory_path("user", slug))))
+    p = len(render_entries(read_entries(memory_path("project", slug))))
+    parts.append(f"memory {100 * u // USER_CAP}% user / {100 * p // MEMORY_CAP}% project")
+
+    usage = load_skill_usage()
+    learned = learned_skills()
+    if learned:
+        failing = sum(1 for n in learned if usage.get(n, {}).get("last_outcome") == "failure")
+        parts.append(f"{len(learned)} learned skill(s)" + (f", {failing} failing" if failing else ""))
+
+    n_sessions = conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
+    n_beliefs = conn.execute("SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
+    parts.append(f"{n_beliefs} beliefs · {n_sessions} sessions indexed")
+    if os.environ.get("LORE_MOTD", "banner") == "line":
+        return "lore: " + " · ".join(parts)
+    return render_banner(parts)
+
+
+BANNER_WORDMARK = [
+    " █████          ███████    ███████████   ██████████",
+    "▒▒███         ███▒▒▒▒▒███ ▒▒███▒▒▒▒▒███ ▒▒███▒▒▒▒▒█",
+    " ▒███        ███     ▒▒███ ▒███    ▒███  ▒███  █ ▒ ",
+    " ▒███       ▒███      ▒███ ▒██████████   ▒██████   ",
+    " ▒███       ▒███      ▒███ ▒███▒▒▒▒▒███  ▒███▒▒█   ",
+    " ▒███      █▒▒███     ███  ▒███    ▒███  ▒███ ▒   █",
+    " ███████████ ▒▒▒███████▒   █████   █████ ██████████",
+    "▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒    ▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒▒▒▒▒▒ ",
+    "",
+    "           Lots Of Reconciled Engrams",
+]
+
+
+BANNER_MASCOT = [
+    "                    ◌",
+    "                  ∘",
+    "                ·",
+    "       ▄▄█████▄▄",
+    " ▟▀▖ ▄██ ◉   ◉ ██▄ ▗▀▙",
+    " ▜▄▘ ▀██▄ ▽ ▄▄██▀  ▚▄▛",
+    "       ▀▀█████▀▀",
+    "      ▞▘▐▌   ▐▌▝▚",
+]
+
+
+_ORANGE = "\033[38;2;217;119;87m"   # Claude orange #D97757
+_RESET = "\033[0m"
+
+
+def _color_on() -> bool:
+    """Claude orange only on a real terminal (`lore motd` in a shell).
+    The SessionStart hook captures stdout into a JSON systemMessage where
+    raw ANSI would render as garbage -- isatty is False there, so the hook
+    path stays plain automatically. LORE_MOTD_COLOR=1/0 forces either way."""
+    forced = os.environ.get("LORE_MOTD_COLOR")
+    if forced is not None:
+        return forced == "1"
+    return sys.stdout.isatty()
+
+
+def render_banner(stats: list[str]) -> str:
+    """The wordmark, then the crab, its belief trail rising to the stats.
+    Graphical elements (wordmark, crab + trail) in Claude orange when the
+    output is a terminal; the stats box stays default-color for legibility."""
+    paint = _color_on()
+    def o(line: str) -> str:
+        return f"{_ORANGE}{line}{_RESET}" if paint and line.strip() else line
+    w = max(len(s) for s in stats)
+    ind = " " * 16
+    # leading blank line: the TUI prints its own prefix on the first line,
+    # which would shift the wordmark's top row
+    lines = [""] + [o(l) for l in BANNER_WORDMARK] + [""]
+    lines.append(ind + "╭─" + "─" * w + "─╮")
+    lines += [ind + "│ " + s.ljust(w) + " │" for s in stats]
+    lines.append(ind + "╰─" + "─" * w + "─╯")
+    return "\n".join(lines + [o(l) for l in BANNER_MASCOT])
+
+
+def cmd_inject(args) -> int:
+    if os.environ.get("LORE_SKIP"):
+        return 0
+    hook = read_hook_input()
+    # inject kill switch (2026-08-22): a hook fire (payload on stdin) exits 0
+    # silently; a manual `lore inject`/`lore snapshot` still renders — the
+    # switch turns off the automatic injection, not the CLI.
+    if stage_disabled("inject") and hook:
+        return 0
+    cwd = args.cwd or hook.get("cwd") or os.getcwd()
+    out = {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": build_context(cwd, effective_scope(getattr(args, "scope", None))),
+        }
+    }
+    # systemMessage is harness-displayed — the MOTD (and the pending notice in
+    # particular) reaches the user even when the model never surfaces the
+    # snapshot's version of it.
+    motd = build_motd(cwd)
+    if motd:
+        out["systemMessage"] = motd
+    print(json.dumps(out))
+    return 0
+
+
+def cmd_snapshot(args) -> int:
+    """SNAPSHOT FOR SUBAGENTS (2026-08-22): the same block cmd_inject renders,
+    as bare text — no hook JSON envelope, no MOTD. Meant to be prepended to a
+    subagent's prompt so it starts from the same memory the main session got;
+    --scope narrows to one tier for role-scoped agents. Rendering is
+    build_context, shared with inject/refresh, never a second copy."""
+    print(build_context(args.cwd or os.getcwd(), effective_scope(args.scope)))
+    return 0
+
+
+def _read_stamp(path: Path) -> float | None:
+    try:
+        return float(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_stamp(path: Path, when: float) -> None:
+    try:
+        path.write_text(f"{when:.0f}", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _prune_stamps(now: float) -> None:
+    """Drop stamps from sessions that ended long ago — one file accrues per session."""
+    try:
+        for stamp in REFRESH_DIR.iterdir():
+            if now - stamp.stat().st_mtime > REFRESH_STAMP_TTL:
+                stamp.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def cmd_refresh(args) -> int:
+    """UserPromptSubmit hook: re-inject the snapshot, at most once per interval.
+
+    inject fires once, at SessionStart, so a memory approved mid-session sits in
+    the files without reaching the model until the next session. This re-reads
+    it on a throttle. Off unless LORE_REFRESH_SECS is set (see refresh_interval).
+
+    Every failure path is silent: a hook on the prompt loop that errors or stalls
+    costs more than a stale snapshot does.
+    """
+    if os.environ.get("LORE_SKIP"):
+        return 0
+    # refresh is the same stage as inject (2026-08-22): the mid-session
+    # re-injection must not outlive the snapshot it repeats.
+    if stage_disabled("inject"):
+        return 0
+    interval = refresh_interval()
+    if interval is None:
+        return 0
+    hook = read_hook_input()
+    cwd = args.cwd or hook.get("cwd") or os.getcwd()
+    session = re.sub(r"[^A-Za-z0-9_.-]", "_", str(hook.get("session_id") or "nosession"))
+    now = datetime.now(timezone.utc).timestamp()
+    try:
+        REFRESH_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return 0
+    stamp = REFRESH_DIR / session
+    last = _read_stamp(stamp)
+    if last is None:
+        # First prompt of the session — SessionStart just injected this content.
+        _write_stamp(stamp, now)
+        _prune_stamps(now)
+        return 0
+    if now - last < interval:
+        return 0
+    _write_stamp(stamp, now)
+    print(json.dumps({
+        # The user sees one line; the snapshot itself goes to the model only.
+        "suppressOutput": True,
+        "systemMessage": "lore memory refreshed",
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": (
+                "LORE MEMORY REFRESH — current as of now; supersedes any earlier lore"
+                " snapshot in this conversation.\n\n"
+                # no --scope flag here, but LORE_SCOPE still applies: a refresh
+                # must not widen what inject narrowed.
+                + build_context(cwd, effective_scope(None))
+            ),
+        },
+    }))
+    return 0
+
+
+def cmd_motd(args) -> int:
+    """One-screen greeting: the DELTA view. `status` answers "what is the
+    state"; motd answers "what changed since I last looked" — beliefs added
+    in the last 24h/7d and the newest claims verbatim. Everything else it
+    would show is status's job, so it stays thin on purpose."""
+    slug = project_slug(args.cwd or os.getcwd())
+    user_entries = read_entries(memory_path("user", slug))
+    proj_entries = read_entries(memory_path("project", slug))
+    stat_lines = [f"memory  user {usage_line(user_entries, USER_CAP)} · "
+                  f"project {usage_line(proj_entries, MEMORY_CAP)}"]
+    n_pending = len(load_pending())
+    conn = db_connect()
+    n_active = conn.execute(
+        "SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
+    n_dormant = conn.execute(
+        "SELECT count(*) FROM beliefs WHERE status = 'dormant'").fetchone()[0]
+    n_total = conn.execute("SELECT count(*) FROM beliefs").fetchone()[0]
+    d1 = conn.execute(
+        "SELECT count(*) FROM beliefs WHERE created >= datetime('now', '-1 day')"
+    ).fetchone()[0]
+    d7 = conn.execute(
+        "SELECT count(*) FROM beliefs WHERE created >= datetime('now', '-7 day')"
+    ).fetchone()[0]
+    stat_lines.append(
+        f"beliefs {n_active} active / {n_dormant} dormant / {n_total} total · "
+        f"+{d1} last 24h · +{d7} last 7d · pending {n_pending}")
+    # the greeting gets the full banner (wordmark + stats box + crab) unless
+    # LORE_MOTD=line asks for the plain delta view -- same switch, same
+    # shapes, as the SessionStart banner
+    if os.environ.get("LORE_MOTD", "banner") == "line":
+        for s in stat_lines:
+            print(s)
+    else:
+        print(render_banner(stat_lines))
+    rows = conn.execute(
+        "SELECT subject, claim, confidence FROM beliefs WHERE status='active' "
+        "ORDER BY created DESC LIMIT 5").fetchall()
+    if rows:
+        print("newest beliefs:")
+        for subj, claim, conf in rows:
+            print(f"  [{conf:.1f}] {subj}: {one_line(claim)[:110]}")
+    if n_pending:
+        print(f"-> {n_pending} proposal(s) await triage: /lore:pending")
+    return 0
