@@ -287,6 +287,19 @@ def db_connect() -> sqlite3.Connection:
         "belief_id UNINDEXED, claim, tokenize='porter unicode61')"
     )
     conn.execute("CREATE TABLE IF NOT EXISTS dream_reviewed(a INTEGER, b INTEGER, PRIMARY KEY(a, b))")
+    # OUTCOMES LEDGER (2026-08-22): what happened to a belief AFTER it was
+    # derived — confirmed in use, contradicted by the user/dreamer, found
+    # stale by an audit. The deriver's `confidence` is a self-report
+    # calibrated against nothing; this table is the ground truth it gets
+    # calibrated against (see calibrated_confidence). Append-only: a belief's
+    # ledger survives supersession, so the calibration curve keeps its
+    # history even as the store reconciles.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS belief_outcomes("
+        "id INTEGER PRIMARY KEY, belief_id INTEGER NOT NULL,"
+        " event TEXT NOT NULL CHECK(event IN ('confirmed','contradicted','stale')),"
+        " source TEXT NOT NULL, session_id TEXT, agent TEXT, note TEXT, created TEXT)"
+    )
     return conn
 
 
@@ -1015,7 +1028,10 @@ def audit_check(claim: str, cwd: str) -> tuple[str, str]:
     if m:
         token = m.group(0).rstrip(".,;:")
         try:
-            r = subprocess.run(["git", "grep", "-q", "-F", token], cwd=cwd,
+            # -e + trailing "--": the interesting tokens are exactly the ones
+            # that LOOK like git options (--flag-name), so the pattern must be
+            # marked as a pattern or git grep eats it as its own flag.
+            r = subprocess.run(["git", "grep", "-q", "-F", "-e", token, "--"], cwd=cwd,
                                capture_output=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             return ("UNCHECKABLE", f"git grep unavailable for {token!r}")
