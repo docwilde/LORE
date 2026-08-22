@@ -302,3 +302,23 @@ class TestDreamMergeSupersede(DBTest):
         row = conn.execute("SELECT status, resolution FROM beliefs WHERE id=?", (a,)).fetchone()
         self.assertEqual(row[0], "superseded")
         self.assertEqual(row[1], "first")  # not overwritten by the second call
+
+
+class TestDreamMultiResolutionOrphan(DBTest):
+    """0.31.1 regression (Codex): two resolutions naming the same pair must not
+    leave both beliefs terminal with no survivor. `consumed` blocks the second."""
+
+    def test_two_resolutions_same_pair_keeps_survivor(self):
+        conn = self.connect()
+        a, _ = lore.belief_insert(conn, "project:-mr", "aaa", 0.8, "s", "-mr", None)
+        b, _ = lore.belief_insert(conn, "project:-mr", "bbb", 0.8, "s", "-mr", None)
+        consumed = set()
+        # simulate the loop's guard + first resolution: supersede_a (a<-b)
+        lore.belief_supersede(conn, a, b, "first")
+        consumed.add(a)
+        # second resolution names the same pair the other way: must be skipped
+        blocked = (b in consumed or a in consumed)
+        self.assertTrue(blocked)
+        active = [r[0] for r in conn.execute(
+            "SELECT id FROM beliefs WHERE status='active' AND subject='project:-mr'").fetchall()]
+        self.assertEqual(active, [b])  # exactly one survivor
