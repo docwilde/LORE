@@ -14,30 +14,37 @@ Three tiers, after the Hermes Agent memory architecture:
    Nothing is applied without approval.
 
 Stdlib only. State lives under LORE_ROOT (default ~/.claude/lore).
-
-THIN CLI SHIM (2026-08-22, Phase 1 slice 1 of the lore-tui plan): the actual
-logic lives in lore_core/, a package that is a sibling of this bin/
-directory, importable on its own by the future lore-tui daemon and by this
-CLI alike -- one source of truth. This file wires argparse to lore_core's
-cmd_* functions and keeps only what stays here on purpose:
-
-- cmd_status, cmd_doctor, cmd_teardown, cmd_reset, render_export, main(),
-  and the settings.json helpers (claude_settings_path, settings_env,
-  stage_rows, config_env_write, cmd_config) — cross-cutting commands that do
-  not belong to one lore_core subsystem, kept together with the argparse
-  wiring they serve.
-- claude_settings_path in particular MUST stay defined in this file rather
-  than move into lore_core: tests monkeypatch it as `lore.claude_settings_path
-  = ...` after loading this file via importlib, relying on config_env_write /
-  stage_rows resolving the name from THIS module's globals at call time.
-  Python resolves a function's globals from the module it was DEFINED in, not
-  the module that happens to hold a reference to it -- so if
-  claude_settings_path lived in lore_core instead, the monkeypatch would only
-  ever rebind this file's copy of the name and config_env_write would keep
-  reading the real ~/.claude/settings.json regardless. Keeping the whole
-  small settings-file cluster here is what makes that monkeypatch work
-  byte-identically to the pre-extraction file.
 """
+
+# THIN CLI SHIM (2026-08-22, Phase 1 slice 1 of the lore-tui plan): the actual
+# logic lives in lore_core/, a package that is a sibling of this bin/
+# directory, importable on its own by the future lore-tui daemon and by this
+# CLI alike -- one source of truth. This file wires argparse to lore_core's
+# cmd_* functions and keeps only what stays here on purpose:
+#
+# - cmd_status, cmd_doctor, cmd_teardown, cmd_reset, render_export, main(),
+#   and the settings.json helpers (claude_settings_path, settings_env,
+#   stage_rows, config_env_write, cmd_config) — cross-cutting commands that
+#   do not belong to one lore_core subsystem, kept together with the
+#   argparse wiring they serve.
+# - claude_settings_path in particular MUST stay defined in this file rather
+#   than move into lore_core: tests monkeypatch it as
+#   `lore.claude_settings_path = ...` after loading this file via importlib,
+#   relying on config_env_write / stage_rows resolving the name from THIS
+#   module's globals at call time. Python resolves a function's globals from
+#   the module it was DEFINED in, not the module that happens to hold a
+#   reference to it -- so if claude_settings_path lived in lore_core
+#   instead, the monkeypatch would only ever rebind this file's copy of the
+#   name and config_env_write would keep reading the real
+#   ~/.claude/settings.json regardless. Keeping the whole small
+#   settings-file cluster here is what makes that monkeypatch work
+#   byte-identically to the pre-extraction file.
+#
+# This note (and the docstring above it) is NOT purely cosmetic: `lore -h`
+# prints __doc__ verbatim via argparse's `description=__doc__`, so the
+# docstring above is kept byte-identical to the pre-extraction file and this
+# implementation note lives in a plain comment instead, out of __doc__'s
+# reach.
 
 import argparse
 import json
