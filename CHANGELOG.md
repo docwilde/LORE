@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.28.0 — 2026-08-22
+- **Project memory cap doubled: 4400 → 8800 chars** (`LORE_MEMORY_CAP` default). A day of heavy backfill triage showed 4400 forcing lossy consolidation of facts worth keeping; user cap stays 2750.
+- **Hooks reference table in the README** — all four events (SessionStart, UserPromptSubmit, PreCompact, SessionEnd), what each runs, and its kill switch, in one place.
+- `/lore:pending` now renders proposals as grouped markdown tables with a verdict column (keep/reject/merge + why), batched for large piles.
+
 ## 0.27.1 — 2026-08-22
 - **Fix: user-model beliefs were never written.** The 0.26.0 interaction-model prompt channel asked for subject `user-model`, but the conclusions JSON schema only offered `scope:"user|project"` and `derive_conclusions` silently dropped any other scope — a full-session backfill produced 0 user-model beliefs. Schema now offers `user|project|user-model`, the write-site gate admits it, and `belief_subject` keeps the literal `user-model` subject. Found by measuring (450 rebuilt beliefs, 0 user-model), not by review.
 
