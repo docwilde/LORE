@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.30.0 — 2026-08-22
+- Banner graphical elements (wordmark, crab + belief trail) render in Claude orange (#D97757, truecolor) on real terminals; `LORE_MOTD_COLOR=1/0` forces; the SessionStart hook path stays plain automatically (stdout captured, not a tty).
+- README "What you see at session start" rewritten for the current banner (crab, stats box, motd parity) — it still showed the retired reading-android mascot.
+
 ## 0.29.1 — 2026-08-22
 - `/lore:motd` now greets with the full banner (wordmark + stats box + crab with belief trail), same as SessionStart; `LORE_MOTD=line` keeps the plain delta view. Was banner-at-start only.
 
