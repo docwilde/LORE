@@ -44,7 +44,8 @@ everything to built-in auto-memory in one command.
    BM25 with porter stemming, matching identifiers, error strings and file
    paths exactly. No embeddings, no API calls.
 - **Tier 3 — Background review, staged.**
-   - `SessionEnd` triggers a detached worker: it digests the transcript and
+   - `SessionEnd` — and `PreCompact`, catching detail the summarizer is
+     about to drop — triggers a detached worker: it digests the transcript and
      runs `claude --bare -p` on a cheap model (`--bare` = no hooks/no
      recursion, `--allowedTools ""` = no tool use, with a `--bare`-less
      retry when that flag can't read OAuth credentials), extracting at
@@ -279,7 +280,8 @@ stage, all default unset:
 | `LORE_STREAM_INDEX` | unset | `1` streams the growing transcript into the session index on every prompt (`lore index --live` via the UserPromptSubmit hook; new complete lines only, off by default) |
 | `LORE_DISABLE_INJECT` | unset | SessionStart/refresh memory snapshot off — hooks exit silently; manual `lore snapshot`/`inject` keep working |
 | `LORE_DISABLE_INDEX` | unset | session indexing off — the `--live` hook and opportunistic reindex in `search`/`ask` no-op (existing index still serves); explicit `lore index` still runs, with a notice |
-| `LORE_DISABLE_REVIEW` | unset | SessionEnd review off — the hook exits silently; explicit `lore review` still runs, with a notice |
+| `LORE_DISABLE_REVIEW` | unset | SessionEnd + PreCompact review off — the hooks exit silently; explicit `lore review` still runs, with a notice |
+| `LORE_DISABLE_PRECOMPACT` | unset | PreCompact review off on its own — SessionEnd review keeps running |
 | `LORE_DISABLE_BELIEFS` | unset | belief store off — the deriver prompt drops the conclusions channel, the dreamer exits with a notice, `ask` warns and serves memory + session search only |
 | `LORE_DISABLE_SKILLS` | unset | skillification off — the deriver prompt drops the skills/skill_outcomes channels, skill proposals are dropped unstaged with a log line |
 | `LORE_SKIP` | unset | set to any value to no-op all hooks (the worker sets it) — the master off-switch above every stage switch |

@@ -2405,6 +2405,15 @@ def cmd_review(args) -> int:
             return 0
         print("notice: review stage is off (LORE_DISABLE_REVIEW) — reviewing"
               " anyway, this is an explicit call; the SessionEnd hook stays off.")
+    # PreCompact fire (2026-08-22): review the transcript right before the
+    # harness summarizes it away — SessionEnd may be hours off or never come
+    # (crash), and its newest-window digest won't cover what compaction
+    # drops. Same worker, same dedupe-vs-pending, same caps; a session that
+    # compacts and later ends is derived twice, which reinforcement absorbs.
+    if hook.get("hook_event_name") == "PreCompact" and (
+        os.environ.get("LORE_DISABLE_PRECOMPACT")
+    ):
+        return 0
     transcript = args.transcript or hook.get("transcript_path")
     cwd = args.cwd or hook.get("cwd") or os.getcwd()
     slug = project_slug(cwd)

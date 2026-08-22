@@ -18,7 +18,7 @@ Finish by re-running `doctor` and `status` and confirming everything is green. R
 
 ## Step 5 — backfilling the session backlog
 
-`review` normally fires once, on SessionEnd. A backlog therefore stays invisible to it forever, which is why a fresh install shows a large session index next to empty memory and a belief store at `0 active / 0 total`.
+`review` normally fires on SessionEnd (and on PreCompact for sessions long enough to compact). A backlog therefore stays invisible to it forever, which is why a fresh install shows a large session index next to empty memory and a belief store at `0 active / 0 total`.
 
 **Enumerate the backlog per project first.** Top-level transcripts only — the `subagents/` subdirectories are not sessions:
 
