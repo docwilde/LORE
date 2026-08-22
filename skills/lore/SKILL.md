@@ -50,6 +50,10 @@ lore dream                                         # reconcile duplicates/contra
 
 Use `lore ask` before re-deriving something past sessions likely concluded. For a synthesized, cited answer, run the dialectic: spawn a subagent that gathers via these commands and reasons over the results (`/lore:ask` has the recipe); keep it alive for follow-ups via SendMessage. Restating an existing claim reinforces it (evidence accrues, confidence rises) rather than duplicating. The dreamer merges duplicates, resolves contradictions (losers become `superseded`, audit trail kept), and stages well-evidenced beliefs for promotion into core memory via the pending gate.
 
+## Subagents & memory
+
+When spawning a subagent that needs memory, prepend `lore snapshot --scope project` output to its prompt — the same block the SessionStart hook injects, as plain text (`--scope user|all` for other tiers; `LORE_SCOPE` sets the default). Give it `LORE_AGENT_ID=<agent-name>` in its environment if it will run reviews: everything it stages then carries `derived_by`, shown as `[by <agent-name>]` in `lore pending`.
+
 ## Background review & pending proposals
 
 On session end a detached reviewer (cheap model, `--bare`, no tools) digests the session — including its tool calls, so recipes carry the exact commands — and **stages** memory/skill proposals — nothing auto-applies. Learned skills have a closed improvement loop: invocations are counted, each run's outcome (success/failure, judged from execution errors and user reaction) lands in `skill_usage.json`, and a recipe with repeated failures draws an `update` proposal fixing the failing step or a `retire` proposal (approve moves it to `skills-retired/`). If the injected snapshot mentions pending proposals, tell the user and suggest `/lore:pending`.
