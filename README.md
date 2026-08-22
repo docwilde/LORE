@@ -271,3 +271,7 @@ Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
 - Memory writes made mid-session appear in the *next* session's snapshot (frozen
   snapshot is deliberate, per Hermes — mid-session context edits would thrash the
   prompt cache).
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) — one line per release, newest first.
