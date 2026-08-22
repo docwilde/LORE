@@ -18,4 +18,5 @@
   <path d="M64 170 H108 M64 184 H108"/>
   <path d="M148 170 H192 M148 184 H192"/>
 </g>
+<text x="128" y="240" text-anchor="middle" font-family="monospace" font-size="32" font-weight="bold" letter-spacing="10" fill="#f5b942">LORE</text>
 </svg>

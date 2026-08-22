@@ -1,6 +1,6 @@
-<p align="center"><img src="assets/logo.svg" width="140" alt="lore: the reader blob over its open tome, a thought trail rising to a forming belief"><br><sub><b>L·O·R·E</b> — Lots Of Reconciled Engrams</sub></p>
+<p align="center"><img src="assets/logo.svg" width="140" alt="LORE: the reader blob over its open tome, a thought trail rising to a forming belief"><br><sub><b>L·O·R·E</b> — Lots Of Reconciled Engrams</sub></p>
 
-# lore — Lots Of Reconciled Engrams
+# LORE — Lots Of Reconciled Engrams
 
 Memory for Claude Code that **reasons about you and improves itself**.
 
@@ -49,7 +49,7 @@ proposes — never applies — what gets remembered.
    `E:` tool errors, the pitfalls), and the reviewer only proposes a recipe the
    session verified working. A later session that corrects a learned skill yields an
    `update` proposal — approve shows the unified diff and overwrites only skills
-   lore itself installed. Every invocation of a learned skill is counted, and each
+   LORE itself installed. Every invocation of a learned skill is counted, and each
    run's **outcome is judged and recorded**: the reviewer sees the skill's tool
    calls and what followed (execution errors, the user calling the result wrong)
    and files success/failure/unclear with a one-line reason into `skill_usage.json`.
@@ -112,7 +112,7 @@ lore dream --dry-run              # what the reconciler would merge, spending no
 ```
 
 **A backfill changes the arithmetic, not the rules.** `/lore:backfill` reviews
-sessions that ended before lore existed, so it produces in one run what normally
+sessions that ended before LORE existed, so it produces in one run what normally
 arrives one session at a time: a large `pending/` pile to triage per project, and
 a batch of beliefs that went in ungated. It notifies twice — once with the total
 it is about to process, once with what it found — rather than once per session,
@@ -121,7 +121,7 @@ that is the pass the per-session flow gives you for free and a batch does not.
 
 ## What you see at session start
 
-Every session opens with the lore MOTD — the wordmark and the mascot reading its
+Every session opens with the LORE MOTD — the wordmark and the mascot reading its
 tome, thinking the session's stats in its bubble: pending proposals by kind, new
 beliefs since last start (yours counted separately), memory usage, learned-skill
 health, index size.
@@ -190,11 +190,11 @@ Trapezoid nodes are the pending gate — nothing crosses one without `/lore:appr
 /plugin install lore
 ```
 
-Then run `/lore:setup` — it disables the built-in auto-memory lore replaces (two
+Then run `/lore:setup` — it disables the built-in auto-memory LORE replaces (two
 parallel memory systems disagree eventually), adds the permission-allowlist entry
 so memory writes don't cost a prompt each, ports existing auto-memory entries,
 primes the session index, and offers to review the backlog of sessions that ended
-before lore existed — each change behind its own confirmation. That last step is
+before LORE existed — each change behind its own confirmation. That last step is
 what fills the belief store on a fresh install: indexing alone only builds search,
 because `review` fires on session end and cannot reach backwards.
 `/lore:doctor` is the read-only version: it reports, fixes nothing.
@@ -210,7 +210,7 @@ because `review` fires on session end and cannot reach backwards.
 | `/lore:approve <id\|all>` | Applies staged proposals: memory writes cap-enforced, skill updates shown as a unified diff before overwriting, retires moved to `skills-retired/`. |
 | `/lore:reject <id\|all>` | Archives proposals unapplied, verdict recorded in `pending/archive/`. |
 | `/lore:review` | Triggers the background review of the current session immediately instead of waiting for session end (`--dry-run` shows what would be sent, spending nothing). |
-| `/lore:backfill` | Reviews sessions that ended before lore could see them — the one path that reaches backwards. Lists projects with session counts, reviews the ones you name (one worker per project), records what it has done so a re-run resumes, reconciles beliefs once at the end, and notifies on start and finish rather than per session. |
+| `/lore:backfill` | Reviews sessions that ended before LORE could see them — the one path that reaches backwards. Lists projects with session counts, reviews the ones you name (one worker per project), records what it has done so a re-run resumes, reconciles beliefs once at the end, and notifies on start and finish rather than per session. |
 | `/lore:status` | Memory usage per scope, session-index and belief-store sizes, pending count, per-role models, learned skills with their track records. |
 | `/lore:doctor` | Read-only diagnosis: environment checks, effective config, allowlist and auto-memory conflicts, unported entries, unreviewed session backlog. Reports, fixes nothing. |
 | `/lore:setup` | Applies what doctor found, one change behind its own confirmation each: disable built-in auto-memory, add the permission allowlist, port old entries, prime the index, backfill-review the session backlog for the projects you pick, set per-role models. |
@@ -250,13 +250,13 @@ Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
   itself already went. Review logs live in `LORE_ROOT/logs/`.
 - The reviewer's cost is one short haiku call per qualifying session end, plus one
   sonnet call when new beliefs need reconciling.
-- The name: lore is accumulated knowledge of a craft — and, coincidentally, Data's
+- The name: LORE is accumulated knowledge of a craft — and, coincidentally, Data's
   brother in TNG. The logo's amber is a positronic wink at that.
 - **Seeing the background work:** `/lore:review` runs as a harness-tracked
   background task (visible in the TUI, completion notified in-session). The
   SessionEnd worker necessarily runs after the TUI is gone — `lore status`
   lists live workers, and `lore statusline` prints a one-segment status
-  ("lore ⟳ reviewing" / "lore ✉ 2 pending") to embed in a custom statusline.
+  ("LORE ⟳ reviewing" / "LORE ✉ 2 pending") to embed in a custom statusline.
 - **License:** [PolyForm Noncommercial 1.0.0](LICENSE) — free for personal,
   research and other noncommercial use; commercial use requires the author's
   consent (a separate license — get in touch).
