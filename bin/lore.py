@@ -1303,7 +1303,9 @@ When the session corrects or improves one of the learned skills listed below, pr
 {{"action":"update"}} for that name with the full corrected body instead of a new skill.
 
 For every learned skill that was INVOKED in this session (its "Skill: <name>" T: line appears \
-in the digest), judge how the run went and report it in "skill_outcomes": "success" when its \
+in the digest), judge how the run went and report it in "skill_outcomes" ONLY when the digest \
+shows EXPLICIT evidence of the result (user confirmed it, tests passed/failed, an error trace). \
+Silence or abandonment is NOT an outcome -- record nothing. Report "success" when its \
 procedure ran through (commands succeeded, goal reached), "failure" when it errored (E: lines \
 following it) or the user called the result wrong, "unclear" otherwise. "reason" is one short \
 sentence of evidence from the digest. A learned skill whose record below shows repeated \
@@ -1444,7 +1446,20 @@ def save_skill_usage(usage: dict) -> None:
     skill_usage_path().write_text(json.dumps(usage, indent=2), encoding="utf-8")
 
 
-def record_skill_outcomes(data: dict) -> int:
+def repo_head(cwd: "str | None" = None) -> "str | None":
+    """Current git HEAD of `cwd`'s repo, or None outside one. Stamped onto every
+    skill outcome (attribution guard, 2026-08-22): when a skill starts failing,
+    a changed HEAD between the successes and the failures says "codebase moved",
+    not "skill rotted" -- without it the judge cannot tell the two apart."""
+    try:
+        r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd or os.getcwd(),
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip()[:12] or None if r.returncode == 0 else None
+    except OSError:
+        return None
+
+
+def record_skill_outcomes(data: dict, cwd: "str | None" = None) -> int:
     """Close the loop: store the reviewer's per-run success/failure verdicts, so the
     next review sees each recipe's track record and can propose update or retire."""
     learned = learned_skills()
@@ -1465,6 +1480,10 @@ def record_skill_outcomes(data: dict) -> int:
         rec["last_outcome"] = outcome
         rec["last_reason"] = one_line(str(o.get("reason") or ""))[:200]
         rec["last"] = utcnow()
+        head = repo_head(cwd)
+        if head:
+            rec.setdefault("heads", []).append(head)
+            rec["heads"] = rec["heads"][-10:]
         recorded += 1
     if recorded:
         save_skill_usage(usage)
@@ -1501,7 +1520,8 @@ RECENCY_NOTE = (
 def build_review_job(transcript: Path, slug: str,
                      span: "tuple[int, int] | None" = None,
                      part: "str | None" = None,
-                     older: bool = False) -> dict | None:
+                     older: bool = False,
+                     cwd_hint: "str | None" = None) -> dict | None:
     """The deriver job for one transcript, or None when it is too short to review.
 
     Split out of cmd_review so a batch runs the same prompt, the same
@@ -1538,7 +1558,7 @@ def build_review_job(transcript: Path, slug: str,
     if older:
         prompt += RECENCY_NOTE
     sid = transcript.stem if part is None else f"{transcript.stem}-{part}"
-    return {"prompt": prompt, "project": slug, "session_id": sid}
+    return {"prompt": prompt, "project": slug, "session_id": sid, "cwd": str(cwd_hint or "")}
 
 
 WORKER_MARKERS = (
@@ -1810,7 +1830,7 @@ def cmd_review(args) -> int:
 
         def _run_window(k_lo_hi):
             k, lo, hi = k_lo_hi
-            wjob = build_review_job(Path(transcript), slug, span=(lo, hi),
+            wjob = build_review_job(Path(transcript), slug, cwd_hint=cwd, span=(lo, hi),
                                     part=f"w{k:03d}",
                                     older=(hi < n))
             if wjob is None:
@@ -1846,7 +1866,7 @@ def cmd_review(args) -> int:
             for r in ex.map(_run_window, items):
                 rc = r or rc
         return rc
-    job = build_review_job(Path(transcript), slug)
+    job = build_review_job(Path(transcript), slug, cwd_hint=cwd)
     if job is None:
         return 0
     if args.dry_run:
@@ -1998,7 +2018,7 @@ def worker_run(jobfile: Path) -> int:
             return 1
         staged = stage_proposals(data, job["project"], job["session_id"])
         derived = derive_conclusions(data, job["project"], job["session_id"])
-        outcomes = record_skill_outcomes(data)
+        outcomes = record_skill_outcomes(data, cwd=job.get("cwd") or None)
         print(f"[{utcnow()}] staged {staged} proposal(s), derived {derived} belief(s),"
               f" recorded {outcomes} skill outcome(s)")
         notify_staged(staged)
@@ -2107,6 +2127,17 @@ def stage_proposals(data: dict, slug: str, session_id: str) -> int:
         body = str(s.get("body") or "").strip()
         # "update"/"retire" only mean something for a skill lore itself installed
         action = s.get("action") if s.get("action") in ("update", "retire") and name in learned_skills() else "add"
+        if action in ("update", "retire"):
+            # ATTRIBUTION GUARD (2026-08-22): low-N noisy feedback must not
+            # mutate a skill -- a single bad run can be model nondeterminism
+            # or a moved codebase, not a rotten recipe. Require >= 3 recorded
+            # outcomes before an update/retire proposal is even staged.
+            _rec = load_skill_usage().get(name, {})
+            _n = _rec.get("ok", 0) + _rec.get("fail", 0)
+            if _n < 3:
+                print(f"skill '{name}': {action} proposal dropped -- only "
+                      f"{_n} recorded outcome(s), guard requires >= 3")
+                continue
         if not name or (not body and action != "retire"):
             continue
         put({"kind": "skill", "name": name, "action": action,
