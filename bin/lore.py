@@ -1548,8 +1548,12 @@ def build_context(cwd: str, scope: str = "all") -> str:
         ' lore memory replace --scope X --match "old substring" "merged fact".'
         " Consolidate proactively past 80%.",
         _freshness_rule(),
-        '- Recall past work: lore search "query" (FTS5 over all session transcripts);'
-        " lore session <id> [--grep term] to read one.",
+        "- RETRIEVAL LADDER when you need a fact about this user, project or"
+        " past work: (1) this snapshot -- already in context, costs nothing;"
+        ' (2) the belief store -- lore ask "question" or lore belief search;'
+        ' (3) the session index -- lore search "query", then lore session <id>'
+        " [--grep term]; (4) only if all three miss, re-derive or measure"
+        " fresh. Never re-measure what step 2 or 3 already holds.",
     ]
     return "\n".join(parts)
 
@@ -2823,11 +2827,52 @@ def load_pending() -> list[tuple[str, dict]]:
     return items
 
 
+def _cluster_pending(items) -> int:
+    """--cluster: group memory proposals by token overlap (greedy Jaccard,
+    no LLM) so a big-backfill pile reads as N themes instead of N-hundred
+    rows. Skills are never clustered -- they stay their own lane."""
+    import re as _re
+    def toks(t): return set(_re.findall(r"[a-z0-9_]{3,}", t.lower()))
+    mem = [(pid, it) for pid, it in items if it.get("kind") == "memory"]
+    skills = [(pid, it) for pid, it in items if it.get("kind") != "memory"]
+    clusters: list[dict] = []
+    for pid, it in mem:
+        ts = toks(it.get("text") or "")
+        best, bi = 0.0, -1
+        for i, c in enumerate(clusters):
+            j = len(ts & c["toks"]) / max(1, len(ts | c["toks"]))
+            if j > best:
+                best, bi = j, i
+        if best >= 0.42:
+            clusters[bi]["ids"].append(pid)
+            clusters[bi]["toks"] |= ts
+        else:
+            clusters.append({"rep": (it.get("text") or "")[:120],
+                             "scope": it.get("scope", "?"),
+                             "ids": [pid], "toks": ts})
+    clusters.sort(key=lambda c: -len(c["ids"]))
+    print(f"{len(mem)} memory proposal(s) -> {len(clusters)} cluster(s); "
+          f"{len(skills)} skill proposal(s) listed separately below.")
+    for i, c in enumerate(clusters):
+        print(f"[C{i:02d}] n={len(c['ids']):3d} ({c['scope']}) {c['rep']}")
+        if len(c["ids"]) > 1:
+            print(f"       ids: {' '.join(c['ids'])}")
+    for pid, it in skills:
+        print(f"{pid}  skill/{it.get('action', 'add')}  {it.get('name')}")
+    print("\nbulk ops take ids: lore approve <id...>   lore reject <id...>")
+    return 0
+
+
 def cmd_pending(args) -> int:
     items = load_pending()
     if not items:
         print("no pending proposals.")
         return 0
+    if getattr(args, "cluster", False):
+        return _cluster_pending(items)
+    if len(items) > 50 and not getattr(args, "all", False):
+        print(f"{len(items)} pending -- large pile. `lore pending --cluster` "
+              "groups them by theme; `--all` lists every row anyway.")
     for pid, item in items:
         if item.get("kind") == "memory":
             act = item["action"] + (f" (match: {item['match']!r})" if item.get("match") else "")
@@ -3435,6 +3480,12 @@ def main() -> int:
     sp.set_defaults(fn=cmd_backfill)
 
     sp = sub.add_parser("pending", help="list staged proposals")
+    sp.add_argument("--cluster", action="store_true",
+                    help="group memory proposals by token-overlap theme "
+                         "(the sane view after a big backfill); skills stay "
+                         "their own lane")
+    sp.add_argument("--all", action="store_true",
+                    help="list every row even for piles > 50")
     sp.set_defaults(fn=cmd_pending)
 
     sp = sub.add_parser("approve", help="apply staged proposals")
