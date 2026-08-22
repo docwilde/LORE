@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.25.0 — 2026-08-22
+- Graduated skill-update gate: `update` needs 1 recorded outcome when the last failure is a hard execution error at the same repo HEAD as the last success (drift excluded), 2 otherwise; `retire` keeps 3. Outcomes now carry an (outcome, HEAD, reason) trail so the gate reasons about which runs failed where. Rationale: outcomes are sparse by design (explicit evidence only) — a flat n>=3 let a broken skill misfire for weeks.
+
+
 ## 0.24.0 — 2026-08-22
 - **Per-stage kill switches** — every adoption slice toggles off on its own, honored at the execution site (hooks read the environment at fire time, no plugin reload): `LORE_DISABLE_INJECT` (SessionStart/refresh snapshot off, hooks exit silently; manual `snapshot`/`inject` keep working), `LORE_DISABLE_INDEX` (`--live` hook and the opportunistic reindex in `search`/`ask` no-op, the existing index still serves; explicit `lore index` still runs, with a notice), `LORE_DISABLE_REVIEW` (SessionEnd hook exits silently; explicit `lore review` still runs, with a notice), `LORE_DISABLE_BELIEFS` (conclusions channel leaves the deriver prompt, `derive_conclusions` guards the write site, the dreamer exits with a notice, `ask` warns and serves memory + session search only), `LORE_DISABLE_SKILLS` (skills/skill_outcomes channels leave the prompt; skill proposals are dropped unstaged with a worker-log line). `LORE_SKIP` stays the master off-switch above all of them; `LORE_STREAM_INDEX` stays the one opt-in.
 - Review prompt segmented: assembled per call by `review_prompt_template()` so a disabled channel vanishes from rules, context sections and the output JSON schema alike — a model told about a channel will fill it. Byte-identical to the old monolithic prompt with every stage on.
