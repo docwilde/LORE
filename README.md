@@ -213,13 +213,19 @@ because `review` fires on session end and cannot reach backwards.
 | `/lore:doctor` | Read-only diagnosis: environment checks, effective config, allowlist and auto-memory conflicts, unported entries, unreviewed session backlog. Reports, fixes nothing. |
 | `/lore:setup` | Applies what doctor found, one change behind its own confirmation each: disable built-in auto-memory, add the permission allowlist, port old entries, prime the index, backfill-review the session backlog for the projects you pick, set per-role models. |
 | `/lore:motd` | Delta view: beliefs added in the last 24h/7d, the newest claims verbatim, pending count — what changed since you last looked. |
+| `/lore:config` | Shows the stage table (inject, index, review, beliefs, skills, streaming) and toggles stages via multi-select; the switches land in the `settings.json` `"env"` block through `lore config set/unset`. |
 | `/lore:help` | One-screen reference card: commands + the memory model. |
 
 Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
 (stdlib only, no dependencies) — `memory`, `search`, `session`, `belief`, `ask`,
 `dream`, `pending`/`approve`/`reject`, `index` (`--live` streams the running session), `config`, `status`, `motd`, `snapshot` (scoped memory block for subagent prompts), `teardown` (full uninstall: exports curated memory back to built-in format), `reset` (`--index|--beliefs|--all`), `doctor`.
-`lore config` prints the effective configuration; set the env vars below in
-`~/.claude/settings.json` → `"env"` so hooks and commands see them.
+`lore config` prints the effective configuration plus a stage table
+(stage | switch | on/off); set the env vars below in `~/.claude/settings.json`
+→ `"env"` so hooks and commands see them — or let
+`lore config set <VAR> <value>` / `lore config unset <VAR>` write that block
+for you (LORE_\* variables only; `/lore:config` toggles the stage switches
+interactively). Hook-read switches apply from the next hook fire of a session
+carrying them; a restart refreshes everything.
 
 ## Configuration (env vars, all optional)
 
@@ -241,7 +247,12 @@ Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
 | `LORE_AGENT_ID` | `main` | names the deriving agent; staged proposals carry it as `derived_by`, skill outcomes record it, `lore pending` shows `[by <agent>]` (the `--full` backfill stamps each window `backfill-w<k>`) |
 | `LORE_SCOPE` | `all` | default tier for `snapshot`/`inject` when `--scope` is not given: `user`, `project` or `all` |
 | `LORE_STREAM_INDEX` | unset | `1` streams the growing transcript into the session index on every prompt (`lore index --live` via the UserPromptSubmit hook; new complete lines only, off by default) |
-| `LORE_SKIP` | unset | set to any value to no-op all hooks (the worker sets it) |
+| `LORE_DISABLE_INJECT` | unset | stage kill switch: SessionStart/refresh memory snapshot off — hooks exit silently; manual `lore snapshot`/`inject` keep working |
+| `LORE_DISABLE_INDEX` | unset | stage kill switch: session indexing off — the `--live` hook and the opportunistic reindex in `search`/`ask` no-op (the existing index still serves); explicit `lore index` still runs, with a notice |
+| `LORE_DISABLE_REVIEW` | unset | stage kill switch: SessionEnd review off — the hook exits silently; explicit `lore review` still runs, with a notice |
+| `LORE_DISABLE_BELIEFS` | unset | stage kill switch: belief store off — the deriver prompt drops the conclusions channel, the dreamer exits with a notice, `ask` warns and serves memory + session search only |
+| `LORE_DISABLE_SKILLS` | unset | stage kill switch: skillification off — the deriver prompt drops the skills/skill_outcomes channels, skill proposals are dropped unstaged with a log line |
+| `LORE_SKIP` | unset | set to any value to no-op all hooks (the worker sets it) — the master off-switch above every stage switch |
 
 ## Notes & caveats
 

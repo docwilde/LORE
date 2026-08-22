@@ -113,6 +113,30 @@ def effective_scope(value: "str | None") -> str:
     return scope if scope in SCOPES else "all"
 
 
+# STAGE KILL SWITCHES (2026-08-22): each adoption slice toggles off on its own —
+# inject (SessionStart/refresh snapshot), index (session FTS), review
+# (SessionEnd deriver), beliefs (conclusions channel + dreamer + ask), skills
+# (skillification channels + staging). All default ON; setting the variable to
+# anything but ""/"0" turns the stage OFF. Read per call at the execution site,
+# never frozen into module constants: hooks read the environment at fire time,
+# so a settings change reaches the next fire without a plugin reload. LORE_SKIP
+# stays the master off-switch above all of these; LORE_STREAM_INDEX stays the
+# one opt-IN stage (streaming), gated in hooks.json.
+STAGE_SWITCHES = {
+    "inject": "LORE_DISABLE_INJECT",
+    "index": "LORE_DISABLE_INDEX",
+    "review": "LORE_DISABLE_REVIEW",
+    "beliefs": "LORE_DISABLE_BELIEFS",
+    "skills": "LORE_DISABLE_SKILLS",
+}
+
+
+def stage_disabled(stage: str) -> bool:
+    """True when the stage's kill switch is set. Same truthiness as
+    LORE_DEFER_DREAM: ""/"0" mean on, anything else means off."""
+    return os.environ.get(STAGE_SWITCHES[stage], "") not in ("", "0")
+
+
 def read_hook_input() -> dict:
     """Hook payload from stdin, {} when run interactively."""
     if sys.stdin.isatty():
@@ -633,7 +657,11 @@ def like_scan(conn: sqlite3.Connection, query: str, scope: str | None, cap: int)
 
 def cmd_search(args) -> int:
     conn = db_connect()
-    index_sessions(conn)
+    # index kill switch (2026-08-22): search still serves the existing index,
+    # it just stops growing it — the opportunistic reindex is the automatic
+    # path the switch exists to stop.
+    if not stage_disabled("index"):
+        index_sessions(conn)
     slug = project_slug(args.cwd or os.getcwd())
     scopes = [None] if args.all else [slug, None]  # project first, then widen
     exprs = [e for e in dict.fromkeys((fts_expr(args.query), fts_expr(args.query, " OR "))) if e]
@@ -864,42 +892,52 @@ def cmd_ask(args) -> int:
     """Evidence pack for a dialectic agent: matching beliefs + session hits.
     No LLM here — the caller reasons; this just gathers."""
     conn = db_connect()
-    index_sessions(conn)
+    # index kill switch (2026-08-22): same contract as cmd_search — serve the
+    # existing index, stop growing it.
+    if not stage_disabled("index"):
+        index_sessions(conn)
     expr = fts_expr(args.question, " OR ")
     if not expr:
         print("empty question", file=sys.stderr)
         return 1
-    print(f"## Beliefs matching: {args.question}")
-    # "conf" is what the deriver asserted at extraction time, calibrated
-    # against nothing — the evidence count on each line is the honest signal.
-    print("(conf = deriver-claimed confidence, uncalibrated; weigh the evidence"
-          " count, which counts independent derivations, not verifications."
-          " cal = Beta-posterior over recorded outcomes, shown from 3 outcomes up)")
-    statuses = "('active','dormant')" if INCLUDE_DORMANT else "('active')"
-    rows = conn.execute(
-        f"SELECT {BELIEF_COLS_B} FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id"
-        f" WHERE belief_fts MATCH ? AND b.status IN {statuses}"
-        " ORDER BY bm25(belief_fts) LIMIT 12",
-        (expr,),
-    ).fetchall()
-    for row in rows:
-        line = format_belief(conn, row)
-        # CALIBRATED LABEL (2026-08-22): once a belief has 3+ ledger outcomes
-        # the empirical record outweighs the self-report enough to show — the
-        # uncalibrated conf stays on the line so the two can be compared.
-        c, x, _s = outcome_counts(conn, row[0])
-        if c + x + _s >= 3:
-            line += f"  cal={calibrated_confidence(row[3], c, x):.2f}"
-        print(line)
-    if rows:
-        # returned = referenced: the stamp is what keeps a belief that still
-        # answers questions out of the dormant sweep.
-        now = utcnow()
-        conn.executemany("UPDATE beliefs SET last_referenced = ? WHERE id = ?",
-                         [(now, row[0]) for row in rows])
-        conn.commit()
+    # beliefs kill switch (2026-08-22): the evidence pack degrades to its two
+    # remaining tiers instead of failing — the dialectic caller still gets
+    # memory + search, and the warning tells it why the beliefs are missing.
+    if stage_disabled("beliefs"):
+        print("belief store disabled (LORE_DISABLE_BELIEFS) — serving memory"
+              " + session search only.")
     else:
-        print("(none)")
+        print(f"## Beliefs matching: {args.question}")
+        # "conf" is what the deriver asserted at extraction time, calibrated
+        # against nothing — the evidence count on each line is the honest signal.
+        print("(conf = deriver-claimed confidence, uncalibrated; weigh the evidence"
+              " count, which counts independent derivations, not verifications."
+              " cal = Beta-posterior over recorded outcomes, shown from 3 outcomes up)")
+        statuses = "('active','dormant')" if INCLUDE_DORMANT else "('active')"
+        rows = conn.execute(
+            f"SELECT {BELIEF_COLS_B} FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id"
+            f" WHERE belief_fts MATCH ? AND b.status IN {statuses}"
+            " ORDER BY bm25(belief_fts) LIMIT 12",
+            (expr,),
+        ).fetchall()
+        for row in rows:
+            line = format_belief(conn, row)
+            # CALIBRATED LABEL (2026-08-22): once a belief has 3+ ledger outcomes
+            # the empirical record outweighs the self-report enough to show — the
+            # uncalibrated conf stays on the line so the two can be compared.
+            c, x, _s = outcome_counts(conn, row[0])
+            if c + x + _s >= 3:
+                line += f"  cal={calibrated_confidence(row[3], c, x):.2f}"
+            print(line)
+        if rows:
+            # returned = referenced: the stamp is what keeps a belief that still
+            # answers questions out of the dormant sweep.
+            now = utcnow()
+            conn.executemany("UPDATE beliefs SET last_referenced = ? WHERE id = ?",
+                             [(now, row[0]) for row in rows])
+            conn.commit()
+        else:
+            print("(none)")
     print("\n## Curated memory")
     slug = project_slug(args.cwd or os.getcwd())
     for scope in ("user", "project"):
@@ -1233,6 +1271,12 @@ def dormant_sweep(conn: sqlite3.Connection, days: int = BELIEF_DORMANT_DAYS) -> 
 
 
 def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int:
+    # beliefs kill switch (2026-08-22): no sweep, no candidates, no model call —
+    # the dreamer exists only to serve the belief store. Exit 0: a disabled
+    # stage is a configuration, not a failure.
+    if stage_disabled("beliefs"):
+        print("belief store disabled (LORE_DISABLE_BELIEFS) — dream skipped.")
+        return 0
     if not dry_run:
         slept = dormant_sweep(conn)
         if slept:
@@ -1540,6 +1584,11 @@ def cmd_inject(args) -> int:
     if os.environ.get("LORE_SKIP"):
         return 0
     hook = read_hook_input()
+    # inject kill switch (2026-08-22): a hook fire (payload on stdin) exits 0
+    # silently; a manual `lore inject`/`lore snapshot` still renders — the
+    # switch turns off the automatic injection, not the CLI.
+    if stage_disabled("inject") and hook:
+        return 0
     cwd = args.cwd or hook.get("cwd") or os.getcwd()
     out = {
         "hookSpecificOutput": {
@@ -1603,6 +1652,10 @@ def cmd_refresh(args) -> int:
     """
     if os.environ.get("LORE_SKIP"):
         return 0
+    # refresh is the same stage as inject (2026-08-22): the mid-session
+    # re-injection must not outlive the snapshot it repeats.
+    if stage_disabled("inject"):
+        return 0
     interval = refresh_interval()
     if interval is None:
         return 0
@@ -1644,11 +1697,19 @@ def cmd_refresh(args) -> int:
 
 # ---------------------------------------------------------------- tier 3: background review
 
-REVIEW_PROMPT = """You are the background memory reviewer for a coding agent (Hermes-pattern \
-memory). Below is a digest of a finished session. Extract at most 5 durable memories and at \
-most 1 reusable skill.
+# REVIEW PROMPT, SEGMENTED (2026-08-22): assembled per call by
+# review_prompt_template() so the skills/beliefs kill switches can drop whole
+# channels. A model told about a channel will fill it, so a disabled channel
+# must vanish from the prompt — rules, context sections AND the JSON schema —
+# not merely be ignored on return. With every stage on, the assembly is
+# byte-identical to the old monolithic REVIEW_PROMPT.
+_REVIEW_INTRO = """You are the background memory reviewer for a coding agent (Hermes-pattern \
+memory). Below is a digest of a finished session. Extract at most 5 durable memories{quota}.
 
-THE FUMBLE SIGNAL (strongest skill trigger): watch for a multi-step procedure where the same \
+"""
+
+# skills channel, part 1: what qualifies as a skill worth proposing.
+_REVIEW_SKILLS_SIGNAL = """THE FUMBLE SIGNAL (strongest skill trigger): watch for a multi-step procedure where the same \
 command was retried with corrected flags/env until it finally worked. That correction trail is \
 a runbook begging to exist. Propose it as a skill whose body contains the EXACT final working \
 commands in order, plus each failure mode hit on the way (wrong flag, wrong env var, wrong \
@@ -1657,7 +1718,10 @@ path) as a "do not do X" line. Never propose a skill for a single-command fix.
 A skill is a runbook someone would otherwise re-derive: >= 3 steps, environment-specific \
 flags, ordering constraints. If the fix fits in one memory line, propose memory, not a skill.
 
-A durable memory is a fact that will matter in FUTURE sessions: a user preference or identity \
+"""
+
+# always present: the memory channel and its guardrails.
+_REVIEW_MEMORY_RULES = """A durable memory is a fact that will matter in FUTURE sessions: a user preference or identity \
 fact (scope "user"), or a project environment fact, convention, workaround, or correction \
 (scope "project"). NOT task narration, NOT one-off state, NOT anything already covered by the \
 current entries listed below. Each text <= 200 chars, dense, declarative. When a new fact \
@@ -1686,7 +1750,10 @@ the fact without the person: "the reviewer requires a test per finding", not the
 name. The one exception is an identity fact the user stated about themselves for the agent to \
 remember and asked to have kept; nothing inferred, and nothing about a third party.
 
-A skill is a reusable working recipe worked out in this session that would plausibly be \
+"""
+
+# skills channel, part 2: the recipe contract and the outcome-judging loop.
+_REVIEW_SKILLS_RECIPE = """A skill is a reusable working recipe worked out in this session that would plausibly be \
 repeated. Digest tags: U user, A assistant, T a tool call (exact commands live here), \
 E a tool error. Only propose a recipe the session VERIFIED working — commands succeeded, \
 tests green; a plan that was never run is not a recipe. "body" is markdown carrying the \
@@ -1704,7 +1771,10 @@ sentence of evidence from the digest. A learned skill whose record below shows r
 failures and no recent success needs action: propose {{"action":"update"}} fixing the failing \
 step, or {{"action":"retire"}} (no body) when the recipe is beyond repair.
 
-Additionally, derive up to 10 conclusions for the belief store: observations about the user \
+"""
+
+# beliefs channel: the conclusions the deriver writes to the belief store.
+_REVIEW_CONCLUSIONS = """Additionally, derive up to 10 conclusions for the belief store: observations about the user \
 (scope "user") or the project (scope "project") that are worth keeping as queryable beliefs \
 even when they don't merit a slot in the small core memory. Each: a declarative claim \
 <= 200 chars, a confidence 0.0-1.0 (how well the session supports it), and a short evidence \
@@ -1728,7 +1798,10 @@ out for the same reason a person's name is: write what was learned, not who it c
 "corporate-design decks need a licensed-font fallback" carries the lesson that naming the \
 client and their brand colour does not.
 
-Current user memory entries:
+"""
+
+# always present: what the deriver must not repeat.
+_REVIEW_CONTEXT = """Current user memory entries:
 {user_entries}
 
 Current project memory entries:
@@ -1737,22 +1810,62 @@ Current project memory entries:
 Already-staged proposals (do not repeat):
 {pending}
 
-Installed skills — never propose one of these as a new skill: {skills}
+"""
+
+_REVIEW_CONTEXT_SKILLS = """Installed skills — never propose one of these as a new skill: {skills}
 
 Learned skills eligible for "update"/"retire" (name, track record, description):
 {learned}
 
-Output ONLY minified JSON, no prose, no code fences:
-{{"memory":[{{"scope":"user|project","action":"add|replace","match":"substring, replace only",\
-"text":"..."}}],"skills":[{{"name":"kebab-name","action":"add|update|retire","description":\
-"when to use","body":"markdown"}}],"skill_outcomes":[{{"name":"kebab-name","outcome":\
-"success|failure|unclear","reason":"short evidence"}}],\
-"conclusions":[{{"scope":"user|project","claim":"...","confidence":0.8,"evidence":"short quote"}}]}}
-If nothing qualifies output {{"memory":[],"skills":[],"skill_outcomes":[],"conclusions":[]}}
-
-SESSION DIGEST (project {slug}):
-{digest}
 """
+
+# JSON-schema fragments — the {{ }} escapes survive to the final .format call.
+_SCHEMA_MEMORY = ('"memory":[{{"scope":"user|project","action":"add|replace",'
+                  '"match":"substring, replace only","text":"..."}}]')
+_SCHEMA_SKILLS = ('"skills":[{{"name":"kebab-name","action":"add|update|retire",'
+                  '"description":"when to use","body":"markdown"}}],'
+                  '"skill_outcomes":[{{"name":"kebab-name","outcome":'
+                  '"success|failure|unclear","reason":"short evidence"}}]')
+_SCHEMA_CONCLUSIONS = ('"conclusions":[{{"scope":"user|project","claim":"...",'
+                       '"confidence":0.8,"evidence":"short quote"}}]')
+
+
+def review_prompt_template() -> str:
+    """The deriver prompt for the currently enabled channels, ready for .format().
+
+    Assembled at call time because the skills/beliefs kill switches are read at
+    the execution site: a review built while a stage is off must not describe
+    that stage's channel. str.format ignores surplus keyword arguments, so
+    build_review_job passes the same kwargs whichever placeholders survived
+    assembly.
+    """
+    skills_on = not stage_disabled("skills")
+    beliefs_on = not stage_disabled("beliefs")
+    parts = [_REVIEW_INTRO.format(
+        quota=" and at most 1 reusable skill" if skills_on else "")]
+    if skills_on:
+        parts.append(_REVIEW_SKILLS_SIGNAL)
+    parts.append(_REVIEW_MEMORY_RULES)
+    if skills_on:
+        parts.append(_REVIEW_SKILLS_RECIPE)
+    if beliefs_on:
+        parts.append(_REVIEW_CONCLUSIONS)
+    parts.append(_REVIEW_CONTEXT)
+    if skills_on:
+        parts.append(_REVIEW_CONTEXT_SKILLS)
+    fields, empty = [_SCHEMA_MEMORY], ['"memory":[]']
+    if skills_on:
+        fields.append(_SCHEMA_SKILLS)
+        empty.append('"skills":[],"skill_outcomes":[]')
+    if beliefs_on:
+        fields.append(_SCHEMA_CONCLUSIONS)
+        empty.append('"conclusions":[]')
+    parts.append(
+        "Output ONLY minified JSON, no prose, no code fences:\n"
+        "{{" + ",".join(fields) + "}}\n"
+        "If nothing qualifies output {{" + ",".join(empty) + "}}\n"
+        "\nSESSION DIGEST (project {slug}):\n{digest}\n")
+    return "".join(parts)
 
 
 DIGEST_TAGS = {"user": "U", "assistant": "A", "tool": "T", "toolerr": "E"}
@@ -1946,7 +2059,7 @@ def build_review_job(transcript: Path, slug: str,
         f"- {name} ({skill_record(usage.get(name, {}))}): {desc}"
         for name, desc in sorted(learned_skills().items())
     ) or "(none)"
-    prompt = REVIEW_PROMPT.format(
+    prompt = review_prompt_template().format(
         learned=learned,
         user_entries=render_entries(read_entries(memory_path("user", slug))) or "(empty)",
         proj_entries=render_entries(read_entries(memory_path("project", slug))) or "(empty)",
@@ -2200,6 +2313,15 @@ def cmd_review(args) -> int:
     if os.environ.get("LORE_SKIP"):
         return 0
     hook = read_hook_input()
+    # review kill switch (2026-08-22): the SessionEnd fire (payload on stdin)
+    # exits 0 silently — never block session end over configuration. An
+    # explicit `lore review` still runs, with a notice, so /lore:review keeps
+    # working while the automatic review is off.
+    if stage_disabled("review"):
+        if hook:
+            return 0
+        print("notice: review stage is off (LORE_DISABLE_REVIEW) — reviewing"
+              " anyway, this is an explicit call; the SessionEnd hook stays off.")
     transcript = args.transcript or hook.get("transcript_path")
     cwd = args.cwd or hook.get("cwd") or os.getcwd()
     slug = project_slug(cwd)
@@ -2465,6 +2587,11 @@ def derive_conclusions(data: dict, slug: str, session_id: str) -> int:
     """Deriver: auto-write the reviewer's conclusions to the belief store.
     No approval gate — beliefs are queryable data, they never enter context
     uninvited; the gate stays on core memory and skills."""
+    # beliefs kill switch (2026-08-22): the prompt already dropped the
+    # conclusions channel, but a jobfile built before the switch flipped can
+    # still carry some — the write site is the guard that cannot be raced.
+    if stage_disabled("beliefs"):
+        return 0
     conn = db_connect()
     derived = 0
     for c in (data.get("conclusions") or [])[:10]:
@@ -2533,7 +2660,16 @@ def stage_proposals(data: dict, slug: str, session_id: str,
         existing.add(text.lower())
         put({"kind": "memory", "scope": scope, "action": action,
              "match": str(m.get("match") or ""), "text": text})
-    for s in (data.get("skills") or [])[:1]:
+    skill_items = (data.get("skills") or [])[:1]
+    # skills kill switch (2026-08-22): the prompt already dropped the skills
+    # channel, but a jobfile built before the switch flipped can still carry a
+    # proposal — the staging site is the guard that cannot be raced. The log
+    # line lands in the worker log, where every other staging decision speaks.
+    if skill_items and stage_disabled("skills"):
+        print(f"skill stage is off (LORE_DISABLE_SKILLS) — dropped"
+              f" {len(skill_items)} skill proposal(s) unstaged")
+        skill_items = []
+    for s in skill_items:
         if not isinstance(s, dict):
             continue
         name = re.sub(r"[^a-z0-9-]", "-", str(s.get("name") or "").lower()).strip("-")
@@ -2757,7 +2893,12 @@ def cmd_motd(args) -> int:
 
 def cmd_index(args) -> int:
     conn = db_connect()
+    # index kill switch (2026-08-22): --live only ever runs as the
+    # UserPromptSubmit hook, so it no-ops silently; the explicit CLI form
+    # below still indexes, with a notice that the automatic paths are off.
     if getattr(args, "live", None) is not None:
+        if stage_disabled("index"):
+            return 0
         # --live with no value (or an empty "$TRANSCRIPT_PATH") falls back to
         # the hook payload's transcript_path; a missing transcript is a no-op —
         # a hook on the prompt loop must never fail over a file that is not
@@ -2771,12 +2912,103 @@ def cmd_index(args) -> int:
         if sys.stdin.isatty():
             print(f"live: +{added} message(s), {consumed} line(s) consumed")
         return 0
+    if stage_disabled("index"):
+        print("notice: index stage is off (LORE_DISABLE_INDEX) — indexing anyway,"
+              " this is an explicit call; the automatic paths stay off.")
     indexed, skipped = index_sessions(conn, force=args.force)
     print(f"indexed {indexed}, unchanged {skipped}")
     return 0
 
 
+def claude_settings_path() -> Path:
+    """~/.claude/settings.json — one accessor, so tests can point it elsewhere."""
+    return Path.home() / ".claude" / "settings.json"
+
+
+def settings_env() -> dict:
+    """The "env" block of settings.json; {} when absent or unparseable."""
+    try:
+        settings = json.loads(claude_settings_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    env = settings.get("env") if isinstance(settings, dict) else None
+    return env if isinstance(env, dict) else {}
+
+
+def stage_rows() -> list[tuple[str, str, str]]:
+    """(stage, switch, on/off) for the config table.
+
+    settings.json wins over the inherited process environment: it is where
+    `config set`/`unset` write, and the confirm-after-apply flow in
+    /lore:config re-runs this right after writing — the process env lags until
+    the next session either way. The switches themselves (stage_disabled) read
+    only the process env, which is what the hooks actually inherit.
+    """
+    env = settings_env()
+
+    def val(var: str) -> str:
+        return str(env[var]) if var in env else os.environ.get(var, "")
+
+    rows = [(stage, var, "off" if val(var) not in ("", "0") else "on")
+            for stage, var in STAGE_SWITCHES.items()]
+    # streaming is the one opt-IN stage: on only when explicitly "1".
+    rows.append(("streaming", "LORE_STREAM_INDEX",
+                 "on" if val("LORE_STREAM_INDEX") == "1" else "off"))
+    return rows
+
+
+def config_env_write(var: str, value: "str | None") -> int:
+    """set (value) / unset (None) one LORE_* variable in settings.json "env".
+
+    Teardown's settings-edit pattern: parse, refuse to write over JSON that
+    does not parse, preserve every other key, indent=2 + trailing newline.
+    Only LORE_* is accepted — this command manages lore's own knobs, not the
+    user's environment at large.
+    """
+    if not re.fullmatch(r"LORE_[A-Z0-9_]+", var):
+        print(f"refusing: {var!r} is not a LORE_* variable — only lore's own"
+              " switches are managed here.", file=sys.stderr)
+        return 1
+    path = claude_settings_path()
+    settings: dict = {}
+    if path.exists():
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            print(f"cannot parse {path} — fix it by hand first; nothing written.",
+                  file=sys.stderr)
+            return 1
+    if not isinstance(settings, dict):
+        print(f"{path} is not a JSON object — fix it by hand; nothing written.",
+              file=sys.stderr)
+        return 1
+    env = settings.setdefault("env", {})
+    if not isinstance(env, dict):
+        print(f'"env" in {path} is not an object — fix it by hand; nothing written.',
+              file=sys.stderr)
+        return 1
+    if value is None:
+        if var not in env:
+            print(f"{var} is not set in {path} — nothing to do.")
+            return 0
+        del env[var]
+        action = f"removed {var}"
+    else:
+        env[var] = value
+        action = f"set {var}={value}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    print(f"{action} in {path} — hook-read switches apply from the next hook"
+          " fire of a session started with it; restart to refresh everything.")
+    return 0
+
+
 def cmd_config(args) -> int:
+    ccmd = getattr(args, "ccmd", None)
+    if ccmd == "set":
+        return config_env_write(args.var, args.value)
+    if ccmd == "unset":
+        return config_env_write(args.var, None)
     cfg = {
         "root": str(ROOT),
         "caps": {"user": USER_CAP, "project": MEMORY_CAP},
@@ -2788,6 +3020,7 @@ def cmd_config(args) -> int:
         "review_min_messages": REVIEW_MIN_MESSAGES,
         "skills_dir": str(SKILLS_DIR),
         "claude_bin": find_claude(),
+        "stages": {stage: state for stage, _var, state in stage_rows()},
     }
     if args.json:
         print(json.dumps(cfg, indent=2))
@@ -2796,6 +3029,12 @@ def cmd_config(args) -> int:
             print(f"{role}: {model or '(session default)'}")
         print(f"caps: user={USER_CAP} project={MEMORY_CAP}")
         print(f"root: {ROOT}   skills: {SKILLS_DIR}")
+        print()
+        print(f"{'stage':<10} {'switch':<21} state")
+        for stage, var, state in stage_rows():
+            print(f"{stage:<10} {var:<21} {state}")
+        print('toggle: lore config set <VAR> 1 | lore config unset <VAR>'
+              " (writes settings.json \"env\")")
     return 0
 
 
@@ -3156,9 +3395,18 @@ def main() -> int:
     sp = sub.add_parser("statusline", help="one short segment for a custom statusline")
     sp.set_defaults(fn=cmd_statusline)
 
-    sp = sub.add_parser("config", help="effective configuration (roles, models, caps, paths)")
+    sp = sub.add_parser("config",
+                        help="effective configuration + stage table; set/unset LORE_* switches")
     sp.add_argument("--json", action="store_true")
-    sp.set_defaults(fn=cmd_config)
+    sp.set_defaults(fn=cmd_config, ccmd=None)
+    csub = sp.add_subparsers(dest="ccmd")
+    cp = csub.add_parser("set", help='write a LORE_* variable into settings.json "env"')
+    cp.add_argument("var")
+    cp.add_argument("value")
+    cp.set_defaults(fn=cmd_config, ccmd="set")
+    cp = csub.add_parser("unset", help='remove a LORE_* variable from settings.json "env"')
+    cp.add_argument("var")
+    cp.set_defaults(fn=cmd_config, ccmd="unset")
 
     sp = sub.add_parser("doctor", help="environment checks")
     sp.set_defaults(fn=cmd_doctor)
