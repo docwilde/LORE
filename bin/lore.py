@@ -54,8 +54,8 @@ PROJECTS_DIR = Path(os.environ.get("LORE_PROJECTS_DIR", str(Path.home() / ".clau
 
 MSG_TRUNC = 4000          # chars kept per indexed message
 DIGEST_MSG_TRUNC = 700    # chars kept per message in the review digest
-DIGEST_TOTAL_CAP = int(os.environ.get("LORE_DIGEST_TOTAL_CAP", "28000"))  # chars kept for the whole digest
-DIGEST_LAST_N = int(os.environ.get("LORE_DIGEST_LAST_N", "140"))  # newest messages considered for the digest (tool lines included)
+DIGEST_TOTAL_CAP = int(os.environ.get("LORE_DIGEST_TOTAL_CAP", "100000"))  # chars kept for the whole digest
+DIGEST_LAST_N = int(os.environ.get("LORE_DIGEST_LAST_N", "300"))  # newest messages considered for the digest (tool lines included)
 
 
 def utcnow() -> str:
@@ -1296,7 +1296,9 @@ def record_skill_usage(messages: list[tuple[str, str, str]]) -> None:
         save_skill_usage(usage)
 
 
-def build_review_job(transcript: Path, slug: str) -> dict | None:
+def build_review_job(transcript: Path, slug: str,
+                     span: "tuple[int, int] | None" = None,
+                     part: "str | None" = None) -> dict | None:
     """The deriver job for one transcript, or None when it is too short to review.
 
     Split out of cmd_review so a batch runs the same prompt, the same
@@ -1307,7 +1309,15 @@ def build_review_job(transcript: Path, slug: str) -> dict | None:
     user_msgs = sum(1 for _, role, _ in messages if role == "user")
     if user_msgs < REVIEW_MIN_MESSAGES:
         return None
-    record_skill_usage(messages)
+    if span is not None:
+        # --full backfill window: digest exactly this slice. Skill usage was
+        # recorded by the first window; recording it once per window would
+        # multiply every skill's use count by the page count.
+        messages = messages[span[0]:span[1]]
+        if not messages:
+            return None
+    else:
+        record_skill_usage(messages)
     usage = load_skill_usage()
     learned = "\n".join(
         f"- {name} ({skill_record(usage.get(name, {}))}): {desc}"
@@ -1322,7 +1332,8 @@ def build_review_job(transcript: Path, slug: str) -> dict | None:
         slug=slug,
         digest=build_digest(messages),
     )
-    return {"prompt": prompt, "project": slug, "session_id": transcript.stem}
+    sid = transcript.stem if part is None else f"{transcript.stem}-{part}"
+    return {"prompt": prompt, "project": slug, "session_id": sid}
 
 
 WORKER_MARKERS = (
@@ -1571,6 +1582,35 @@ def cmd_review(args) -> int:
     if not transcript or not Path(transcript).exists():
         print("no transcript to review.", file=sys.stderr)
         return 0  # never block session end
+    if getattr(args, "full", False):
+        # FULL BACKFILL (2026-08-22): page the WHOLE transcript through the
+        # deriver in DIGEST_LAST_N-message windows instead of reviewing only
+        # the newest window. Sequential on purpose: each window's job is
+        # built right before it runs, so its "do not repeat" pending list
+        # includes everything the previous windows staged. Oldest window
+        # first — later windows carry the corrections.
+        _, _all = parse_transcript(Path(transcript), include_tools=True)
+        n = len(_all)
+        if n == 0:
+            print("no messages to review.", file=sys.stderr)
+            return 0
+        record_skill_usage(_all)
+        wins = [(i, min(i + DIGEST_LAST_N, n)) for i in range(0, n, DIGEST_LAST_N)]
+        print(f"full backfill: {n} messages, {len(wins)} window(s) of {DIGEST_LAST_N}")
+        os.environ["LORE_SKIP"] = "1"
+        tmp = ROOT / "tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        rc = 0
+        for k, (lo, hi) in enumerate(wins, 1):
+            wjob = build_review_job(Path(transcript), slug, span=(lo, hi),
+                                    part=f"w{k:03d}")
+            if wjob is None:
+                continue
+            wfile = tmp / f"review-{wjob['session_id']}.json"
+            wfile.write_text(json.dumps(wjob), encoding="utf-8")
+            print(f"-- window {k}/{len(wins)} messages {lo}:{hi}")
+            rc = worker_run(wfile) or rc
+        return rc
     job = build_review_job(Path(transcript), slug)
     if job is None:
         return 0
@@ -2113,6 +2153,10 @@ def main() -> int:
     sp.add_argument("--foreground", action="store_true",
                     help="run the worker inline (for harness-tracked background runs)")
     sp.add_argument("--dry-run", action="store_true", help="print the extraction prompt and exit")
+    sp.add_argument("--full", action="store_true",
+                    help="page the WHOLE transcript through the deriver in "
+                         "DIGEST_LAST_N-message windows (foreground; use with "
+                         "LORE_DEFER_DREAM=1 and run `lore dream` after)")
     sp.set_defaults(fn=cmd_review)
 
     sp = sub.add_parser("_worker")
