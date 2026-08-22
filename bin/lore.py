@@ -1296,9 +1296,17 @@ def record_skill_usage(messages: list[tuple[str, str, str]]) -> None:
         save_skill_usage(usage)
 
 
+RECENCY_NOTE = (
+    "\nNOTE: this digest is an OLDER slice of a longer session; the "
+    "already-staged proposals above reflect NEWER session state. Recency "
+    "wins: on any conflict or overlap with a staged proposal, defer to the "
+    "staged version and do not re-propose this slice's variant.\n")
+
+
 def build_review_job(transcript: Path, slug: str,
                      span: "tuple[int, int] | None" = None,
-                     part: "str | None" = None) -> dict | None:
+                     part: "str | None" = None,
+                     older: bool = False) -> dict | None:
     """The deriver job for one transcript, or None when it is too short to review.
 
     Split out of cmd_review so a batch runs the same prompt, the same
@@ -1332,6 +1340,8 @@ def build_review_job(transcript: Path, slug: str,
         slug=slug,
         digest=build_digest(messages),
     )
+    if older:
+        prompt += RECENCY_NOTE
     sid = transcript.stem if part is None else f"{transcript.stem}-{part}"
     return {"prompt": prompt, "project": slug, "session_id": sid}
 
@@ -1606,7 +1616,8 @@ def cmd_review(args) -> int:
         def _run_window(k_lo_hi):
             k, lo, hi = k_lo_hi
             wjob = build_review_job(Path(transcript), slug, span=(lo, hi),
-                                    part=f"w{k:03d}")
+                                    part=f"w{k:03d}",
+                                    older=(hi < n))
             if wjob is None:
                 return 0
             wfile = tmp / f"review-{wjob['session_id']}.json"
