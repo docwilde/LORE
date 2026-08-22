@@ -1,11 +1,26 @@
 # Changelog
 
-## 0.21.0 — 2026-08-22
-- Per-agent identity: `LORE_AGENT_ID` names the deriving agent (`main` when unset); the review job dict carries it, every staged proposal records it as `derived_by`, skill outcomes stamp it alongside the repo HEAD, `lore pending` prints `[by <agent>]`, and `review --full` stamps each window `backfill-w<k>`.
-- `lore snapshot [--scope user|project|all]`: the inject memory block as plain text (no hook envelope) for prepending to subagent prompts; rendering shared with inject/refresh.
-- Role-scoped view: `--scope` on `snapshot` and `inject` (default `all`; env default `LORE_SCOPE`) renders one tier only; the belief hint line rides only `all`/`project`.
-- Streaming index: `lore index --live <transcript>` reads only lines past the per-file `lines_indexed` count (new `files` column), scrubs and inserts just those into the msg FTS table — idempotent, partial trailing lines deferred to the next pass; wired as a UserPromptSubmit hook, off unless `LORE_STREAM_INDEX=1`.
+## 0.22.0 — 2026-08-22
+- Coral crab mascot replaces the reading android everywhere: `assets/logo.svg` (pincers, eye stalks, belief-dot trail), README hero banner (`assets/banner.png`, transparent background, doubles as the social preview), and the motd banner (side-clawed block-art crab, trail rising into the stats box — top-mounted claws read as bunny ears).
+- One project memory per **git repo root**: `project_slug` resolves `git rev-parse --show-toplevel`, so sessions started in a subdirectory (`repo/viz`) share the repo's memory instead of forking an invisible second scope. Non-repo cwds unchanged.
+- README refresh: leaner lead, motd/help command rows, CLI list (`index --live`, `snapshot`, `teardown`, `reset`), config caps corrected; repo renamed lore → LORE with description + topics.
 
+## 0.21.0 — 2026-08-22
+**Hardening (design-review response):**
+- Secret scrubber at BOTH ingestion points (session digest + FTS index): API keys (`sk-*`, `AKIA*`, `ghp_*`, `cfat_*`), Bearer tokens, `key=value` pairs, PEM blocks, long hex/base64 runs → `[REDACTED:<kind>]`. Credentials never re-egress through deriver calls and never sit in the on-disk index.
+- Belief dormant tier: beliefs unreferenced for `LORE_BELIEF_DORMANT_DAYS` (45) age out of the evidence pack (confidence ≥0.95 exempt); re-include via `--include-dormant` / `LORE_INCLUDE_DORMANT=1`. Replaces retract-only GC that nobody runs.
+- Honest confidence: `ask` labels conf "deriver-claimed, uncalibrated" and shows evidence counts; the dialectic derives high/medium/low from evidence, not the self-report.
+- `lore teardown [--dry-run]`: full uninstall — exports curated memory back to built-in auto-memory md format, re-enables `autoMemoryEnabled`, strips `LORE_*` env keys, prints what remains. `lore reset --index|--beliefs|--all` recreates the derived store; curated md never touched; refuses without a flag.
+- Code-token search fallback: `snake_case`/dotted/camelCase queries merge a LIKE exact-substring scan into FTS results (unicode61+porter splits code tokens).
+- Skill-loop attribution guards: outcomes recorded only on explicit evidence (silence ≠ success); update/retire proposals dropped below 3 recorded outcomes (enforced in code); every outcome stamped with repo HEAD so a moved codebase is distinguishable from a rotten recipe.
+
+**Multi-agent memory:**
+- Per-agent identity: `LORE_AGENT_ID` → `derived_by` on every staged proposal (shown as `[by backfill-w3]` in pending) and per-outcome `by` records; `--full` backfill stamps each window via the job dict (env would race across worker threads).
+- `lore snapshot [--scope user|project|all]`: bare memory block for embedding into subagent prompts; spawn pattern documented in the skill.
+- Role-scoped views: `--scope` + `LORE_SCOPE` on snapshot/inject/refresh; refresh cannot widen what inject narrowed; unknown values degrade to `all`.
+- Streaming index: `lore index --live` (incremental by line count, scrubbed, partial-tail-safe) + opt-in UserPromptSubmit hook behind `LORE_STREAM_INDEX=1`.
+- Fix: prompts travel via stdin, never argv — a dreamer prompt over 515 beliefs exceeded ARG_MAX (live E2BIG).
+- `/lore:pending` presents approvals as integrated Claude Code multiple-choice prompts (per-lane multiSelect; skills judged in their own lane, never bulk-rejected with memory).
 ## 0.20.0 — 2026-08-22
 - Full-transcript backfill: `review --full` pages the whole session through the deriver in `DIGEST_LAST_N`-message windows, newest first (recency is authority; older windows defer to staged facts on conflict), with `--workers N` for parallel windows; `/lore:backfill` command.
 - Digest defaults raised 140→300 messages, 28k→100k chars; overridable via `LORE_DIGEST_LAST_N` / `LORE_DIGEST_TOTAL_CAP`.
