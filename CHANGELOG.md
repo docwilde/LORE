@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.29.1 — 2026-08-22
+- `/lore:motd` now greets with the full banner (wordmark + stats box + crab with belief trail), same as SessionStart; `LORE_MOTD=line` keeps the plain delta view. Was banner-at-start only.
+
 ## 0.29.0 — 2026-08-22
 - **`lore pending --cluster`** — token-overlap grouping (greedy Jaccard, no LLM) turns a big-backfill pile into a per-theme view; plain `pending` now suggests it past 50 proposals; the `/lore:pending` skill uses it by default for large piles. Skills are never clustered into the memory lane.
 - **Retrieval ladder formalized in the snapshot rules**: (1) snapshot → (2) belief store (`lore ask` / `belief search`) → (3) session index (`lore search`) → (4) re-derive only when all three miss. Answers "where does the agent look when the snapshot doesn't have it" with a defined order instead of an instinct.

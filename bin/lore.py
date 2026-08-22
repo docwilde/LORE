@@ -3022,8 +3022,8 @@ def cmd_motd(args) -> int:
     slug = project_slug(args.cwd or os.getcwd())
     user_entries = read_entries(memory_path("user", slug))
     proj_entries = read_entries(memory_path("project", slug))
-    print(f"memory  user {usage_line(user_entries, USER_CAP)} · "
-          f"project {usage_line(proj_entries, MEMORY_CAP)}")
+    stat_lines = [f"memory  user {usage_line(user_entries, USER_CAP)} · "
+                  f"project {usage_line(proj_entries, MEMORY_CAP)}"]
     n_pending = len(load_pending())
     conn = db_connect()
     n_active = conn.execute(
@@ -3037,8 +3037,17 @@ def cmd_motd(args) -> int:
     d7 = conn.execute(
         "SELECT count(*) FROM beliefs WHERE created >= datetime('now', '-7 day')"
     ).fetchone()[0]
-    print(f"beliefs {n_active} active / {n_dormant} dormant / {n_total} total · "
-          f"+{d1} last 24h · +{d7} last 7d · pending {n_pending}")
+    stat_lines.append(
+        f"beliefs {n_active} active / {n_dormant} dormant / {n_total} total · "
+        f"+{d1} last 24h · +{d7} last 7d · pending {n_pending}")
+    # the greeting gets the full banner (wordmark + stats box + crab) unless
+    # LORE_MOTD=line asks for the plain delta view -- same switch, same
+    # shapes, as the SessionStart banner
+    if os.environ.get("LORE_MOTD", "banner") == "line":
+        for s in stat_lines:
+            print(s)
+    else:
+        print(render_banner(stat_lines))
     rows = conn.execute(
         "SELECT subject, claim, confidence FROM beliefs WHERE status='active' "
         "ORDER BY created DESC LIMIT 5").fetchall()
