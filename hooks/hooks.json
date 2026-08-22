@@ -31,6 +31,18 @@
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/bin/lore.py review",
+            "timeout": 30,
+            "statusMessage": "Deriving lore beliefs before compaction"
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [
