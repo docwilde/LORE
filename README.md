@@ -135,29 +135,44 @@ twice — total, then results — and reconciles beliefs once at the end.
 
 ## What you see at session start
 
-The LORE MOTD opens every session: wordmark and mascot reading its tome,
-stats in the thought bubble — pending proposals by kind, new beliefs since
-last start (yours counted separately), memory usage, learned-skill health,
-index size.
+Every session opens with the LORE banner: the block wordmark, a stats box
+— memory fill, belief counts and deltas, pending proposals, learned-skill
+health — and the crab, its belief trail rising into the box. `/lore:motd`
+greets with the same banner on demand and appends the newest claims
+verbatim. In a color terminal the wordmark, trail and crab render in
+Claude orange.
 
 ```
-                ╭───────────────────────────────────────╮
-                │ 2 pending (1× memory, 1× skill update)│
-                │ +7 beliefs since last start, 3 yours  │
-                ╰───────────────────────────────────────╯
-              ◌
-            ∘
-          ·
-    ▐▛███▜▌
-   ▝▜█████▛▘
- ▗▄▄▄▄▄▄▖▗▄▄▄▄▄▄▖
- ▐ ┄┄┄┄ ▌▐ ┄┄┄┄ ▌
- ▝▀▀▀▀▀▀▘▝▀▀▀▀▀▀▘
+ █████          ███████    ███████████   ██████████
+▒▒███         ███▒▒▒▒▒███ ▒▒███▒▒▒▒▒███ ▒▒███▒▒▒▒▒█
+ ▒███        ███     ▒▒███ ▒███    ▒███  ▒███  █ ▒
+ ▒███       ▒███      ▒███ ▒██████████   ▒██████
+ ▒███       ▒███      ▒███ ▒███▒▒▒▒▒███  ▒███▒▒█
+ ▒███      █▒▒███     ███  ▒███    ▒███  ▒███ ▒   █
+ ███████████ ▒▒▒███████▒   █████   █████ ██████████
+▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒    ▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒▒▒▒▒▒
+
+           Lots Of Reconciled Engrams
+
+     ╭──────────────────────────────────────────────╮
+     │ memory  user 50% · project 63%               │
+     │ beliefs 406 active · +422 24h · pending 0    │
+     ╰──────────────────────────────────────────────╯
+                    ◌
+                  ∘
+                ·
+       ▄▄█████▄▄
+ ▟▀▖ ▄██ ◉   ◉ ██▄ ▗▀▙
+ ▜▄▘ ▀██▄ ▽ ▄▄██▀  ▚▄▛
+       ▀▀█████▀▀
+      ▞▘▐▌   ▐▌▝▚
 ```
 
 `LORE_MOTD=line` compacts it to one line; `LORE_MOTD=0` leaves only the
-pending notice, never suppressed. It's a hook `systemMessage` rendered by
-the harness — no tokens spent, no dependence on the model cooperating.
+pending notice, never suppressed. At session start it arrives as a hook
+`systemMessage` rendered by the harness — no tokens spent, no dependence
+on the model cooperating; color applies only on a real terminal
+(`lore motd` in your shell), never in the captured hook output.
 
 
 ## How the loops run

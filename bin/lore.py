@@ -1644,17 +1644,37 @@ BANNER_MASCOT = [
 ]
 
 
+_ORANGE = "\033[38;2;217;119;87m"   # Claude orange #D97757
+_RESET = "\033[0m"
+
+
+def _color_on() -> bool:
+    """Claude orange only on a real terminal (`lore motd` in a shell).
+    The SessionStart hook captures stdout into a JSON systemMessage where
+    raw ANSI would render as garbage -- isatty is False there, so the hook
+    path stays plain automatically. LORE_MOTD_COLOR=1/0 forces either way."""
+    forced = os.environ.get("LORE_MOTD_COLOR")
+    if forced is not None:
+        return forced == "1"
+    return sys.stdout.isatty()
+
+
 def render_banner(stats: list[str]) -> str:
-    """The wordmark, then the crab, its belief trail rising to the stats."""
+    """The wordmark, then the crab, its belief trail rising to the stats.
+    Graphical elements (wordmark, crab + trail) in Claude orange when the
+    output is a terminal; the stats box stays default-color for legibility."""
+    paint = _color_on()
+    def o(line: str) -> str:
+        return f"{_ORANGE}{line}{_RESET}" if paint and line.strip() else line
     w = max(len(s) for s in stats)
     ind = " " * 16
     # leading blank line: the TUI prints its own prefix on the first line,
     # which would shift the wordmark's top row
-    lines = [""] + list(BANNER_WORDMARK) + [""]
+    lines = [""] + [o(l) for l in BANNER_WORDMARK] + [""]
     lines.append(ind + "╭─" + "─" * w + "─╮")
     lines += [ind + "│ " + s.ljust(w) + " │" for s in stats]
     lines.append(ind + "╰─" + "─" * w + "─╯")
-    return "\n".join(lines + BANNER_MASCOT)
+    return "\n".join(lines + [o(l) for l in BANNER_MASCOT])
 
 
 def cmd_inject(args) -> int:
