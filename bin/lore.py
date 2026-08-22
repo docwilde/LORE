@@ -775,9 +775,14 @@ def belief_subject(scope: str, slug: str) -> str:
 def belief_insert(
     conn: sqlite3.Connection, subject: str, claim: str, confidence: float,
     session_id: str | None, project: str | None, note: str | None,
+    exclude_ids: "set[int] | None" = None,
 ) -> tuple[int, bool]:
     """Insert or reinforce a belief; returns (id, created). An exact restatement
-    of an active claim adds evidence and lifts confidence instead of duplicating."""
+    of an active claim adds evidence and lifts confidence instead of duplicating.
+    exclude_ids: never reinforce these ids -- the dreamer's merge passes the two
+    source beliefs, because a merged claim identical to a source's text would
+    otherwise reuse that source's id and make the caller supersede it by itself,
+    dropping the fact entirely (both sources terminal, no survivor)."""
     claim = one_line(claim)
     confidence = min(max(confidence, 0.0), 1.0)
     now = utcnow()
@@ -786,6 +791,8 @@ def belief_insert(
         " AND status = 'active'",
         (subject, claim),
     ).fetchone()
+    if row and exclude_ids and row[0] in exclude_ids:
+        row = None
     if row:
         bid, created = row[0], False
         conn.execute(
@@ -808,12 +815,18 @@ def belief_insert(
 
 
 def belief_supersede(conn: sqlite3.Connection, bid: int, by: int | None, reason: str) -> None:
-    conn.execute(
+    # never let a belief supersede itself, and only transition an ACTIVE one:
+    # a late/second dreamer racing the same DB (dream_run holds a lock now, but
+    # belt-and-braces) must not overwrite an already-terminal belief's
+    # superseded_by/resolution.
+    if by == bid:
+        return
+    n = conn.execute(
         "UPDATE beliefs SET status = 'superseded', superseded_by = ?, resolution = ?,"
-        " updated = ? WHERE id = ?",
+        " updated = ? WHERE id = ? AND status = 'active'",
         (by, one_line(reason)[:300], utcnow(), bid),
-    )
-    if by:
+    ).rowcount
+    if by and n:
         conn.execute("UPDATE belief_evidence SET belief_id = ? WHERE belief_id = ?", (by, bid))
 
 
@@ -1318,6 +1331,28 @@ def dormant_sweep(conn: sqlite3.Connection, days: int = BELIEF_DORMANT_DAYS) -> 
     return cur.rowcount
 
 
+def _dream_lock():
+    """Non-blocking flock so only one dreamer reconciles the belief store at a
+    time. Two ordinary sessions ending together (DEFER_DREAM off) would
+    otherwise race two ~10-min model calls against one snapshot, then write
+    conflicting merge/supersede transitions. Returns the held file handle, or
+    None if another dreamer holds it (caller skips). fcntl is POSIX-only; on a
+    platform without it the lock is a no-op (single-user desktop, the race is
+    rare and the supersede guards catch the worst of it)."""
+    try:
+        import fcntl
+    except ImportError:
+        return True  # truthy sentinel: "proceed, no lock available"
+    ROOT.mkdir(parents=True, exist_ok=True)
+    fh = open(ROOT / "dream.lock", "w")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fh
+    except OSError:
+        fh.close()
+        return None
+
+
 def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int:
     # beliefs kill switch (2026-08-22): no sweep, no candidates, no model call —
     # the dreamer exists only to serve the belief store. Exit 0: a disabled
@@ -1325,6 +1360,12 @@ def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int
     if stage_disabled("beliefs"):
         print("belief store disabled (LORE_DISABLE_BELIEFS) — dream skipped.")
         return 0
+    _lock = None
+    if not dry_run:
+        _lock = _dream_lock()
+        if _lock is None:
+            print("another dreamer holds the reconcile lock — skipping this run.")
+            return 0
     if not dry_run:
         slept = dormant_sweep(conn)
         if slept:
@@ -1373,7 +1414,7 @@ def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int
         subject = conn.execute("SELECT subject FROM beliefs WHERE id = ?", (a,)).fetchone()[0]
         if decision == "merge" and res.get("claim"):
             nid, _ = belief_insert(conn, subject, str(res["claim"]), conf, None, slug,
-                                   f"merge of {a}+{b}: {reason}")
+                                   f"merge of {a}+{b}: {reason}", exclude_ids={a, b})
             belief_supersede(conn, a, nid, reason)
             belief_supersede(conn, b, nid, reason)
             # LEDGER (2026-08-22): two independent derivations landing on the
