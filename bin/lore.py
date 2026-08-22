@@ -1990,6 +1990,13 @@ def record_skill_outcomes(data: dict, cwd: "str | None" = None,
         if head:
             rec.setdefault("heads", []).append(head)
             rec["heads"] = rec["heads"][-10:]
+        # GRADUATED GATE INPUT (2026-08-22): the flat heads list cannot say
+        # which outcome happened at which HEAD; the trail can, so the update
+        # gate can tell "hard failure at the HEAD that used to succeed"
+        # (drift excluded, one observation suffices) from ambiguous cases.
+        rec.setdefault("trail", []).append(
+            {"o": outcome, "h": head, "r": rec["last_reason"][:80]})
+        rec["trail"] = rec["trail"][-10:]
         # per-agent identity (2026-08-22): who judged this run, kept alongside
         # the HEAD stamp and trimmed the same way — a backfill window's verdict
         # weighs differently from a live session's when the judge reads the
@@ -2677,15 +2684,28 @@ def stage_proposals(data: dict, slug: str, session_id: str,
         # "update"/"retire" only mean something for a skill lore itself installed
         action = s.get("action") if s.get("action") in ("update", "retire") and name in learned_skills() else "add"
         if action in ("update", "retire"):
-            # ATTRIBUTION GUARD (2026-08-22): low-N noisy feedback must not
-            # mutate a skill -- a single bad run can be model nondeterminism
-            # or a moved codebase, not a rotten recipe. Require >= 3 recorded
-            # outcomes before an update/retire proposal is even staged.
+            # GRADUATED ATTRIBUTION GUARD (2026-08-22, was flat n>=3):
+            # outcomes are sparse by design (explicit evidence only), so a flat 3
+            # let a broken skill misfire for weeks. Not all failures are noisy:
+            # a hard execution error at the SAME repo HEAD where the skill last
+            # succeeded excludes codebase drift -- one such observation justifies
+            # an update. Ambiguous cases need 2; retire keeps 3.
             _rec = load_skill_usage().get(name, {})
             _n = _rec.get("ok", 0) + _rec.get("fail", 0)
-            if _n < 3:
-                print(f"skill '{name}': {action} proposal dropped -- only "
-                      f"{_n} recorded outcome(s), guard requires >= 3")
+            _need = 3
+            if action == "update":
+                _trail = _rec.get("trail", [])
+                _last = _trail[-1] if _trail else None
+                _succ_head = next((t.get("h") for t in reversed(_trail)
+                                   if t.get("o") == "success"), None)
+                _hard = bool(_last and _last.get("o") == "failure" and re.search(
+                    r"error|traceback|exit code|not found|no such file|failed",
+                    _last.get("r") or "", re.I))
+                _need = 1 if (_hard and _succ_head
+                              and _last.get("h") == _succ_head) else 2
+            if _n < _need:
+                print(f"skill '{name}': {action} proposal dropped -- "
+                      f"{_n} recorded outcome(s), guard requires >= {_need}")
                 continue
         if not name or (not body and action != "retire"):
             continue
