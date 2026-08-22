@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/logo.svg" width="140" alt="LORE: the coral crab, a belief trail rising from its claw"><br><sub><b>L·O·R·E</b> — Lots Of Reconciled Engrams</sub></p>
+<p align="center"><img src="assets/banner.png" width="720" alt="LORE — Lots Of Reconciled Engrams: the coral crab beside the block wordmark, a belief trail rising from its claw"></p>
 
 # LORE — Lots Of Reconciled Engrams
 
