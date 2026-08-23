@@ -414,8 +414,14 @@ def cmd_motd(args) -> int:
     slug = project_slug(args.cwd or os.getcwd())
     user_entries = read_entries(memory_path("user", slug))
     proj_entries = read_entries(memory_path("project", slug))
-    stat_lines = [f"memory  user {usage_line(user_entries, USER_CAP)} · "
-                  f"project {usage_line(proj_entries, MEMORY_CAP)}"]
+    # percentages only: the verbose char counts pushed the stats box past 100
+    # columns, which wraps in the TUI and shears the crab below it (the
+    # README's "What you see at session start" always promised the compact
+    # form). `status` keeps the full counts.
+    u_used = len(render_entries(user_entries))
+    p_used = len(render_entries(proj_entries))
+    stat_lines = [f"memory  user {100 * u_used // USER_CAP}% · "
+                  f"project {100 * p_used // MEMORY_CAP}%"]
     n_pending = len(load_pending())
     conn = db_connect()
     n_active = conn.execute(
@@ -430,8 +436,8 @@ def cmd_motd(args) -> int:
         "SELECT count(*) FROM beliefs WHERE created >= datetime('now', '-7 day')"
     ).fetchone()[0]
     stat_lines.append(
-        f"beliefs {n_active} active / {n_dormant} dormant / {n_total} total · "
-        f"+{d1} last 24h · +{d7} last 7d · pending {n_pending}")
+        f"beliefs {n_active} active · +{d1} 24h · +{d7} 7d · "
+        f"pending {n_pending}")
     # the greeting gets the full banner (wordmark + stats box + crab) unless
     # LORE_MOTD=line asks for the plain delta view -- same switch, same
     # shapes, as the SessionStart banner
@@ -446,7 +452,7 @@ def cmd_motd(args) -> int:
     if rows:
         print("newest beliefs:")
         for subj, claim, conf in rows:
-            print(f"  [{conf:.1f}] {subj}: {one_line(claim)[:110]}")
+            print(f"  [{conf:.1f}] {subj}: {one_line(claim)[:72]}")
     if n_pending:
         print(f"-> {n_pending} proposal(s) await triage: /lore:pending")
     return 0
