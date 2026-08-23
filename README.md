@@ -298,7 +298,7 @@ kill switches, all default unset; `LORE_SKIP` sits above all of them.
   The SessionEnd worker runs after the TUI is gone, so `lore status` lists
   live workers and `lore statusline` prints a one-segment status ("LORE ⟳
   reviewing" / "LORE ✉ 2 pending") for a custom statusline.
-- **License:** [PolyForm Noncommercial 1.0.0](LICENSE) — free for
+- **License:** [LORE Noncommercial 1.0](LICENSE) (PolyForm-Noncommercial-derived) — free for
   personal, research and noncommercial use; commercial use needs the
   author's consent via a separate license.
 - Mid-session memory writes appear in the *next* session's snapshot — the
