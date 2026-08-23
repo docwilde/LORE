@@ -11,6 +11,7 @@ Show this reference card, formatted as below, nothing else:
 
 | command | what it does |
 |---|---|
+| `/lore:context` | exact memory entries in context, verbatim tables |
 | `/lore:status` | totals: memory fill, pending, index, beliefs, models |
 | `/lore:motd` | delta view: beliefs added 24h/7d, newest claims, pending |
 | `/lore:pending` | list staged proposals with judgment lines |
