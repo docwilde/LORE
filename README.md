@@ -233,6 +233,17 @@ flowchart TD
 
 Trapezoid nodes are the pending gate — nothing crosses one without `/lore:approve`.
 
+## DOXA — the native terminal
+
+LORE also powers [DOXA](https://github.com/docwilde/doxa), a standalone
+agent terminal (Claude Agent SDK + Textual) built around the same memory
+core: `lore_core` runs in-process there — same files, same SQLite store,
+byte-compatible with this plugin. One codebase, two carriers: the plugin
+brings LORE to Claude Code; DOXA is the terminal where the memory model is
+native — detachable daemon sessions, belief-aware tooling behind a
+containment gate, and the STEER/CITE split rendered in the UI. Fixes land
+in one and ship in both.
+
 ## Install
 
 ```
