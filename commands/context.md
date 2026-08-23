@@ -2,7 +2,7 @@
 description: Show exactly what lore holds in context right now — user + project memory as tables, interaction model, belief count
 ---
 
-Run `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" memory list --scope user` via Bash (it prints BOTH scopes) and render the result as **two markdown tables**, one per scope:
+Run `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" memory show` via Bash (it prints BOTH scopes) and render the result as **two markdown tables**, one per scope:
 
 | # | entry (verbatim, unabridged) |
 |---|---|

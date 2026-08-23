@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.33.2 — 2026-08-23
+- `/lore:context` called a nonexistent `memory list` — corrected to `memory show` (caught by first real use).
+- README: garbled env-knob prose from the 0.33.0 edit cleaned; `LORE_REFRESH_ON_CHANGE`/`LORE_REVIEW_SECS` rows added to Configuration.
+
 ## 0.33.1 — 2026-08-23
 - `/lore:context` — the exact memory entries in context right now, verbatim, as tables (user asked "what's actually in the contexts"; named `context` because it shows what the model sees, not what's on disk).
 - README: Commands + Hooks sections moved directly below "What you see at session start".
