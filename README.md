@@ -157,6 +157,7 @@ on the model cooperating; color applies only on a real terminal
 |---|---|
 | `/lore:ask <question>` | Dialectic: gathers beliefs, curated memory and session hits, deepens into evidence trails and transcripts, returns a cited, confidence-scored answer. Follow-ups continue the same agent. |
 | `/lore:remember <fact>` | Stores a fact now: agent picks the scope (user vs project), condenses to one line, writes through the cap. |
+| `/lore:filemap [path "purpose"]` | The project file map — one `path — purpose` row per load-bearing file (repo-relative inside the repo, absolute or `host:` prefixed outside it). No args shows the table; with args adds an entry. The snapshot carries only a one-line pointer with the entry count; the map body is pull-on-demand. |
 | `/lore:pending` | Everything background review staged — memories, skill adds/updates/retires, promotions — with origin session and the agent's keep/reject/merge judgment. Decides nothing. |
 | `/lore:approve <id\|all>` | Applies staged proposals: memory writes cap-enforced, skill updates shown as a unified diff before overwriting, retires moved to `skills-retired/`. |
 | `/lore:reject <id\|all>` | Archives proposals unapplied, verdict recorded in `pending/archive/`. |
@@ -171,7 +172,7 @@ on the model cooperating; color applies only on a real terminal
 | `/lore:help` | One-screen reference card: commands + the memory model. |
 
 Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
-(stdlib only, no dependencies) — `memory`, `search`, `session`, `belief`, `ask`,
+(stdlib only, no dependencies) — `memory`, `filemap`, `search`, `session`, `belief`, `ask`,
 `dream`, `consult`, `pending`/`approve`/`reject`, `index` (`--live` streams the running session), `config`, `status`, `motd`, `snapshot` (scoped memory block for subagent prompts), `teardown` (full uninstall: exports curated memory back to built-in format), `reset` (`--index|--beliefs|--all`), `doctor`.
 `lore config` prints the effective configuration plus a stage table (stage |
 switch | on/off). Set the env vars below in `~/.claude/settings.json` →
@@ -258,6 +259,7 @@ kill switches, all default unset; `LORE_SKIP` sits above all of them.
 |---|---|---|
 | `LORE_ROOT` | `~/.claude/lore` | all state (memory files, state.db, pending, logs) |
 | `LORE_USER_CAP` / `LORE_MEMORY_CAP` | 2750 / 8800 | hard caps in chars |
+| `LORE_FILEMAP_CAP` | 4400 | hard cap for the per-project file map (`lore filemap`) |
 | `LORE_REVIEW_MODEL` | unset | umbrella override for both headless roles |
 | `LORE_DERIVER_MODEL` | `haiku` | session-end reviewer/deriver — extraction is easy |
 | `LORE_DREAMER_MODEL` | `sonnet` | belief reconciliation + promotions — the judgment-heavy role |

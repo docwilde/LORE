@@ -25,6 +25,7 @@ __all__ = [
     'ROOT',
     'USER_CAP',
     'MEMORY_CAP',
+    'FILEMAP_CAP',
     'REVIEW_MODEL',
     'DERIVER_MODEL',
     'DREAMER_MODEL',
@@ -40,6 +41,7 @@ __all__ = [
     'DIGEST_TOTAL_CAP',
     'DIGEST_LAST_N',
     'utcnow',
+    'project_root',
     'project_slug',
     'agent_id',
     'SCOPES',
@@ -58,6 +60,11 @@ BUILD_FINGERPRINT = "lore-bf-623047b2a8e895a5"
 ROOT = Path(os.environ.get("LORE_ROOT", str(Path.home() / ".claude" / "lore")))
 USER_CAP = int(os.environ.get("LORE_USER_CAP", "2750"))
 MEMORY_CAP = int(os.environ.get("LORE_MEMORY_CAP", "8800"))
+# File map cap (0.34.0): deliberately smaller than project memory. The map is
+# one line per load-bearing path; at 4400 chars (~55 rows) a map that no
+# longer fits is hoarding files nobody hunts for, and the consolidate-first
+# error is the right pressure — same reasoning as the memory caps.
+FILEMAP_CAP = int(os.environ.get("LORE_FILEMAP_CAP", "4400"))
 # Per-role models for the three Honcho roles. LORE_REVIEW_MODEL is the
 # umbrella override for the two headless roles; per-role defaults differ —
 # extraction is easy (haiku), reconciliation is the judgment-heavy role
@@ -95,14 +102,11 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def project_slug(cwd: str) -> str:
-    """Slug for the PROJECT a cwd belongs to — the git repo root when inside
-    one, the cwd itself otherwise. WHY (2026-08-22 incident): a session run
-    from re_ab_harness/viz and one run from re_ab_harness got two different
-    project memories; 22 curated entries were invisible to half the sessions
-    of the same repo. Git toplevel is the identity of a project, not the
-    subdirectory someone happened to start in. Non-repo cwds keep the old
-    behavior byte-identically."""
+def project_root(cwd: str) -> str:
+    """The PROJECT a cwd belongs to, as a PATH — the git repo root when inside
+    one, the cwd itself otherwise. Split out of project_slug for the file map
+    (0.34.0): path relativization needs the root as a path, and the slug
+    (every non-alphanumeric flattened to "-") cannot be turned back into one."""
     root = str(cwd)
     try:
         r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=root,
@@ -111,7 +115,18 @@ def project_slug(cwd: str) -> str:
             root = r.stdout.strip()
     except OSError:
         pass
-    return re.sub(r"[^A-Za-z0-9]", "-", root)
+    return root
+
+
+def project_slug(cwd: str) -> str:
+    """Slug for the PROJECT a cwd belongs to — the git repo root when inside
+    one, the cwd itself otherwise. WHY (2026-08-22 incident): a session run
+    from re_ab_harness/viz and one run from re_ab_harness got two different
+    project memories; 22 curated entries were invisible to half the sessions
+    of the same repo. Git toplevel is the identity of a project, not the
+    subdirectory someone happened to start in. Non-repo cwds keep the old
+    behavior byte-identically."""
+    return re.sub(r"[^A-Za-z0-9]", "-", project_root(cwd))
 
 
 def agent_id() -> str:
