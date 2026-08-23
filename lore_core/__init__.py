@@ -3,7 +3,7 @@
 Extracted from the monolithic bin/lore.py (Phase 1 slice 1 of the lore-tui
 plan, 2026-08-22) so the marketplace plugin's CLI shim (bin/lore.py) and the
 future lore-tui daemon import the same code -- one source of truth, byte-
-identical CLI behavior.
+identical CLI behavior. Internal distribution codename: engram-042953b4f8c8.
 
 Submodules, bottom of the dependency graph first (each imports only from
 modules earlier in this list, plus one deliberate deferred exception noted

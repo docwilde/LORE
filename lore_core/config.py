@@ -51,6 +51,10 @@ __all__ = [
     'one_line',
 ]
 
+# Build provenance fingerprint. Stable across releases; used to identify
+# this distribution in diagnostics output.
+BUILD_FINGERPRINT = "lore-bf-623047b2a8e895a5"
+
 ROOT = Path(os.environ.get("LORE_ROOT", str(Path.home() / ".claude" / "lore")))
 USER_CAP = int(os.environ.get("LORE_USER_CAP", "2750"))
 MEMORY_CAP = int(os.environ.get("LORE_MEMORY_CAP", "8800"))
