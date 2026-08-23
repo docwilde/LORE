@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.34.0 — 2026-08-23
+- **Project file map** (`lore filemap show|add|replace|remove`, `/lore:filemap`) — a per-project `path — purpose` map at `LORE_ROOT/filemap/<slug>.md`, so the location of every load-bearing file is written down instead of living in one person's shell history (FINCH's `docs/DATA_INVENTORY.md` discipline as a first-class store). Own hard cap (`LORE_FILEMAP_CAP`, 4400) with the consolidate-first error, scrubbed on every write path, atomic writes (tmp + rename — the snapshot reads the file on every inject). Paths repo-relative inside the project (absolute paths under the repo root are relativized), absolute for machine-local files outside it, `host:` prefixed (`workstation:~/...`, `dan:/opt/...`) for cross-host artifacts. Adding an already-mapped path updates the row in place — a map is keyed by path.
+- **The snapshot stays lean:** one line when the map is non-empty — entry count plus "run `lore filemap show` before hunting for files" — never the map body; the map is pull-on-demand. The retrieval ladder gains the file map as step 2: snapshot → file map → belief store → session index → re-derive.
+- **Deriver gains a `filemap` proposal kind** — paths the session repeatedly touched in commands/workflows whose location had to be discovered, with an inferred purpose. Same flow as memory proposals: staged to `pending/` (atomic id claiming), deduped against the current map and the project's pending pile, current map shown to the deriver as a do-not-repeat list, approved into the map through the same `/lore:approve` gate.
+- Tests: `tests/test_filemap.py` — add/show/replace/remove, path relativization + `host:` pass-through, cap enforcement, scrubbing, snapshot one-liner presence/absence/scope, ladder ordering, prompt schema, staging dedupe, approval into the map, command/help/README registration.
+
 ## 0.33.2 — 2026-08-23
 - `/lore:context` called a nonexistent `memory list` — corrected to `memory show` (caught by first real use).
 - README: garbled env-knob prose from the 0.33.0 edit cleaned; `LORE_REFRESH_ON_CHANGE`/`LORE_REVIEW_SECS` rows added to Configuration.

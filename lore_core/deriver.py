@@ -44,6 +44,7 @@ from .config import (
     stage_disabled,
     utcnow,
 )
+from .filemap import filemap_entries
 from .memory import memory_path, read_entries, render_entries
 from .pending import load_pending
 from .scrub import scrub_secrets
@@ -195,6 +196,19 @@ remember and asked to have kept; nothing inferred, and nothing about a third par
 
 """
 
+# file map channel (0.34.0): rides the always-on memory channel, no switch of
+# its own — a proposal is one map row, gated like memory at approval time.
+_REVIEW_FILEMAP = """FILE MAP channel: also propose up to 5 "filemap" entries — files or directories this \
+session repeatedly touched in commands or workflows (a config read before every run, a script \
+invoked, a data file piped through) whose LOCATION had to be discovered rather than known. \
+Each: "path" (repo-relative inside the project; absolute, or "host:path" for a cross-host \
+artifact) and "purpose" (<= 120 chars: what consumes it, or what breaks without it). A file \
+touched once in passing is not map-worthy; the signal is a path that was hunted for and will \
+be hunted for again. Never re-propose a path the current file map already holds (listed after \
+the digest when non-empty).
+
+"""
+
 # skills channel, part 2: the recipe contract and the outcome-judging loop.
 _REVIEW_SKILLS_RECIPE = """A skill is a reusable working recipe worked out in this session that would plausibly be \
 repeated. Digest tags: U user, A assistant, T a tool call (exact commands live here), \
@@ -265,6 +279,7 @@ Learned skills eligible for "update"/"retire" (name, track record, description):
 # JSON-schema fragments — the {{ }} escapes survive to the final .format call.
 _SCHEMA_MEMORY = ('"memory":[{{"scope":"user|project","action":"add|replace",'
                   '"match":"substring, replace only","text":"..."}}]')
+_SCHEMA_FILEMAP = '"filemap":[{{"path":"repo-relative or host:path","purpose":"..."}}]'
 _SCHEMA_SKILLS = ('"skills":[{{"name":"kebab-name","action":"add|update|retire",'
                   '"description":"when to use","body":"markdown"}}],'
                   '"skill_outcomes":[{{"name":"kebab-name","outcome":'
@@ -289,6 +304,7 @@ def review_prompt_template() -> str:
     if skills_on:
         parts.append(_REVIEW_SKILLS_SIGNAL)
     parts.append(_REVIEW_MEMORY_RULES)
+    parts.append(_REVIEW_FILEMAP)
     if skills_on:
         parts.append(_REVIEW_SKILLS_RECIPE)
     if beliefs_on:
@@ -296,7 +312,10 @@ def review_prompt_template() -> str:
     parts.append(_REVIEW_CONTEXT)
     if skills_on:
         parts.append(_REVIEW_CONTEXT_SKILLS)
-    fields, empty = [_SCHEMA_MEMORY], ['"memory":[]']
+    # filemap joins the schema but NOT the nothing-qualifies example: that
+    # example's exact bytes predate the channel (asserted downstream), and
+    # staging reads a missing "filemap" key as empty anyway.
+    fields, empty = [_SCHEMA_MEMORY, _SCHEMA_FILEMAP], ['"memory":[]']
     if skills_on:
         fields.append(_SCHEMA_SKILLS)
         empty.append('"skills":[],"skill_outcomes":[]')
@@ -518,6 +537,14 @@ def build_review_job(transcript: Path, slug: str,
         slug=slug,
         digest=build_digest(messages),
     )
+    # Current file map, appended after the digest like RECENCY_NOTE rather
+    # than through a new .format placeholder: the template's placeholder set
+    # is a compatibility surface (older callers format with fixed kwargs and
+    # str.format raises on a missing key, unlike surplus ones).
+    fm = filemap_entries(slug)
+    if fm:
+        prompt += ("\nCurrent file map (do not re-propose these paths):\n"
+                   + "\n".join(f"- {p} — {u}" for p, u in fm) + "\n")
     if older:
         prompt += RECENCY_NOTE
     sid = transcript.stem if part is None else f"{transcript.stem}-{part}"
@@ -1141,6 +1168,25 @@ def stage_proposals(data: dict, slug: str, session_id: str,
         existing.add(text.lower())
         put({"kind": "memory", "scope": scope, "action": action,
              "match": scrub_secrets(str(m.get("match") or "")), "text": text})
+    # file map proposals (0.34.0): staged like memory, approved into the map
+    # by apply_item. Dedupe against the current map AND the pending pile for
+    # this project (a path staged elsewhere is destined for a different map,
+    # same scoping rule as pending_texts).
+    fmap_items = (data.get("filemap") or [])[:5]
+    if fmap_items:
+        mapped = {p.lower() for p, _ in filemap_entries(slug)}
+        for _pid, it in load_pending():
+            if it.get("kind") == "filemap" and it.get("project") == slug:
+                mapped.add(str(it.get("path") or "").lower())
+        for fm in fmap_items:
+            if not isinstance(fm, dict):
+                continue
+            fpath = one_line(scrub_secrets(str(fm.get("path") or "")))[:200]
+            fpurpose = one_line(scrub_secrets(str(fm.get("purpose") or "")))[:200]
+            if not fpath or not fpurpose or fpath.lower() in mapped:
+                continue
+            mapped.add(fpath.lower())
+            put({"kind": "filemap", "path": fpath, "purpose": fpurpose})
     skill_items = (data.get("skills") or [])[:1]
     # skills kill switch (2026-08-22): the prompt already dropped the skills
     # channel, but a jobfile built before the switch flipped can still carry a

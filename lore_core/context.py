@@ -28,6 +28,7 @@ from .config import (
     stage_disabled,
 )
 from .deriver import learned_skills, load_skill_usage
+from .filemap import filemap_entries
 from .memory import memory_path, read_entries, render_entries, usage_line
 from .pending import load_pending
 from .store import db_connect
@@ -171,6 +172,17 @@ def build_context(cwd: str, scope: str = "all") -> str:
             render_entries(proj_entries).rstrip() or "(empty)",
             "",
         ]
+        # File map pointer (0.34.0): ONE line, count only, never the map body.
+        # The snapshot is injected every session; the map is pull-on-demand —
+        # inlining it here would spend its whole cap on every context window.
+        n_filemap = len(filemap_entries(slug))
+        if n_filemap:
+            parts += [
+                f"File map: {n_filemap} entr{'y' if n_filemap == 1 else 'ies'}"
+                " (path — purpose) — run `lore filemap show` before hunting"
+                " for files.",
+                "",
+            ]
     if pending:
         parts.append(
             f"{len(pending)} staged proposal(s) from background review — surface this to the "
@@ -206,10 +218,12 @@ def build_context(cwd: str, scope: str = "all") -> str:
         _freshness_rule(),
         "- RETRIEVAL LADDER when you need a fact about this user, project or"
         " past work: (1) this snapshot -- already in context, costs nothing;"
-        ' (2) the belief store -- lore ask "question" or lore belief search;'
-        ' (3) the session index -- lore search "query", then lore session <id>'
-        " [--grep term]; (4) only if all three miss, re-derive or measure"
-        " fresh. Never re-measure what step 2 or 3 already holds.",
+        " (2) the file map -- lore filemap show, where the load-bearing files"
+        " live, before any find/grep hunt; (3) the belief store -- lore ask"
+        ' "question" or lore belief search; (4) the session index -- lore'
+        ' search "query", then lore session <id> [--grep term]; (5) only if'
+        " all four miss, re-derive or measure fresh. Never re-measure what"
+        " steps 2-4 already hold.",
     ]
     return "\n".join(parts)
 

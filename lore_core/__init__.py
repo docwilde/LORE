@@ -13,6 +13,7 @@ in deriver.py's docstring):
     scrub      secret scrubbing (the ingest choke point)
     store      tier 2: session index (SQLite FTS5, transcript parsing)
     memory     tier 1: curated core memory (USER.md / MEMORY.md)
+    filemap    project file map (path — purpose rows, pull-on-demand)
     beliefs    belief store: insert/supersede, outcomes ledger, calibration
     deriver    tier 3 deriver role: digest, review prompt, worker/jobfile
     dreamer    tier 3 dreamer role: belief reconciliation, promotions
@@ -30,6 +31,7 @@ from .config import *  # noqa: F401,F403
 from .scrub import *  # noqa: F401,F403
 from .store import *  # noqa: F401,F403
 from .memory import *  # noqa: F401,F403
+from .filemap import *  # noqa: F401,F403
 from .beliefs import *  # noqa: F401,F403
 from .deriver import *  # noqa: F401,F403
 from .dreamer import *  # noqa: F401,F403
@@ -41,6 +43,7 @@ from . import config as _config
 from . import scrub as _scrub
 from . import store as _store
 from . import memory as _memory
+from . import filemap as _filemap
 from . import beliefs as _beliefs
 from . import deriver as _deriver
 from . import dreamer as _dreamer
@@ -53,6 +56,7 @@ __all__ = [
     *_scrub.__all__,
     *_store.__all__,
     *_memory.__all__,
+    *_filemap.__all__,
     *_beliefs.__all__,
     *_deriver.__all__,
     *_dreamer.__all__,

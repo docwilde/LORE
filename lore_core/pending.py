@@ -1,6 +1,7 @@
-"""Staged proposals: pending/*.json written by the deriver (memory or skill
-additions/updates awaiting approval), and the `lore pending`/`lore approve`/
-`lore reject` commands that list, cluster, apply and archive them.
+"""Staged proposals: pending/*.json written by the deriver (memory, filemap
+or skill additions/updates awaiting approval), and the `lore pending`/
+`lore approve`/`lore reject` commands that list, cluster, apply and archive
+them.
 """
 
 import difflib
@@ -9,6 +10,7 @@ import os
 import sys
 
 from .config import ROOT, SKILLS_DIR, project_slug, utcnow
+from .filemap import filemap_add
 from .memory import memory_add, memory_replace
 
 
@@ -66,7 +68,10 @@ def _cluster_pending(items) -> int:
         if len(c["ids"]) > 1:
             print(f"       ids: {' '.join(c['ids'])}")
     for pid, it in skills:
-        print(f"{pid}  skill/{it.get('action', 'add')}  {it.get('name')}")
+        if it.get("kind") == "filemap":
+            print(f"{pid}  filemap  {it.get('path')}")
+        else:
+            print(f"{pid}  skill/{it.get('action', 'add')}  {it.get('name')}")
     print("\nbulk ops take ids: lore approve <id...>   lore reject <id...>")
     return 0
 
@@ -86,6 +91,9 @@ def cmd_pending(args) -> int:
             act = item["action"] + (f" (match: {item['match']!r})" if item.get("match") else "")
             print(f"{pid}  memory/{item['scope']}  {act}")
             print(f"    {item['text']}")
+        elif item.get("kind") == "filemap":
+            print(f"{pid}  filemap  add")
+            print(f"    {item.get('path')} — {item.get('purpose')}")
         else:
             print(f"{pid}  skill/{item.get('action', 'add')}  {item.get('name')}")
             print(f"    {item.get('description')}")
@@ -111,6 +119,13 @@ def archive(pid: str, status: str) -> None:
 
 
 def apply_item(pid: str, item: dict, force: bool) -> str | None:
+    if item.get("kind") == "filemap":
+        # same gate as memory: cap-enforced write into the project's map;
+        # filemap_add updates the row in place when the path is already
+        # mapped (a re-proposal that slipped past staging dedupe).
+        slug = item.get("project") or project_slug(os.getcwd())
+        return filemap_add(slug, str(item.get("path") or ""),
+                           str(item.get("purpose") or ""))
     if item.get("kind") == "memory":
         slug = item.get("project") or project_slug(os.getcwd())
         if item.get("action") == "replace" and item.get("match"):
