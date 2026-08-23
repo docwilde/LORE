@@ -265,6 +265,9 @@ kill switches, all default unset; `LORE_SKIP` sits above all of them.
 | `LORE_REVIEW_MIN_MESSAGES` | 3 | skip review below this many user messages |
 | `LORE_CLAUDE_BIN` | `which claude` | claude binary for the worker |
 | `LORE_SKILLS_DIR` | `~/.claude/skills` | where approved skills install |
+| `LORE_REFRESH_SECS` | unset | optional periodic floor for the mid-session snapshot refresh (change-detection needs no setting) |
+| `LORE_REFRESH_ON_CHANGE` | `1` | change-triggered refresh: re-inject the snapshot the prompt after its content changes; `0` opts out |
+| `LORE_REVIEW_SECS` | unset | mid-session incremental deriver: spawn a detached review at most this often; unset = SessionEnd/PreCompact only |
 | `LORE_MOTD` | `banner` | session-start MOTD: `banner` = block-art wordmark + mascot with stats in its thought bubble; `line` = one compact line; `0` = pending notice only (never suppressed) |
 | `LORE_NOTIFY` | auto | desktop notification when proposals are staged (`notify-send`); `0` disables |
 | `LORE_NOTIFY_ICON` | shipped `assets/logo.svg` | notification icon: an icon-theme name, or a path that exists |
