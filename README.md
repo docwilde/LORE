@@ -142,31 +142,7 @@ greets with the same banner on demand and appends the newest claims
 verbatim. In a color terminal the wordmark, trail and crab render in
 Claude orange.
 
-```
- █████          ███████    ███████████   ██████████
-▒▒███         ███▒▒▒▒▒███ ▒▒███▒▒▒▒▒███ ▒▒███▒▒▒▒▒█
- ▒███        ███     ▒▒███ ▒███    ▒███  ▒███  █ ▒
- ▒███       ▒███      ▒███ ▒██████████   ▒██████
- ▒███       ▒███      ▒███ ▒███▒▒▒▒▒███  ▒███▒▒█
- ▒███      █▒▒███     ███  ▒███    ▒███  ▒███ ▒   █
- ███████████ ▒▒▒███████▒   █████   █████ ██████████
-▒▒▒▒▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒    ▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒▒▒▒▒▒
-
-           Lots Of Reconciled Engrams
-
-     ╭──────────────────────────────────────────────╮
-     │ memory  user 50% · project 63%               │
-     │ beliefs 406 active · +422 24h · pending 0    │
-     ╰──────────────────────────────────────────────╯
-                    ◌
-                  ∘
-                ·
-       ▄▄█████▄▄
- ▟▀▖ ▄██ ◉   ◉ ██▄ ▗▀▙
- ▜▄▘ ▀██▄ ▽ ▄▄██▀  ▚▄▛
-       ▀▀█████▀▀
-      ▞▘▐▌   ▐▌▝▚
-```
+<p align="center"><img src="assets/session-start.png" width="620" alt="LORE session-start banner: wordmark, stats box, the crab and its belief trail"></p>
 
 `LORE_MOTD=line` compacts it to one line; `LORE_MOTD=0` leaves only the
 pending notice, never suppressed. At session start it arrives as a hook

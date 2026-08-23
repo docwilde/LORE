@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.32.1 — 2026-08-23
+- **motd stats box fits the terminal again** — the verbose char counts pushed it past 100 columns, wrapping in the TUI and shearing the crab (`status` keeps the full counts); newest-belief lines trimmed to 72 chars.
+- README's "What you see at session start" shows a rendered screenshot (`assets/session-start.png`) instead of raw art — the mixed-width crab glyphs garbled under font fallback on GitHub mobile.
+
 ## 0.32.0 — 2026-08-23
 - **lore_core: the implementation is now an importable package** (config/scrub/store/memory/beliefs/deriver/dreamer/dialectic/pending/context); `bin/lore.py` is a thin CLI shim over it. One source of truth for the plugin and the DOXA terminal daemon. Byte-identical CLI (A/B-diffed across 25 commands), 68 tests unchanged and green. Extraction fixed two latent `__file__`-path bugs and guards test isolation with a sys.modules purge in the shim.
 
