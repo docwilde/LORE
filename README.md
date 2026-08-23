@@ -85,7 +85,34 @@ flowchart TD
 
 The worker runs detached and interrupts nothing. A desktop notification follows, and the next session opens with the pending count. `/lore:pending` shows each proposal with a keep/reject/merge opinion the agent may state but never act on. Both verdicts leave a trail in `pending/archive/`.
 
-Skills close a full loop: the digest carries the session's exact commands and tool errors, so review proposes only recipes the session verified. Review then judges every later invocation against what followed it — success, failure or unclear — and logs the verdict to `skill_usage.json`. Repeated failure with no recent success draws an `update` proposal (1–2 recorded outcomes, depending on whether the repo HEAD moved) or a `retire` (3).
+### Skills earn their keep, then lose it
+
+Memory records what happened. Skillification records *how it was done* — and keeps score.
+
+```mermaid
+flowchart TD
+    F["THE FUMBLE SIGNAL<br/>same command retried with new flags,<br/>E: errors, then one that works"] --> R["Review proposes ≤1 skill/session<br/>body = the exact working T: commands<br/>+ the pitfalls the E: lines exposed"]
+    R --> P[/"pending/"/]
+    P -->|"/lore:approve"| I["~/.claude/skills/&lt;name&gt;<br/>tagged lore-learned"]
+    I --> U["A later session invokes it"]
+    U --> J["Next review judges that run<br/>success · failure · unclear<br/>explicit evidence only"]
+    J --> T[("skill_usage.json<br/>uses · ok/fail · reason<br/>+ repo HEAD per outcome")]
+    T -.->|"still working"| U
+    T -->|"hard failure at a HEAD that<br/>used to succeed (1 outcome)<br/>· ambiguous (2)"| UP["update proposal<br/>full corrected body"]
+    T -->|"beyond repair (3)"| RT["retire proposal"]
+    UP --> P
+    RT --> P
+    RT -.->|"approved"| X["skills-retired/"]
+```
+
+Four rules keep the loop honest:
+
+- **Only verified recipes.** The digest tags every tool call (`T:`) and tool error (`E:`), so review proposes a body built from commands that actually ran green. A plan nobody executed is not a recipe.
+- **Runbooks, not one-liners.** Three steps or more, environment-specific flags, ordering constraints. A single-command fix becomes a memory line instead.
+- **Silence is not an outcome.** A run counts as success or failure only when the digest shows the result — the user confirmed it, tests passed, an error traced. Abandonment records nothing, so the track record never fills with noise.
+- **Drift ≠ rot.** Every outcome carries the repo HEAD it happened at. When a skill starts failing, a HEAD that moved between the successes and the failures says *the codebase changed*, not *the recipe is wrong* — and the gate reads that trail before it proposes anything.
+
+`/lore:status` prints each learned skill with its record. Approve an `update` and the new body is diffed before overwriting; approve a `retire` and it moves to `skills-retired/` rather than vanishing.
 
 ### The belief gate sits on read, not on write
 
