@@ -179,3 +179,32 @@ def test_scrub_before_truncate_via_derive_output():
 def test_interaction_model_wired_into_context():
     import inspect
     assert "interaction_model_lines(" in inspect.getsource(_lore_s.build_context)
+
+
+def test_refresh_on_change_default_and_optout(monkeypatch):
+    from lore_core.context import refresh_on_change
+    monkeypatch.delenv("LORE_REFRESH_ON_CHANGE", raising=False)
+    assert refresh_on_change() is True
+    monkeypatch.setenv("LORE_REFRESH_ON_CHANGE", "0")
+    assert refresh_on_change() is False
+
+
+def test_review_interval_parsing(monkeypatch):
+    from lore_core.context import review_interval
+    monkeypatch.delenv("LORE_REVIEW_SECS", raising=False)
+    assert review_interval() is None
+    monkeypatch.setenv("LORE_REVIEW_SECS", "3600")
+    assert review_interval() == 3600
+    monkeypatch.setenv("LORE_REVIEW_SECS", "junk")
+    assert review_interval() is None
+
+
+def test_refresh_state_roundtrip_and_legacy(tmp_path):
+    from lore_core.context import _read_refresh_state, _write_refresh_state
+    p = tmp_path / "stamp"
+    _write_refresh_state(p, 1234.0, "abc123")
+    ts, h = _read_refresh_state(p)
+    assert ts == 1234.0 and h == "abc123"
+    p.write_text("999")  # pre-0.33.0 format: timestamp only
+    ts, h = _read_refresh_state(p)
+    assert ts == 999.0 and h is None

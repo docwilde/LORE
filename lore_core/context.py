@@ -7,6 +7,7 @@ store, pending and deriver (for skill usage/learned-skill bookkeeping shown
 in the MOTD).
 """
 
+import hashlib
 import json
 import os
 import re
@@ -57,8 +58,40 @@ def refresh_interval() -> int | None:
     Unset means off. The UserPromptSubmit hook ships with the plugin, so a
     default interval would spend context on every install that never asked for
     it — the snapshot is a few thousand characters each time it fires.
+
+    Since 0.33.0 the interval is only the PERIODIC floor: change-detection
+    (refresh_on_change) fires on every prompt regardless, and re-injects the
+    moment the snapshot's content differs from the last injected copy. An
+    unchanged snapshot is never re-sent — identical bytes in context twice
+    inform nothing and cost every turn after them.
     """
     raw = os.environ.get("LORE_REFRESH_SECS", "").strip()
+    if not raw:
+        return None
+    try:
+        secs = int(raw)
+    except ValueError:
+        return None
+    return secs if secs > 0 else None
+
+
+def refresh_on_change() -> bool:
+    """Change-triggered refresh: on every prompt, re-inject only when the
+    snapshot differs from the last copy the model saw. Default ON — the
+    unchanged case costs one build_context + hash per prompt (file reads and
+    two count queries, no model tokens). LORE_REFRESH_ON_CHANGE=0 opts out."""
+    return os.environ.get("LORE_REFRESH_ON_CHANGE", "1").strip() != "0"
+
+
+def review_interval() -> int | None:
+    """Seconds between mid-session deriver runs; None when off.
+
+    LORE_REVIEW_SECS unset means off (session-end + PreCompact stay the only
+    review triggers, the pre-0.33.0 behavior). Set (e.g. "3600") the
+    UserPromptSubmit hook additionally spawns a detached background review of
+    the CURRENT session at most once per interval — the watermark makes each
+    run incremental, so a quiet hour derives nothing and costs one exit."""
+    raw = os.environ.get("LORE_REVIEW_SECS", "").strip()
     if not raw:
         return None
     try:
@@ -71,6 +104,13 @@ def refresh_interval() -> int | None:
 def _freshness_rule() -> str:
     """The snapshot's own statement of how current it is."""
     interval = refresh_interval()
+    if refresh_on_change():
+        return (
+            "- This snapshot re-injects on your NEXT prompt whenever its content"
+            " changed (change-detected each prompt; LORE_REFRESH_ON_CHANGE=0 opts"
+            " out), so a write you make now reaches your context one turn later;"
+            " the refresh supersedes every earlier copy in the conversation."
+        )
     if interval is None:
         return (
             "- This snapshot is injected once, at session start: a write you make now"
@@ -351,6 +391,63 @@ def _prune_stamps(now: float) -> None:
         pass
 
 
+def _read_refresh_state(path: Path) -> tuple[float | None, str | None]:
+    """0.33.0 stamp format: "<ts> <sha256>". Pre-0.33.0 stamps carry only the
+    timestamp — read them as (ts, None) so the first prompt after an upgrade
+    treats the snapshot as changed at most once."""
+    try:
+        parts = path.read_text(encoding="utf-8").split()
+        ts = float(parts[0])
+        return ts, (parts[1] if len(parts) > 1 else None)
+    except (OSError, ValueError, IndexError):
+        return None, None
+
+
+def _write_refresh_state(path: Path, when: float, snap_hash: str) -> None:
+    try:
+        path.write_text(f"{when:.0f} {snap_hash}", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _maybe_spawn_midsession_review(hook: dict, cwd: str, session: str, now: float) -> None:
+    """Mid-session deriver (0.33.0): at most once per LORE_REVIEW_SECS, spawn a
+    detached background review of THIS session. The watermark makes each run
+    incremental — a quiet interval derives nothing. Off unless the env is set;
+    every failure path is silent (same rule as the snapshot refresh)."""
+    interval = review_interval()
+    if interval is None or stage_disabled("review"):
+        return
+    transcript = hook.get("transcript_path")
+    if not transcript:
+        return
+    stamp_dir = ROOT / ".midreview"
+    try:
+        stamp_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    stamp = stamp_dir / session
+    last = _read_stamp(stamp)
+    if last is None:
+        # First prompt: start the clock, never review an empty session.
+        _write_stamp(stamp, now)
+        return
+    if now - last < interval:
+        return
+    _write_stamp(stamp, now)
+    import subprocess
+    cli = str(Path(__file__).resolve().parents[1] / "bin" / "lore.py")
+    env = dict(os.environ, LORE_NOTIFY="0", LORE_DEFER_DREAM="1")
+    try:
+        subprocess.Popen(
+            [sys.executable, cli, "review", "--transcript", str(transcript),
+             "--cwd", cwd, "--foreground"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+    except OSError:
+        pass
+
+
 def cmd_refresh(args) -> int:
     """UserPromptSubmit hook: re-inject the snapshot, at most once per interval.
 
@@ -368,26 +465,39 @@ def cmd_refresh(args) -> int:
     if stage_disabled("inject"):
         return 0
     interval = refresh_interval()
-    if interval is None:
-        return 0
+    on_change = refresh_on_change()
     hook = read_hook_input()
     cwd = args.cwd or hook.get("cwd") or os.getcwd()
     session = re.sub(r"[^A-Za-z0-9_.-]", "_", str(hook.get("session_id") or "nosession"))
     now = datetime.now(timezone.utc).timestamp()
+    # Mid-session deriver (0.33.0): independent of the snapshot decision below
+    # -- a review spawn changes memory/beliefs, the snapshot only reports them.
+    _maybe_spawn_midsession_review(hook, cwd, session, now)
+    if interval is None and not on_change:
+        return 0
     try:
         REFRESH_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
         return 0
     stamp = REFRESH_DIR / session
-    last = _read_stamp(stamp)
+    last, last_hash = _read_refresh_state(stamp)
+    snapshot = build_context(cwd, effective_scope(None))
+    snap_hash = hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
     if last is None:
         # First prompt of the session — SessionStart just injected this content.
-        _write_stamp(stamp, now)
+        _write_refresh_state(stamp, now, snap_hash)
         _prune_stamps(now)
         return 0
-    if now - last < interval:
+    changed = on_change and snap_hash != last_hash
+    periodic = interval is not None and (now - last) >= interval
+    if not changed and not periodic:
         return 0
-    _write_stamp(stamp, now)
+    if not changed and periodic and snap_hash == last_hash:
+        # Periodic floor met but content identical -- re-sending the same
+        # bytes informs nothing; refresh the stamp so the clock keeps rolling.
+        _write_refresh_state(stamp, now, snap_hash)
+        return 0
+    _write_refresh_state(stamp, now, snap_hash)
     print(json.dumps({
         # The user sees one line; the snapshot itself goes to the model only.
         "suppressOutput": True,
