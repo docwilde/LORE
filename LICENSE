@@ -1,6 +1,10 @@
-# PolyForm Noncommercial License 1.0.0
+# LORE Noncommercial License 1.0
 
-<https://polyformproject.org/licenses/noncommercial/1.0.0>
+Based on the PolyForm Noncommercial License 1.0.0
+<https://polyformproject.org/licenses/noncommercial/1.0.0>,
+amended in the "Noncommercial Organizations" section. This
+modified license is not approved or endorsed by the PolyForm
+Project, whose name appears here only for attribution.
 
 Required Notice: Copyright (c) 2026 Fabian Wilde (https://github.com/docwilde/lore)
 
@@ -71,6 +75,15 @@ organization, environmental protection organization,
 or government institution is use for a permitted purpose
 regardless of the source of funding or obligations resulting
 from the funding.
+
+Government institutions do not include, and no license is
+granted under this paragraph to, intelligence, espionage,
+mass-surveillance, or immigration-enforcement agencies,
+including but not limited to the United States National
+Security Agency (NSA), Central Intelligence Agency (CIA),
+Immigration and Customs Enforcement (ICE), Customs and
+Border Protection (CBP), United States Secret Service, or
+any equivalent agency of any other government.
 
 ## Fair Use
 
