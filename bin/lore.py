@@ -252,12 +252,22 @@ def cmd_doctor(args) -> int:
         print('warn  built-in auto-memory still active — lore replaces it; set'
               ' {"autoMemoryEnabled": false} in ~/.claude/settings.json')
     interval = refresh_interval()
-    if interval:
+    from lore_core.context import refresh_on_change, review_interval
+    if refresh_on_change():
+        extra = f" + periodic floor every {interval}s" if interval else ""
+        print(f"ok    mid-session refresh: on change, every prompt{extra}")
+    elif interval:
         print(f"ok    mid-session refresh: every {interval}s (LORE_REFRESH_SECS)")
     else:
         print('off   mid-session refresh — memory approved mid-session reaches the model'
               ' next session. Set LORE_REFRESH_SECS (e.g. "1800") in the "env" block of'
               " ~/.claude/settings.json to re-inject it sooner.")
+    rint = review_interval()
+    if rint:
+        print(f"ok    mid-session deriver: at most every {rint}s (LORE_REVIEW_SECS), incremental")
+    else:
+        print('off   mid-session deriver — reviews fire at SessionEnd/PreCompact only.'
+              ' Set LORE_REVIEW_SECS (e.g. "3600") for an hourly incremental review.')
     return 0 if ok else 1
 
 
