@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.33.1 — 2026-08-23
+- `/lore:context` — the exact memory entries in context right now, verbatim, as tables (user asked "what's actually in the contexts"; named `context` because it shows what the model sees, not what's on disk).
+- README: Commands + Hooks sections moved directly below "What you see at session start".
+
 ## 0.33.0 — 2026-08-23
 - **Change-triggered snapshot refresh, on by default** — every prompt, the UserPromptSubmit hook hashes the snapshot and re-injects the moment its content differs from the last copy the model saw; identical content is never re-sent. `LORE_REFRESH_SECS` demotes to an optional periodic floor; `LORE_REFRESH_ON_CHANGE=0` opts out. Stamp format gains the hash (old stamps read compatibly).
 - **Mid-session deriver** (`LORE_REVIEW_SECS`, off by default) — at most once per interval, the same hook spawns a detached incremental review of the current session (watermark-gated, dreamer deferred, notifications off), so proposals surface mid-session instead of only at SessionEnd/PreCompact.

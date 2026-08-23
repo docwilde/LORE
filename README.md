@@ -151,6 +151,48 @@ on the model cooperating; color applies only on a real terminal
 (`lore motd` in your shell), never in the captured hook output.
 
 
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/lore:ask <question>` | Dialectic: gathers beliefs, curated memory and session hits, deepens into evidence trails and transcripts, returns a cited, confidence-scored answer. Follow-ups continue the same agent. |
+| `/lore:remember <fact>` | Stores a fact now: agent picks the scope (user vs project), condenses to one line, writes through the cap. |
+| `/lore:pending` | Everything background review staged — memories, skill adds/updates/retires, promotions — with origin session and the agent's keep/reject/merge judgment. Decides nothing. |
+| `/lore:approve <id\|all>` | Applies staged proposals: memory writes cap-enforced, skill updates shown as a unified diff before overwriting, retires moved to `skills-retired/`. |
+| `/lore:reject <id\|all>` | Archives proposals unapplied, verdict recorded in `pending/archive/`. |
+| `/lore:review` | Triggers background review of the current session now, instead of waiting for session end (`--dry-run`: what would be sent, spending nothing). |
+| `/lore:backfill` | Reviews sessions that predate LORE — the one path that reaches backwards. Lists projects with session counts, reviews the ones you name (one worker per project), tracks progress for resumable re-runs, reconciles beliefs once at the end, notifies only on start and finish. |
+| `/lore:context` | the exact memory entries in context right now, verbatim, as tables |
+| `/lore:status` | Memory usage per scope, session-index and belief-store sizes, pending count, per-role models, learned skills with their track records. |
+| `/lore:doctor` | Read-only diagnosis: environment checks, effective config, allowlist and auto-memory conflicts, unported entries, unreviewed session backlog. Reports, fixes nothing. |
+| `/lore:setup` | Applies what doctor found, each change behind its own confirmation: disable built-in auto-memory, add the permission allowlist, port old entries, prime the index, backfill-review the backlog for the projects you pick, set per-role models. |
+| `/lore:motd` | Delta view: beliefs added in the last 24h/7d, newest claims verbatim, pending count — what changed since you last looked. |
+| `/lore:config` | Shows the stage table (inject, index, review, beliefs, skills, streaming), toggles stages via multi-select; switches land in `settings.json`'s `"env"` block via `lore config set/unset`. |
+| `/lore:help` | One-screen reference card: commands + the memory model. |
+
+Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
+(stdlib only, no dependencies) — `memory`, `search`, `session`, `belief`, `ask`,
+`dream`, `consult`, `pending`/`approve`/`reject`, `index` (`--live` streams the running session), `config`, `status`, `motd`, `snapshot` (scoped memory block for subagent prompts), `teardown` (full uninstall: exports curated memory back to built-in format), `reset` (`--index|--beliefs|--all`), `doctor`.
+`lore config` prints the effective configuration plus a stage table (stage |
+switch | on/off). Set the env vars below in `~/.claude/settings.json` →
+`"env"` so hooks and commands see them, or let `lore config set <VAR>
+<value>` / `lore config unset <VAR>` write that block for you (LORE_\*
+variables only; `/lore:config` toggles the stage switches interactively).
+Hook-read switches apply from a session's next hook fire; a restart
+refreshes everything.
+
+## Hooks
+
+Four Claude Code hook events drive everything automatic; each one exits
+silently under its stage switch, and `LORE_SKIP` masters them all:
+
+| Event | Fires | Runs | Switch |
+|---|---|---|---|
+| `SessionStart` (startup, resume, `/clear`, compact) | once per session (re)start | `lore inject` — the curated memory snapshot into context | `LORE_DISABLE_INJECT` |
+| `UserPromptSubmit` | every prompt | `lore refresh` — re-injects the snapshot at most every `LORE_REFRESH_SECS` (periodic floor; change-detection is on by default, `LORE_REFRESH_ON_CHANGE=0` opts out), `LORE_REVIEW_SECS` (mid-session incremental deriver); plus `lore index --live` when `LORE_STREAM_INDEX=1` | `LORE_DISABLE_INJECT` / `LORE_DISABLE_INDEX` |
+| `PreCompact` | before the harness summarizes a long session | `lore review` — derives beliefs from the transcript at the moment detail would be lost | `LORE_DISABLE_PRECOMPACT` (or `LORE_DISABLE_REVIEW`) |
+| `SessionEnd` | session close | `lore review` — the detached review worker: digest, deriver, staged proposals, dreamer | `LORE_DISABLE_REVIEW` |
+
 ## How the loops run
 
 **Skillification — the closed improvement loop:**
@@ -206,47 +248,6 @@ fills the belief store on a fresh install: indexing alone only builds
 search, since `review` fires on session end and can't reach backwards.
 `/lore:doctor` is the read-only version — reports, fixes nothing.
 
-
-## Commands
-
-| Command | What it does |
-|---|---|
-| `/lore:ask <question>` | Dialectic: gathers beliefs, curated memory and session hits, deepens into evidence trails and transcripts, returns a cited, confidence-scored answer. Follow-ups continue the same agent. |
-| `/lore:remember <fact>` | Stores a fact now: agent picks the scope (user vs project), condenses to one line, writes through the cap. |
-| `/lore:pending` | Everything background review staged — memories, skill adds/updates/retires, promotions — with origin session and the agent's keep/reject/merge judgment. Decides nothing. |
-| `/lore:approve <id\|all>` | Applies staged proposals: memory writes cap-enforced, skill updates shown as a unified diff before overwriting, retires moved to `skills-retired/`. |
-| `/lore:reject <id\|all>` | Archives proposals unapplied, verdict recorded in `pending/archive/`. |
-| `/lore:review` | Triggers background review of the current session now, instead of waiting for session end (`--dry-run`: what would be sent, spending nothing). |
-| `/lore:backfill` | Reviews sessions that predate LORE — the one path that reaches backwards. Lists projects with session counts, reviews the ones you name (one worker per project), tracks progress for resumable re-runs, reconciles beliefs once at the end, notifies only on start and finish. |
-| `/lore:status` | Memory usage per scope, session-index and belief-store sizes, pending count, per-role models, learned skills with their track records. |
-| `/lore:doctor` | Read-only diagnosis: environment checks, effective config, allowlist and auto-memory conflicts, unported entries, unreviewed session backlog. Reports, fixes nothing. |
-| `/lore:setup` | Applies what doctor found, each change behind its own confirmation: disable built-in auto-memory, add the permission allowlist, port old entries, prime the index, backfill-review the backlog for the projects you pick, set per-role models. |
-| `/lore:motd` | Delta view: beliefs added in the last 24h/7d, newest claims verbatim, pending count — what changed since you last looked. |
-| `/lore:config` | Shows the stage table (inject, index, review, beliefs, skills, streaming), toggles stages via multi-select; switches land in `settings.json`'s `"env"` block via `lore config set/unset`. |
-| `/lore:help` | One-screen reference card: commands + the memory model. |
-
-Everything is also a plain CLI: `python3 <plugin>/bin/lore.py --help`
-(stdlib only, no dependencies) — `memory`, `search`, `session`, `belief`, `ask`,
-`dream`, `consult`, `pending`/`approve`/`reject`, `index` (`--live` streams the running session), `config`, `status`, `motd`, `snapshot` (scoped memory block for subagent prompts), `teardown` (full uninstall: exports curated memory back to built-in format), `reset` (`--index|--beliefs|--all`), `doctor`.
-`lore config` prints the effective configuration plus a stage table (stage |
-switch | on/off). Set the env vars below in `~/.claude/settings.json` →
-`"env"` so hooks and commands see them, or let `lore config set <VAR>
-<value>` / `lore config unset <VAR>` write that block for you (LORE_\*
-variables only; `/lore:config` toggles the stage switches interactively).
-Hook-read switches apply from a session's next hook fire; a restart
-refreshes everything.
-
-## Hooks
-
-Four Claude Code hook events drive everything automatic; each one exits
-silently under its stage switch, and `LORE_SKIP` masters them all:
-
-| Event | Fires | Runs | Switch |
-|---|---|---|---|
-| `SessionStart` (startup, resume, `/clear`, compact) | once per session (re)start | `lore inject` — the curated memory snapshot into context | `LORE_DISABLE_INJECT` |
-| `UserPromptSubmit` | every prompt | `lore refresh` — re-injects the snapshot at most every `LORE_REFRESH_SECS` (periodic floor; change-detection is on by default, `LORE_REFRESH_ON_CHANGE=0` opts out), `LORE_REVIEW_SECS` (mid-session incremental deriver); plus `lore index --live` when `LORE_STREAM_INDEX=1` | `LORE_DISABLE_INJECT` / `LORE_DISABLE_INDEX` |
-| `PreCompact` | before the harness summarizes a long session | `lore review` — derives beliefs from the transcript at the moment detail would be lost | `LORE_DISABLE_PRECOMPACT` (or `LORE_DISABLE_REVIEW`) |
-| `SessionEnd` | session close | `lore review` — the detached review worker: digest, deriver, staged proposals, dreamer | `LORE_DISABLE_REVIEW` |
 
 ## Configuration (env vars, all optional)
 
