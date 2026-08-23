@@ -34,7 +34,7 @@ and labeled "anecdote, not a curve" below that.
   (global, 2750 chars — who the user is, preferences) and `MEMORY.md`
   (per-project, 8800 chars — environment, conventions, workarounds) inject
   once at `SessionStart` as a frozen snapshot, re-injected after `/clear`
-  and compaction (`LORE_REFRESH_SECS` (periodic floor; change-detection is on by default, `LORE_REFRESH_ON_CHANGE=0` opts out), `LORE_REVIEW_SECS` (mid-session incremental deriver) re-injects mid-session too). The
+  and compaction (change-detection re-injects it mid-session the moment its content changes -- on by default, `LORE_REFRESH_ON_CHANGE=0` opts out; `LORE_REFRESH_SECS` adds an optional periodic floor). The
   agent writes directly via `memory add/replace/remove`
   only when asked — `/lore:remember`, or a manual edit — and a write past
   the cap fails, listing every entry, forcing consolidation. Anything
@@ -189,7 +189,7 @@ silently under its stage switch, and `LORE_SKIP` masters them all:
 | Event | Fires | Runs | Switch |
 |---|---|---|---|
 | `SessionStart` (startup, resume, `/clear`, compact) | once per session (re)start | `lore inject` — the curated memory snapshot into context | `LORE_DISABLE_INJECT` |
-| `UserPromptSubmit` | every prompt | `lore refresh` — re-injects the snapshot at most every `LORE_REFRESH_SECS` (periodic floor; change-detection is on by default, `LORE_REFRESH_ON_CHANGE=0` opts out), `LORE_REVIEW_SECS` (mid-session incremental deriver); plus `lore index --live` when `LORE_STREAM_INDEX=1` | `LORE_DISABLE_INJECT` / `LORE_DISABLE_INDEX` |
+| `UserPromptSubmit` | every prompt | `lore refresh` — re-injects the snapshot when its content changed (every prompt, hash-gated; `LORE_REFRESH_SECS` optional periodic floor, `LORE_REFRESH_ON_CHANGE=0` opts out) and spawns the mid-session incremental deriver at most every `LORE_REVIEW_SECS`; plus `lore index --live` when `LORE_STREAM_INDEX=1` | `LORE_DISABLE_INJECT` / `LORE_DISABLE_INDEX` |
 | `PreCompact` | before the harness summarizes a long session | `lore review` — derives beliefs from the transcript at the moment detail would be lost | `LORE_DISABLE_PRECOMPACT` (or `LORE_DISABLE_REVIEW`) |
 | `SessionEnd` | session close | `lore review` — the detached review worker: digest, deriver, staged proposals, dreamer | `LORE_DISABLE_REVIEW` |
 
