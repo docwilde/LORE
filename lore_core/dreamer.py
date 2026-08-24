@@ -127,8 +127,16 @@ def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int
             return 0
     if not dry_run:
         slept = dormant_sweep(conn)
+        # Commit what the sweep opened, whether or not it moved a row. sqlite3
+        # begins a write transaction on any DML, so a sweep matching nothing still
+        # holds the WAL writer lock — and WAL admits exactly one writer.
+        # Committing only when `slept` was truthy left that lock held across
+        # `run_claude` below for the length of a sonnet call, and every other
+        # writer — a backfill worker, a session hook, the DOXA daemon — died on
+        # the 5s busy_timeout with "database is locked". Nothing between here and
+        # the model call writes, so the transaction has no reason to stay open.
+        conn.commit()
         if slept:
-            conn.commit()
             print(f"{slept} belief(s) went dormant (untouched > {BELIEF_DORMANT_DAYS}d,"
                   " conf < 0.95) — re-include with --include-dormant")
     pairs = dream_candidates(conn)
