@@ -58,6 +58,10 @@ When spawning a subagent that needs memory, prepend `lore snapshot --scope proje
 
 On session end a detached reviewer (cheap model, `--bare`, no tools) digests the session — including its tool calls, so recipes carry the exact commands — and **stages** memory/skill proposals — nothing auto-applies. Learned skills have a closed improvement loop: invocations are counted, each run's outcome (success/failure, judged from execution errors and user reaction) lands in `skill_usage.json`, and a recipe with repeated failures draws an `update` proposal fixing the failing step or a `retire` proposal (approve moves it to `skills-retired/`). If the injected snapshot mentions pending proposals, tell the user and suggest `/lore:pending`.
 
+**Approving is a budget decision, not a formality.** The project cap is shared by everything that will ever be stored for this repo, and a batch of approvals typically eats several percent of it at once. Past the halfway mark, later proposals compete with earlier ones on value rather than arriving free: approve what changes a future decision, reject what merely records that something happened, and consolidate two overlapping entries into one dense line instead of storing both. A pending pile that cannot fit is normal — the cap is what forces the ranking.
+
+**Verify proposals that assert facts, before approving, not after.** Staged prose is written by a cheap model summarizing a transcript: it is confident and well-formed whether or not it is right, and observed failures include invented schema vocabularies and wrong version/count numbers that read exactly like correct ones. Anything naming a schema, a migration or version number, a count, or a controlled vocabulary gets checked against the source of truth (the tree, the database, the file) first — approving it writes it into every future session's context, where it is far more expensive to catch than it was to check.
+
 ```sh
 lore pending            # list staged proposals
 lore approve <id>|all   # apply (memory writes cap-enforced; skills install to ~/.claude/skills)
