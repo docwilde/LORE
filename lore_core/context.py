@@ -29,7 +29,8 @@ from .config import (
 )
 from .deriver import learned_skills, load_skill_usage
 from .filemap import filemap_entries
-from .memory import memory_path, read_entries, render_entries, usage_line
+from .gate import provenance_tag
+from .memory import memory_bucket, memory_path, read_entries, render_entries, usage_line
 from .pending import load_pending
 from .store import db_connect
 
@@ -149,8 +150,14 @@ def build_context(cwd: str, scope: str = "all") -> str:
         "",
     ]
     if scope in ("all", "user"):
+        # PROVENANCE (ISSUE #43): the snapshot is the highest-trust surface
+        # lore has, and until 0.36.0 it gave no way to tell an approved entry
+        # from one a hook merely wrote. Counts only -- one line per scope, no
+        # per-entry marks: the per-entry view is `lore provenance`, which
+        # costs no context.
         parts += [
-            f"## User memory ({usage_line(user_entries, USER_CAP)})",
+            f"## User memory ({usage_line(user_entries, USER_CAP)})"
+            f"{provenance_tag('memory', memory_bucket('user', slug), user_entries)}",
             render_entries(user_entries).rstrip() or "(empty)",
             "",
         ]
@@ -168,7 +175,8 @@ def build_context(cwd: str, scope: str = "all") -> str:
             ]
     if scope in ("all", "project"):
         parts += [
-            f"## Project memory ({usage_line(proj_entries, MEMORY_CAP)}) — {slug}",
+            f"## Project memory ({usage_line(proj_entries, MEMORY_CAP)}) — {slug}"
+            f"{provenance_tag('memory', memory_bucket('project', slug), proj_entries)}",
             render_entries(proj_entries).rstrip() or "(empty)",
             "",
         ]

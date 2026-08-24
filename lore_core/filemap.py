@@ -38,6 +38,7 @@ import os
 import sys
 
 from .config import FILEMAP_CAP, ROOT, one_line, project_root, project_slug
+from .gate import forget_entry, gate_write, provenance_tag, record_entry
 from .memory import match_entries, read_entries, render_entries, usage_line
 from .scrub import scrub_secrets
 
@@ -123,7 +124,7 @@ def write_filemap(slug: str, entries: list[str]) -> str | None:
 
 
 def filemap_add(slug: str, path: str, purpose: str,
-                root: "str | None" = None) -> str | None:
+                root: "str | None" = None, *, via: str = "direct") -> str | None:
     path = one_line(scrub_secrets(str(path)))
     purpose = one_line(scrub_secrets(str(purpose)))
     if not path:
@@ -138,14 +139,22 @@ def filemap_add(slug: str, path: str, purpose: str,
         if epath.strip().lower() == path.lower():
             if e.lower() == entry.lower():
                 return None  # exact duplicate: fine, idempotent
+            old = entries[i]
             entries[i] = entry  # keyed by path: update the row in place
-            return write_filemap(slug, entries)
+            err = write_filemap(slug, entries)
+            if err is None:
+                forget_entry("filemap", slug, old)
+                record_entry("filemap", slug, entry, via=via)
+            return err
     entries.append(entry)
-    return write_filemap(slug, entries)
+    err = write_filemap(slug, entries)
+    if err is None:
+        record_entry("filemap", slug, entry, via=via)
+    return err
 
 
 def filemap_replace(slug: str, needle: str, path: str, purpose: str,
-                    root: "str | None" = None) -> str | None:
+                    root: "str | None" = None, *, via: str = "direct") -> str | None:
     entries = read_entries(filemap_path(slug))
     hits = match_entries(entries, needle)
     if not hits:
@@ -156,8 +165,13 @@ def filemap_replace(slug: str, needle: str, path: str, purpose: str,
         return f"{needle!r} is ambiguous ({len(hits)} matches) — use a longer substring:\n{listing}"
     path = normalize_map_path(one_line(scrub_secrets(str(path))), root)
     purpose = one_line(scrub_secrets(str(purpose)))
+    old = entries[hits[0]]
     entries[hits[0]] = f"{path}{SEP}{purpose}"
-    return write_filemap(slug, entries)
+    err = write_filemap(slug, entries)
+    if err is None:
+        forget_entry("filemap", slug, old)
+        record_entry("filemap", slug, entries[hits[0]], via=via)
+    return err
 
 
 def filemap_remove(slug: str, needle: str) -> str | None:
@@ -168,8 +182,11 @@ def filemap_remove(slug: str, needle: str) -> str | None:
     if len(hits) > 1:
         listing = "\n".join(f"  - {entries[i]}" for i in hits)
         return f"{needle!r} is ambiguous ({len(hits)} matches) — use a longer substring:\n{listing}"
-    entries.pop(hits[0])
-    return write_filemap(slug, entries)
+    gone = entries.pop(hits[0])
+    err = write_filemap(slug, entries)
+    if err is None:
+        forget_entry("filemap", slug, gone)
+    return err
 
 
 def cmd_filemap(args) -> int:
@@ -177,10 +194,18 @@ def cmd_filemap(args) -> int:
     slug = project_slug(cwd)
     if args.fcmd == "show":
         entries = read_entries(filemap_path(slug))
-        print(f"## file map ({usage_line(entries, FILEMAP_CAP)}) — {slug}")
+        print(f"## file map ({usage_line(entries, FILEMAP_CAP)}) — {slug}"
+              f"{provenance_tag('filemap', slug, entries)}")
         print(render_entries(entries).rstrip() or "(empty)")
         return 0
     purpose = " ".join(args.purpose) if hasattr(args, "purpose") else ""
+    # ISSUE #43 write gate: the map is a curated store the agent is told to
+    # trust, so untrusted callers stage instead of writing.
+    staged = gate_write({"kind": "filemap", "action": args.fcmd, "project": slug,
+                         "path": getattr(args, "path", "") or "", "purpose": purpose,
+                         "match": getattr(args, "match", "") or ""})
+    if staged is not None:
+        return staged
     if args.fcmd == "add":
         err = filemap_add(slug, args.path, purpose, root=project_root(cwd))
     elif args.fcmd == "replace":

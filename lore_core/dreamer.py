@@ -187,7 +187,8 @@ def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int
         subject = conn.execute("SELECT subject FROM beliefs WHERE id = ?", (a,)).fetchone()[0]
         if decision == "merge" and res.get("claim"):
             nid, _ = belief_insert(conn, subject, str(res["claim"]), conf, None, slug,
-                                   f"merge of {a}+{b}: {reason}", exclude_ids={a, b})
+                                   f"merge of {a}+{b}: {reason}", exclude_ids={a, b},
+                                   via="dream")
             belief_supersede(conn, a, nid, reason)
             belief_supersede(conn, b, nid, reason)
             # LEDGER (2026-08-22): two independent derivations landing on the

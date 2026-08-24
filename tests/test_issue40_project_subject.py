@@ -22,6 +22,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest import mock
 
 TMP = tempfile.mkdtemp(prefix="lore-test-")
 os.environ["LORE_ROOT"] = os.path.join(TMP, "root")
@@ -366,7 +367,13 @@ class TestMemoryMove(unittest.TestCase):
         lore.memory_add("project", src_slug, "cli movable fact two special")
         _known("-cli-move-known-dst")
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        # ISSUE #43: cmd_memory classifies its caller now, and a CLI write
+        # from a non-interactive context stages instead of applying. This
+        # test is about the MOVE, so it pins the caller to an interactive
+        # agent -- otherwise its result would depend on whether the suite runs
+        # under Claude Code, in a terminal, or headless in CI.
+        with contextlib.redirect_stdout(out), \
+                mock.patch.dict(os.environ, {"AI_AGENT": "claude-code_2.1.228_agent"}):
             rc = lore.cmd_memory(Namespace(
                 mcmd="move", scope="project", cwd=src_cwd,
                 match="cli movable fact two", to="-cli-move-known-dst"))
