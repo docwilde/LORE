@@ -41,6 +41,7 @@ from .config import (
     one_line,
     project_slug,
     read_hook_input,
+    resolve_subject_slug,
     stage_disabled,
     utcnow,
 )
@@ -48,7 +49,7 @@ from .filemap import filemap_entries
 from .memory import memory_path, read_entries, render_entries
 from .pending import load_pending
 from .scrub import scrub_secrets
-from .store import db_connect, parse_transcript
+from .store import db_connect, extract_text, parse_transcript
 
 
 __all__ = [
@@ -67,8 +68,11 @@ __all__ = [
     'record_skill_outcomes',
     'record_skill_usage',
     'RECENCY_NOTE',
+    'resolve_project_subject',
     'build_review_job',
     'WORKER_MARKERS',
+    'WORKER_TRANSCRIPT_MAX_RECORDS',
+    'WORKER_TRANSCRIPT_MAX_BYTES',
     'is_worker_transcript',
     'transcript_cwd',
     'backfill_project',
@@ -184,6 +188,15 @@ observed behavior from THIS digest; never diagnose, never speculate about mental
 what the user themselves expressed. These shape the agent's tone and approach in later \
 sessions; they never authorize actions.
 
+SUBJECT (ISSUE #40, rare): a project-scoped memory or conclusion is about THIS session's own \
+project by default -- leave "project" absent, which is what almost every entry should do. Set \
+"project":"<repo name or slug>" ONLY when the fact is unmistakably about a DIFFERENT, \
+specifically-identified project than the one this session is running in (reviewing a PR against \
+another repo, discussing a plugin from inside the repo that consumes it). Never set it to hedge, \
+never to name a project only mentioned in passing. When unsure, leave it absent -- a fact filed \
+under the session's own project is at worst awkwardly placed and still easy to find; one sent to \
+the wrong subject is invisible to everyone who needed it.
+
 Personal data stays out of both stores. Do NOT record names, email addresses, phone numbers, \
 postal addresses, usernames or account handles of people, the name of any customer, client, \
 employer or third-party company, or anything that reads as a credential — no tokens, keys, \
@@ -235,7 +248,9 @@ _REVIEW_CONCLUSIONS = """Additionally, derive up to 10 conclusions for the belie
 (scope "user") or the project (scope "project") that are worth keeping as queryable beliefs \
 even when they don't merit a slot in the small core memory. Each: a declarative claim \
 <= 200 chars, a confidence 0.0-1.0 (how well the session supports it), and a short evidence \
-quote or paraphrase from the digest. What may be weaker than a memory is your CONFIDENCE, \
+quote or paraphrase from the digest. A project-scoped conclusion takes the same optional \
+"project" subject field as memory, same rule: absent by default, set only when the claim is \
+unmistakably about a different, named project. What may be weaker than a memory is your CONFIDENCE, \
 expressed in that number — not the reach of the claim. A belief is not the looser store: it \
 is unbounded and nothing retires it, so a claim that goes stale sits there indefinitely and \
 answers questions wrongly, whereas a memory at least competes for a slot. The durability \
@@ -277,15 +292,19 @@ Learned skills eligible for "update"/"retire" (name, track record, description):
 """
 
 # JSON-schema fragments — the {{ }} escapes survive to the final .format call.
+# "project" (ISSUE #40): optional on both memory and conclusions, meaningful
+# only for scope "project" -- see the SUBJECT paragraph above for when to set it.
 _SCHEMA_MEMORY = ('"memory":[{{"scope":"user|project","action":"add|replace",'
-                  '"match":"substring, replace only","text":"..."}}]')
+                  '"match":"substring, replace only","text":"...",'
+                  '"project":"optional, only when the subject is a different project"}}]')
 _SCHEMA_FILEMAP = '"filemap":[{{"path":"repo-relative or host:path","purpose":"..."}}]'
 _SCHEMA_SKILLS = ('"skills":[{{"name":"kebab-name","action":"add|update|retire",'
                   '"description":"when to use","body":"markdown"}}],'
                   '"skill_outcomes":[{{"name":"kebab-name","outcome":'
                   '"success|failure|unclear","reason":"short evidence"}}]')
 _SCHEMA_CONCLUSIONS = ('"conclusions":[{{"scope":"user|project|user-model","claim":"...",'
-                       '"confidence":0.8,"evidence":"short quote"}}]')
+                       '"confidence":0.8,"evidence":"short quote",'
+                       '"project":"optional, only when the subject is a different project"}}]')
 
 
 def review_prompt_template() -> str:
@@ -498,6 +517,29 @@ RECENCY_NOTE = (
     "staged version and do not re-propose this slice's variant.\n")
 
 
+def resolve_project_subject(raw: "str | None", slug: str) -> "tuple[str, dict]":
+    """(target_slug, extra_fields) for a memory/conclusion entry's optional
+    "project" subject (ISSUE #40: project memory attributed by cwd, not by
+    subject).
+
+    Absent subject -> (slug, {}): today's default, byte-identical -- the
+    fact is filed against the session's own project exactly as it always
+    was. A subject that RESOLVES to a different known project -> (that
+    slug, {"origin_project": slug}), flagging the write as cross-project for
+    display (`lore pending`, approve). A subject that does not resolve ->
+    (slug, {"subject_unresolved": raw}): the target stays the SAFE default
+    (never a guessed project), with the raw text carried through so the
+    ambiguity is visible instead of silently swallowed.
+    """
+    raw = str(raw or "").strip()
+    if not raw:
+        return slug, {}
+    resolved = resolve_subject_slug(raw)
+    if resolved:
+        return resolved, ({"origin_project": slug} if resolved != slug else {})
+    return slug, {"subject_unresolved": raw}
+
+
 def build_review_job(transcript: Path, slug: str,
                      span: "tuple[int, int] | None" = None,
                      part: "str | None" = None,
@@ -560,6 +602,13 @@ WORKER_MARKERS = (
     "You are the belief reconciler",
 )
 
+# Structural read caps for is_worker_transcript (see its docstring): a worker
+# transcript's marker is always in one of the first few JSONL records, so
+# these bound the cost on a real, tens-of-megabyte session transcript without
+# a fixed byte window that a large preamble can push the marker past.
+WORKER_TRANSCRIPT_MAX_RECORDS = 50
+WORKER_TRANSCRIPT_MAX_BYTES = 2_000_000
+
 
 def is_worker_transcript(transcript: Path) -> bool:
     """True when this transcript is one of our own deriver/dreamer calls.
@@ -569,15 +618,46 @@ def is_worker_transcript(transcript: Path) -> bool:
     file per session it reviewed. They are already skipped for being one user
     message long, but they would still be counted and reported as sessions
     waiting to be reviewed, and the pile grows with every run. Recognise them by
-    the prompt we wrote rather than by their shape, and read only the head of
-    the file: a real session's transcript can be tens of megabytes.
+    the prompt we wrote rather than by their shape.
+
+    READS STRUCTURALLY, not by byte offset (fixed 2026-08-24): a transcript
+    is line-delimited JSON, and the worker prompt lives in the FIRST user
+    message's content however large the preamble ahead of it is -- a big
+    injected snapshot, a long system block, session-init metadata lines. A
+    fixed byte window (previously 64KB) can end inside that preamble, before
+    the marker-bearing record is even reached, misclassifying our own
+    deriver/dreamer output as a real user session: counted as pending
+    review, reported as waiting, potentially reviewed -- a deriver digesting
+    its own output. Reading whole records instead of raw bytes finds the
+    marker regardless of how large any single earlier field is, while
+    WORKER_TRANSCRIPT_MAX_RECORDS keeps the early-exit property the old
+    version had for a real session's transcript, which "can be tens of
+    megabytes": at most a few dozen JSONL lines are ever parsed.
+    WORKER_TRANSCRIPT_MAX_BYTES is a backstop against one pathological line
+    (e.g. a single giant record) consuming unbounded memory before the
+    record cap is reached.
     """
     try:
+        read = 0
         with transcript.open(encoding="utf-8", errors="replace") as fh:
-            head = fh.read(65536)
+            for i, line in enumerate(fh):
+                if i >= WORKER_TRANSCRIPT_MAX_RECORDS:
+                    break
+                read += len(line)
+                if read > WORKER_TRANSCRIPT_MAX_BYTES:
+                    break
+                try:
+                    d = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(d, dict) or d.get("type") not in ("user", "assistant"):
+                    continue
+                text = extract_text(d.get("message", {}).get("content", ""))
+                if any(marker in text for marker in WORKER_MARKERS):
+                    return True
     except OSError:
         return False
-    return any(marker in head for marker in WORKER_MARKERS)
+    return False
 
 
 def transcript_cwd(transcript: Path) -> str | None:
@@ -1110,9 +1190,20 @@ def derive_conclusions(data: dict, slug: str, session_id: str) -> int:
             confidence = 0.6
         evidence = c.get("evidence")
         evidence = scrub_secrets(str(evidence)) if evidence else None
+        # ISSUE #40: same subject resolution as memory, applied at the
+        # belief's write site -- only "project" scope has a project to be
+        # about. Beliefs have no approval gate to surface an ambiguity in, so
+        # an unresolved subject is logged (worker log) rather than silently
+        # guessed at; the target still defaults to this session's project.
+        target_slug = slug
+        if scope == "project":
+            target_slug, extra = resolve_project_subject(c.get("project"), slug)
+            if extra.get("subject_unresolved"):
+                print(f"belief subject {extra['subject_unresolved']!r} not resolved to a"
+                      f" known project -- filed under {slug}")
         belief_insert(
-            conn, belief_subject(scope, slug), claim, confidence,
-            session_id, slug, evidence or None,
+            conn, belief_subject(scope, target_slug), claim, confidence,
+            session_id, target_slug, evidence or None,
         )
         derived += 1
     conn.commit()
@@ -1140,8 +1231,12 @@ def stage_proposals(data: dict, slug: str, session_id: str,
         FileExistsError to step over rather than a file to overwrite.
         """
         nonlocal staged
-        item |= {"created": utcnow(), "project": slug, "session_id": session_id,
-                 "derived_by": derived_by or agent_id()}
+        # Defaults first, item on top (not the reverse): a memory entry that
+        # resolved a cross-project "project" subject already carries its own
+        # "project" key by this point, and it must WIN over the default
+        # slug=cwd's-project below -- ISSUE #40, the whole point of the fix.
+        item = {"created": utcnow(), "project": slug, "session_id": session_id,
+                "derived_by": derived_by or agent_id()} | item
         n = staged
         while True:
             try:
@@ -1166,8 +1261,16 @@ def stage_proposals(data: dict, slug: str, session_id: str,
         if text.lower() in existing:
             continue
         existing.add(text.lower())
-        put({"kind": "memory", "scope": scope, "action": action,
-             "match": scrub_secrets(str(m.get("match") or "")), "text": text})
+        entry = {"kind": "memory", "scope": scope, "action": action,
+                 "match": scrub_secrets(str(m.get("match") or "")), "text": text}
+        # ISSUE #40: only "project" scope has a project to be about; a
+        # subject on a "user" entry means nothing (user memory is global)
+        # and is ignored rather than mis-taken as a write target.
+        if scope == "project":
+            target, extra = resolve_project_subject(m.get("project"), slug)
+            entry["project"] = target
+            entry.update(extra)
+        put(entry)
     # file map proposals (0.34.0): staged like memory, approved into the map
     # by apply_item. Dedupe against the current map AND the pending pile for
     # this project (a path staged elsewhere is destined for a different map,

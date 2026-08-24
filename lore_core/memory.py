@@ -7,7 +7,14 @@ import os
 import sys
 from pathlib import Path
 
-from .config import MEMORY_CAP, ROOT, USER_CAP, one_line, project_slug
+from .config import (
+    MEMORY_CAP,
+    ROOT,
+    USER_CAP,
+    one_line,
+    project_slug,
+    resolve_subject_slug,
+)
 
 
 __all__ = [
@@ -21,6 +28,7 @@ __all__ = [
     'memory_add',
     'memory_replace',
     'memory_remove',
+    'memory_move',
     'cmd_memory',
 ]
 
@@ -115,6 +123,48 @@ def memory_remove(scope: str, slug: str, needle: str) -> str | None:
     return write_entries(path, entries, memory_cap(scope), scope)
 
 
+def memory_move(scope: str, from_slug: str, needle: str, to_slug: str) -> str | None:
+    """Retroactive cleanup for ISSUE #40: relocate an already-mis-scoped
+    project entry from one project's memory to another's.
+
+    Only "project" memory has a project to move between -- user memory is
+    global, so there is nowhere for a "move" to go. Writes the destination
+    FIRST and only removes from the source once that write succeeds, cap-
+    enforced exactly like any other write (write_entries refuses over cap
+    rather than truncating): a destination over its cap leaves the source
+    untouched, never a half-moved entry. An exact duplicate already present
+    at the destination is treated as success (idempotent) without adding a
+    second copy, and the source entry is still removed.
+    """
+    if scope != "project":
+        return "only project-scoped entries can be moved (user memory has no project dimension)"
+    if to_slug == from_slug:
+        return "source and destination are the same project"
+    src_path = memory_path(scope, from_slug)
+    src_entries = read_entries(src_path)
+    hits = match_entries(src_entries, needle)
+    if not hits:
+        listing = "\n".join(f"  - {e}" for e in src_entries) or "  (empty)"
+        return f"no entry matches {needle!r} in project memory of {from_slug}. Entries:\n{listing}"
+    if len(hits) > 1:
+        listing = "\n".join(f"  - {src_entries[i]}" for i in hits)
+        return f"{needle!r} is ambiguous ({len(hits)} matches) — use a longer substring:\n{listing}"
+    text = src_entries[hits[0]]
+    dst_path = memory_path(scope, to_slug)
+    dst_entries = read_entries(dst_path)
+    if not any(text.lower() == e.lower() for e in dst_entries):
+        dst_entries.append(text)
+        err = write_entries(dst_path, dst_entries, memory_cap(scope), scope)
+        if err:
+            return err  # refuse rather than truncate: nothing written anywhere
+    src_entries.pop(hits[0])
+    err = write_entries(src_path, src_entries, memory_cap(scope), scope)
+    if err:
+        return (f"moved into {to_slug} but failed to remove from {from_slug}"
+                f" (now present in both): {err}")
+    return None
+
+
 def cmd_memory(args) -> int:
     slug = project_slug(args.cwd or os.getcwd())
     if args.mcmd == "show":
@@ -123,6 +173,21 @@ def cmd_memory(args) -> int:
             entries = read_entries(memory_path(scope, slug))
             print(f"## {scope} ({usage_line(entries, memory_cap(scope))})")
             print(render_entries(entries).rstrip() or "(empty)")
+        return 0
+    if args.mcmd == "move":
+        to_slug = resolve_subject_slug(args.to)
+        if not to_slug:
+            print(f"cannot resolve destination {args.to!r} to a known project — pass an"
+                  " exact slug, an unambiguous repo name, or a path to its checkout"
+                  " (`lore backfill --list` shows known slugs).", file=sys.stderr)
+            return 1
+        err = memory_move(args.scope, slug, args.match, to_slug)
+        if err:
+            print(err, file=sys.stderr)
+            return 1
+        entries = read_entries(memory_path(args.scope, to_slug))
+        print(f"ok — moved into project memory of {to_slug}, now"
+              f" {usage_line(entries, memory_cap(args.scope))}")
         return 0
     text = " ".join(args.text) if hasattr(args, "text") else ""
     if args.mcmd == "add":

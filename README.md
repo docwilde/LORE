@@ -75,6 +75,8 @@ Everything runs as a plain CLI too — `python3 <plugin>/bin/lore.py --help`, st
 
 A project means the **git repo root**, so a session started in `repo/viz` shares the repo's memory instead of forking an invisible second scope.
 
+A project-scoped fact is about the repo it was learned in by default, but not always — reviewing a PR against another repo, or discussing a plugin from inside the project that consumes it, produces facts ABOUT a different project than the one the session ran in. The reviewer can name that project explicitly (rare, tightly instructed); a resolvable name retargets the write and shows as a cross-project note in `/lore:pending` and on approval, an unresolvable one stays filed under the session's own project — never a guess — with the ambiguity surfaced the same way. `lore memory move --scope project --match "<substring>" --to <slug>` relocates an already-mis-scoped entry after the fact, cap-enforced on the destination like any other write.
+
 The snapshot injects at `SessionStart`, after `/clear` and compaction, and again whenever its content changes — `UserPromptSubmit` hashes it each prompt and re-sends only on a difference (`LORE_REFRESH_ON_CHANGE=0` opts out). It carries both memory scopes, a one-line file-map pointer, and the top user-model beliefs as a labeled interaction-model section.
 
 ### Session end → proposal → approval
