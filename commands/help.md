@@ -30,6 +30,6 @@ Show this reference card, formatted as below, nothing else:
 
 **Flow:** sessions end → deriver stages proposals → you triage in `/lore:pending` → dreamer reconciles beliefs. Nothing writes to memory without approval.
 
-**CLI:** `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" <cmd>` — extra: `search`, `session <id>`, `index`, `dream`, `memory add|replace|remove|list`, `filemap show|add|replace|remove`.
+**CLI:** `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" <cmd>` — extra: `search`, `session <id>`, `index`, `dream`, `memory add|replace|remove|move|list`, `filemap show|add|replace|remove`.
 **Env knobs:** `LORE_USER_CAP` / `LORE_MEMORY_CAP` (2750/8800), `LORE_FILEMAP_CAP` (4400), `LORE_DIGEST_LAST_N` / `LORE_DIGEST_TOTAL_CAP` (500/250k), `LORE_REFRESH_SECS`, `LORE_DEFER_DREAM`, `LORE_BELIEF_DORMANT_DAYS` (45) / `LORE_INCLUDE_DORMANT`, `LORE_NOTIFY`, `LORE_SKIP`.
 **Stage switches** (all default on; set via `lore config set <VAR> 1`, clear via `lore config unset <VAR>`): `LORE_DISABLE_INJECT` (snapshot), `LORE_DISABLE_INDEX` (session index), `LORE_DISABLE_REVIEW` (SessionEnd + PreCompact review), `LORE_DISABLE_PRECOMPACT` (PreCompact review only), `LORE_DISABLE_BELIEFS` (belief store), `LORE_DISABLE_SKILLS` (skillification); `LORE_STREAM_INDEX=1` is the one opt-in (streaming); `LORE_CONSULT=1` opts into act-time consult. `LORE_SKIP` overrides them all.
