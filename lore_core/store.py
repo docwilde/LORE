@@ -44,7 +44,14 @@ def db_connect() -> sqlite3.Connection:
     ROOT.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(ROOT / "state.db")
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    # 30s, not 5: WAL gives concurrent readers but exactly one writer, and the
+    # writers here are whole agent runs — a backfill worker, four Claude Code
+    # hook events per session, the DOXA daemon, the dreamer — all on one
+    # state.db. Five seconds is inside the normal turnaround of the work a
+    # writer does between statements, so a contended write failed rather than
+    # waited. Waiting half a minute costs a stalled hook; failing costs the
+    # belief.
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS files("
         "path TEXT PRIMARY KEY, stamp TEXT, lines_indexed INTEGER)")
