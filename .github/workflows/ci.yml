@@ -56,44 +56,52 @@ jobs:
         # listed so a new test file is picked up without touching this
         # workflow. Stdlib unittest only -- no pytest, by design.
         run: |
-          failed=()
-          details=""
+          failed=0
+          total=0
+          out="$RUNNER_TEMP/out.txt"
+          details="$RUNNER_TEMP/details.md"
+          : > "$details"
+
           for f in tests/test_*.py; do
+            total=$((total + 1))
             echo "::group::$f"
-            if python3 "$f" >"$RUNNER_TEMP/out.txt" 2>&1; then
-              cat "$RUNNER_TEMP/out.txt"
+            if python3 "$f" >"$out" 2>&1; then
+              cat "$out"
               echo "::endgroup::"
             else
-              cat "$RUNNER_TEMP/out.txt"
+              cat "$out"
               echo "::endgroup::"
-              failed+=("$f")
+              failed=$((failed + 1))
               # unittest names each failure as "FAIL:/ERROR: <test> (<class>)".
-              # The assert-style file (test_worker_transcript_window.py) has no
-              # such line, so fall back to the exception line of its traceback
-              # -- either way the summary names the failure, not just the file.
-              names=$(grep -E '^(FAIL|ERROR): ' "$RUNNER_TEMP/out.txt" | sed 's/ (.*//; s/^/  - /' || true)
-              if [ -z "$names" ]; then
-                names="  - $(grep -E '^[A-Za-z_.]*(Error|Exception)' "$RUNNER_TEMP/out.txt" | tail -n 1 || echo 'exited non-zero')"
+              # The assert-style file (test_worker_transcript_window.py) has
+              # no such line, so fall back to the exception line of its
+              # traceback -- either way the summary names the failure, not
+              # just the file it lived in.
+              grep -E '^(FAIL|ERROR): ' "$out" | sed 's/ (.*//' > "$RUNNER_TEMP/names.txt" || true
+              if [ ! -s "$RUNNER_TEMP/names.txt" ]; then
+                grep -E '^[A-Za-z_.]*(Error|Exception)' "$out" | tail -n 1 > "$RUNNER_TEMP/names.txt" || true
               fi
-              details="${details}- \`${f}\`
-${names}
-"
+              if [ ! -s "$RUNNER_TEMP/names.txt" ]; then
+                echo 'exited non-zero' > "$RUNNER_TEMP/names.txt"
+              fi
+              echo "- \`$f\`" >> "$details"
+              sed 's/^/  - /' "$RUNNER_TEMP/names.txt" >> "$details"
               while IFS= read -r n; do
-                [ -n "$n" ] && echo "::error file=$f::${n#  - }"
-              done <<< "$names"
+                [ -n "$n" ] && echo "::error file=$f::$n"
+              done < "$RUNNER_TEMP/names.txt"
             fi
           done
 
           {
             echo "### Python ${{ matrix.python-version }}"
             echo
-            if [ ${#failed[@]} -eq 0 ]; then
-              echo "All $(ls tests/test_*.py | wc -l) test files passed."
+            if [ "$failed" -eq 0 ]; then
+              echo "All $total test files passed."
             else
-              echo "#### Failures"
+              echo "#### Failures ($failed of $total files)"
               echo
-              printf '%s\n' "$details"
+              cat "$details"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-          [ ${#failed[@]} -eq 0 ] || exit 1
+          [ "$failed" -eq 0 ]
