@@ -43,6 +43,8 @@ __all__ = [
     'utcnow',
     'project_root',
     'project_slug',
+    'known_project_slugs',
+    'resolve_subject_slug',
     'agent_id',
     'SCOPES',
     'effective_scope',
@@ -127,6 +129,59 @@ def project_slug(cwd: str) -> str:
     subdirectory someone happened to start in. Non-repo cwds keep the old
     behavior byte-identically."""
     return re.sub(r"[^A-Za-z0-9]", "-", project_root(cwd))
+
+
+def known_project_slugs() -> set[str]:
+    """Every project slug lore has ever seen — from a curated project memory
+    dir or a Claude Code session transcript dir. The set a human- or
+    reviewer-typed project name gets resolved against (resolve_subject_slug):
+    never invent a slug for a name nothing has seen, since that would write
+    a fact into a project nobody can find it under."""
+    out: set[str] = set()
+    proj_root = ROOT / "projects"
+    if proj_root.is_dir():
+        out.update(p.name for p in proj_root.iterdir() if p.is_dir())
+    if PROJECTS_DIR.is_dir():
+        out.update(p.name for p in PROJECTS_DIR.iterdir() if p.is_dir())
+    return out
+
+
+def resolve_subject_slug(raw: str) -> "str | None":
+    """Resolve a human- or reviewer-typed project subject — a slug, a bare
+    repo name, or a filesystem path — to a real, KNOWN project slug, or None
+    when it cannot be resolved with confidence.
+
+    ISSUE #40 (cross-repo attribution): a reviewer or a `memory move --to`
+    caller can only ever NAME a project in prose; this is the one place that
+    turns that name into the same slug project_slug(cwd) would have produced
+    had the session actually run there. A path is resolved directly through
+    project_slug() (git-repo-root, byte-identical semantics) when it exists
+    on disk. A bare name is matched against known_project_slugs() the same
+    way resolve_projects() matches a `backfill --project` term: exact slug
+    first, then a unique suffix match, then a unique substring match — never
+    guessing between multiple candidates. Anything left ambiguous or unknown
+    returns None so the caller stages the fact under today's default (the
+    session's own project) and surfaces the raw text for a human to route,
+    rather than risk filing it under the wrong project silently.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    expanded = os.path.expanduser(raw)
+    looks_like_path = (
+        "/" in raw or raw in (".", "..") or raw.startswith(("~", "./", "../"))
+    )
+    if looks_like_path:
+        return project_slug(expanded) if Path(expanded).is_dir() else None
+    known = known_project_slugs()
+    if raw in known:
+        return raw
+    suffix = sorted(s for s in known if s.endswith(raw))
+    contains = sorted(s for s in known if raw in s)
+    for matches in (suffix, contains):
+        if len(matches) == 1:
+            return matches[0]
+    return None
 
 
 def agent_id() -> str:
