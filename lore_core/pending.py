@@ -17,12 +17,34 @@ from .memory import memory_add, memory_replace
 __all__ = [
     'load_pending',
     'cmd_pending',
+    'cross_project_note',
     'archive',
     'apply_item',
     'resolve_ids',
     'cmd_approve',
     'cmd_reject',
 ]
+
+
+def cross_project_note(item: dict) -> "str | None":
+    """A human-facing note when a memory proposal's write target differs from
+    (or was ambiguously not resolvable from) the project the session ran in
+    -- ISSUE #40. None for anything else (filemap/skill proposals stay tied
+    to the session's own project; a plain same-project memory write has
+    nothing to flag), so both `pending` and `approve` show it only when it
+    matters and stay byte-identical to today otherwise.
+    """
+    if item.get("kind") != "memory":
+        return None
+    if item.get("origin_project"):
+        return (f"cross-project write -> target {item['project']!r}"
+                f" (session ran in {item['origin_project']!r})")
+    if item.get("subject_unresolved"):
+        return (f"subject {item['subject_unresolved']!r} was not recognized as a known"
+                f" project -- staged under {item['project']!r} (this session's own"
+                f" project); relocate with `lore memory move` after approval, or reject"
+                f" and re-file manually")
+    return None
 
 def load_pending() -> list[tuple[str, dict]]:
     pdir = ROOT / "pending"
@@ -100,6 +122,9 @@ def cmd_pending(args) -> int:
         by = item.get("derived_by")
         print(f"    from session {item.get('session_id')} [{item.get('project')}]"
               + (f" [by {by}]" if by else ""))
+        note = cross_project_note(item)
+        if note:
+            print(f"    !! {note}")
     print(f"\n{len(items)} pending. approve: lore approve <id>|all   reject: lore reject <id>|all")
     return 0
 
@@ -190,7 +215,8 @@ def cmd_approve(args) -> int:
             print(f"{pid}: NOT applied — {err}")
         else:
             archive(pid, "approved")
-            print(f"{pid}: applied.")
+            note = cross_project_note(items[pid])
+            print(f"{pid}: applied." + (f" ({note})" if note else ""))
     return 1 if failures else 0
 
 

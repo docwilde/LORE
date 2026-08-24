@@ -460,6 +460,15 @@ def main() -> int:
             mp.add_argument("text", nargs="+")
         mp.set_defaults(fn=cmd_memory, mcmd=name)
 
+    mp = msub.add_parser(
+        "move", help="retroactive cleanup (issue #40): move a project-scoped"
+                     " entry into a different project's memory")
+    mp.add_argument("--scope", choices=("user", "project"), required=True)
+    mp.add_argument("--cwd", help="source project (default: cwd)")
+    mp.add_argument("--match", required=True)
+    mp.add_argument("--to", required=True, help="destination: slug, repo name, or path")
+    mp.set_defaults(fn=cmd_memory, mcmd="move")
+
     sp = sub.add_parser("filemap",
                         help="project file map (path — purpose): show/add/replace/remove")
     fsub = sp.add_subparsers(dest="fcmd", required=True)
