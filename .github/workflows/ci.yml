@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The whole suite runs in about a second; anything approaching this
+    # bound is a hang (a wedged sqlite lock, a subprocess waiting on stdin),
+    # not slow tests.
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # LORE is stdlib-only and ships as a Claude Code plugin invoked as
+        # `python3 bin/lore.py`, so the interpreter is whatever the user's
+        # machine happens to have -- version coverage is the one axis worth
+        # testing broadly here. Verified green on all four locally.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # No dependency cache on purpose: LORE has no dependencies to cache.
+
+      - name: Run test suite
+        env:
+          # tests/test_write_lock.py drives dreamer.dream_run, which calls
+          # find_claude() -- `LORE_CLAUDE_BIN` or `which claude` -- and bails
+          # early when neither resolves, so the test's monkeypatched
+          # run_claude is never reached and it fails on any machine without
+          # the Claude CLI, which includes every runner. The test patches
+          # run_claude itself, so this path is only ever checked for
+          # truthiness, never executed; /bin/true just makes it honest.
+          LORE_CLAUDE_BIN: /bin/true
+        # Each test file is run as its OWN process, which is the convention
+        # the files themselves document ("Run: python3 tests/test_x.py") and
+        # the one they require: every file sets LORE_ROOT and friends to a
+        # private tempdir at import time and loads bin/lore.py through
+        # importlib, so a single shared interpreter would let one file's
+        # module-level environment leak into another's. Globbed rather than
+        # listed so a new test file is picked up without touching this
+        # workflow. Stdlib unittest only -- no pytest, by design.
+        run: |
+          failed=()
+          details=""
+          for f in tests/test_*.py; do
+            echo "::group::$f"
+            if python3 "$f" >"$RUNNER_TEMP/out.txt" 2>&1; then
+              cat "$RUNNER_TEMP/out.txt"
+              echo "::endgroup::"
+            else
+              cat "$RUNNER_TEMP/out.txt"
+              echo "::endgroup::"
+              failed+=("$f")
+              # unittest names each failure as "FAIL:/ERROR: <test> (<class>)".
+              # The assert-style file (test_worker_transcript_window.py) has no
+              # such line, so fall back to the exception line of its traceback
+              # -- either way the summary names the failure, not just the file.
+              names=$(grep -E '^(FAIL|ERROR): ' "$RUNNER_TEMP/out.txt" | sed 's/ (.*//; s/^/  - /' || true)
+              if [ -z "$names" ]; then
+                names="  - $(grep -E '^[A-Za-z_.]*(Error|Exception)' "$RUNNER_TEMP/out.txt" | tail -n 1 || echo 'exited non-zero')"
+              fi
+              details="${details}- \`${f}\`
+${names}
+"
+              while IFS= read -r n; do
+                [ -n "$n" ] && echo "::error file=$f::${n#  - }"
+              done <<< "$names"
+            fi
+          done
+
+          {
+            echo "### Python ${{ matrix.python-version }}"
+            echo
+            if [ ${#failed[@]} -eq 0 ]; then
+              echo "All $(ls tests/test_*.py | wc -l) test files passed."
+            else
+              echo "#### Failures"
+              echo
+              printf '%s\n' "$details"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ ${#failed[@]} -eq 0 ] || exit 1
