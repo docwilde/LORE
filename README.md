@@ -19,7 +19,7 @@ Other agent-memory systems — Mem0, Letta, Zep, [Honcho](https://github.com/pla
 
 ## What you get
 
-- **Curated memory behind a cap and a gate.** `USER.md` (2750 chars, global) and `MEMORY.md` (8800 chars, per repo) inject at session start. You write them via `/lore:remember`; background review only *proposes*, and `/lore:approve` applies. A write past the cap fails and lists every entry, forcing consolidation instead of drift. No aging, no relevance ranking.
+- **Curated memory behind a cap and a gate.** `USER.md` (4500 chars, global) and `MEMORY.md` (8800 chars, per repo) inject at session start. You write them via `/lore:remember`; background review only *proposes*, and `/lore:approve` applies. A write past the cap fails and lists every entry, forcing consolidation instead of drift. No aging, no relevance ranking.
 - **A belief store with evidence trails.** The deriver extracts up to 10 confidence-weighted conclusions per session into SQLite, each carrying its citations. Beliefs never enter context uninvited — read them through `/lore:ask`, or at decision time through `lore consult`.
 - **Local full-text session search.** LORE indexes every transcript under `~/.claude/projects/` incrementally into SQLite FTS5. `lore search "query"` runs BM25 with porter stemming, matching identifiers, error strings and paths exactly. No embeddings, no API calls.
 - **A project file map.** One `path — purpose` row per load-bearing file, so nobody hunts a location twice. The snapshot carries a one-line pointer, never the map body.
@@ -67,7 +67,7 @@ Everything runs as a plain CLI too — `python3 <plugin>/bin/lore.py --help`, st
 
 | Store | Location | Cap | Gate |
 |---|---|---|---|
-| User memory | `USER.md` | 2750 chars | write-time |
+| User memory | `USER.md` | 4500 chars | write-time |
 | Project memory | `MEMORY.md`, one per repo | 8800 chars | write-time |
 | File map | `filemap/<slug>.md`, one per repo | 4400 chars | write-time |
 | Belief store | `state.db` | none | read-time |
@@ -165,7 +165,7 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 |---|---|---|
 | `LORE_ROOT` | `~/.claude/lore` | all state: memory files, `state.db`, pending, logs |
 | `LORE_PROJECTS_DIR` | `~/.claude/projects` | where the indexer looks for transcripts |
-| `LORE_USER_CAP` / `LORE_MEMORY_CAP` | 2750 / 8800 | curated memory caps, in chars |
+| `LORE_USER_CAP` / `LORE_MEMORY_CAP` | 4500 / 8800 | curated memory caps, in chars |
 | `LORE_FILEMAP_CAP` | 4400 | file-map cap, in chars (~55 rows) |
 | `LORE_REVIEW_MODEL` | unset | umbrella override for both headless roles |
 | `LORE_DERIVER_MODEL` | `haiku` | extraction — the easy role |

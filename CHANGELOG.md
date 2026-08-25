@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.35.2 — 2026-08-25
+
+- **User memory cap raised: 2750 → 4500 chars** (`LORE_USER_CAP` default). 0.31.0
+  doubled the *project* cap for this exact reason and explicitly left user memory
+  alone; a real store then sat at 88% and forced consolidation every few writes.
+  User memory is the one scope where that pressure destroys signal rather than
+  drift: it holds who the user is across every project, so its entries are
+  durable facts that never stop being true, while project memory rotates with the
+  repo. The cap discipline is the point and stays — 4500 restores headroom
+  (~440 extra tokens per injected snapshot), it does not remove the ceiling.
+  Docs, the help card and `/lore:context`'s example line follow the new figure.
+
 ## 0.35.1 — 2026-08-25
 - **`lore_core` is installable.** The repo had no `pyproject.toml` at all, so the only way to get the package was to have the plugin on disk and put its directory on `sys.path` — which is exactly what DOXA's `_lore_bootstrap` did, and why a bare clone of DOXA could not even collect its test suite (41 of 52 modules failed at import). `pyproject.toml` now declares the distribution `lore-core`, hatchling backend, and a consumer can write `lore-core @ git+https://github.com/docwilde/LORE@<ref>` like any other dependency. **Nothing about the plugin changes**: `/plugin install lore` copies the same tree, `bin/lore.py` runs out of it by path, and no hook, command or skill reads this file.
 - **Only `lore_core/` is packaged.** `bin/`, `hooks/`, `commands/`, `skills/` and `assets/` are Claude Code plugin assets that the harness loads by path — they are not importable library code, and putting them in a wheel would land files nothing imports on a consumer's `sys.path`. The sdist additionally carries `tests/` and `.claude-plugin/plugin.json`, the second because it is the version source and an sdist that cannot rebuild itself is broken.
