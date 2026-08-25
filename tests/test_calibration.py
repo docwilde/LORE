@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Focused unit tests for the belief-calibration outcomes ledger (2026-08-22):
 ledger insert paths, Beta-posterior math, the 2-contradiction dormancy flip,
 stats bucket math, and the audit sampler's path check. Stdlib only, like the

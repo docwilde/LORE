@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """lore_core.version -- ONE version, whichever carrier this copy arrived in.
 
 ``.claude-plugin/plugin.json`` is the source of truth. It has to be: it is

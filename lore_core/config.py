@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Env-derived configuration for lore: caps, model selection, paths, stage
 kill switches, and the small dependency-free helpers (utcnow, project_slug,
 agent_id, effective_scope, read_hook_input, one_line) every other lore_core

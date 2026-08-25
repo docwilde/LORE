@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Focused unit tests for the file map (0.34.0): add/show/replace/remove
 semantics, path normalization, cap enforcement, scrubbing, the snapshot
 one-liner, the deriver's filemap proposal kind through staging and approval,

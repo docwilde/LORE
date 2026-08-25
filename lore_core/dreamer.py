@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Tier 3: background review -- dreamer role. Reconciles duplicate/
 contradicting beliefs (dream_candidates pairs same-subject beliefs by token
 overlap; a headless `claude -p` call decides merge/supersede/keep) and

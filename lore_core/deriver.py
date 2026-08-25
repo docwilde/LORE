@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Tier 3: background review -- deriver role. Digest building, the segmented
 review prompt (review_prompt_template), derive_conclusions (writes straight
 to the belief store, no approval gate) and stage_proposals (memory/skill

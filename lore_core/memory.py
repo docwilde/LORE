@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Tier 1: curated core memory. USER.md (global) and MEMORY.md (per project)
 -- hard-capped markdown files read/written as flat `- entry` bullet lists,
 plus the `lore memory` CLI command.

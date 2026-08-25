@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Regression tests for is_worker_transcript's marker detection (fixed
 2026-08-24): the old implementation read a fixed 65536-byte head and matched
 WORKER_MARKERS in it. A large preamble ahead of the marker-bearing record
