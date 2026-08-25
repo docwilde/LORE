@@ -40,6 +40,8 @@ __all__ = [
     'DIGEST_MSG_TRUNC',
     'DIGEST_TOTAL_CAP',
     'DIGEST_LAST_N',
+    'MEMORY_PROPOSAL_CAP',
+    'DUP_CONTAINMENT',
     'utcnow',
     'project_root',
     'project_slug',
@@ -104,6 +106,45 @@ MSG_TRUNC = 4000          # chars kept per indexed message
 DIGEST_MSG_TRUNC = 700    # chars kept per message in the review digest
 DIGEST_TOTAL_CAP = int(os.environ.get("LORE_DIGEST_TOTAL_CAP", "250000"))  # chars kept for the whole digest
 DIGEST_LAST_N = int(os.environ.get("LORE_DIGEST_LAST_N", "500"))  # newest messages considered for the digest (tool lines included)
+
+# ISSUE #48 -- how many memory proposals ONE review may stage, and the single
+# source of truth for the number: it is interpolated into the deriver prompt
+# AND used as the staging slice, which were two independent literal 5s before
+# (a prompt saying one number while staging enforced another is a silent,
+# unfalsifiable drift).
+#
+# 5 -> 3, measured. Across 274 archived review runs on a live store, 216 (79%)
+# emitted EXACTLY 5 -- the cap was read as a quota to fill, not a ceiling. The
+# proposals that filled it were worse: runs that emitted 5 were approved at
+# 0.83% (9/1080), runs that emitted <= 4 at 2.47% (4/162), a 3x gap
+# (Fisher two-sided p = 0.077). The tail of a saturated run is the marginal
+# material, so the cap is what buys it. Lowering the number alone would only
+# cut volume; the prompt change that accompanies it (a ceiling is not a quota,
+# plus the act-vs-know test) is what is meant to raise the rate.
+MEMORY_PROPOSAL_CAP = int(os.environ.get("LORE_MEMORY_PROPOSAL_CAP", "3"))
+# ISSUE #48 -- stage-time suppression threshold: a memory proposal whose
+# tokens are already this fraction carried by a single existing entry in the
+# same scope is dropped instead of staged (see token_containment).
+#
+# 0.60, chosen by replaying all 1242 archived memory proposals against the
+# live store: the highest containment ANY approved proposal reached was 0.43,
+# so 0.60 clears the observed approved ceiling by 40% relative. At 0.60 the
+# replay suppresses 10 of 1229 rejected and 0 of 13 approved; 0.50 would
+# suppress 21 rejected -- still 0 approved, but on an n=13 approved sample a
+# 0.07 margin is not a margin. Suppressing a fact the user wanted is strictly
+# worse than showing one they did not, so the threshold is set by the margin,
+# not by the catch.
+#
+# ISSUE #50 reuses this SAME constant for the cross-subject check on beliefs
+# ("user" vs "user-model") rather than adding a second knob that could drift
+# away from it -- and an independent replay lands on the same number. Over the
+# live store's 3528 cross-subject pairs, every pair scoring >= 0.42 is a
+# genuine twin by inspection (all 136 pairs at >= 0.38 were read one by one);
+# the highest score reached by a pair of genuinely DISTINCT claims is 0.40. So
+# 0.60 clears that observed ceiling by 50% relative, against the 40% margin
+# #48's replay left, and it catches 30 of the issue's 42 detected pairs plus 7
+# more that the issue's own jaccard-0.30 detection floor missed entirely.
+DUP_CONTAINMENT = float(os.environ.get("LORE_DUP_CONTAINMENT", "0.60"))
 
 
 def utcnow() -> str:

@@ -4,6 +4,12 @@ overlap; a headless `claude -p` call decides merge/supersede/keep) and
 proposes promotions from the belief store into curated core memory.
 _dream_lock is a non-blocking flock so only one dreamer reconciles at a time.
 `lore dream`.
+
+Also the read-only cross-subject report (ISSUE #50): cross_subject_pairs /
+cmd_crosscheck list `user` vs `user-model` near-duplicates. They live beside
+dream_candidates on purpose -- that function pairs beliefs WITHIN a subject,
+so nothing in the store ever looked across the two user channels, which is how
+they filled up with twins. `lore crosscheck`.
 """
 
 import os
@@ -13,8 +19,22 @@ import subprocess
 import sys
 
 from .beliefs import BELIEF_COLS, belief_insert, belief_supersede, dormant_sweep, record_outcome
-from .config import BELIEF_DORMANT_DAYS, DREAMER_MODEL, ROOT, one_line, project_slug, stage_disabled, utcnow
+from .config import (
+    BELIEF_DORMANT_DAYS,
+    DREAMER_MODEL,
+    DUP_CONTAINMENT,
+    ROOT,
+    one_line,
+    project_slug,
+    stage_disabled,
+    utcnow,
+)
 from .deriver import extract_json, find_claude, run_claude, stage_proposals
+# ISSUE #50: the SAME containment measure and tokenizer #49 put on pending.py's
+# surface for stage-time coverage. Imported, never reimplemented -- a second
+# similarity function would let `lore crosscheck`'s report drift away from the
+# check that actually drops a conclusion.
+from .pending import token_containment
 from .store import db_connect
 
 
@@ -25,6 +45,8 @@ __all__ = [
     'dream_candidates',
     'dream_run',
     'cmd_dream',
+    'cross_subject_pairs',
+    'cmd_crosscheck',
 ]
 
 DREAM_PROMPT = """You are the dreamer of a belief store (Honcho-pattern): you reconcile \
@@ -238,3 +260,64 @@ def cmd_dream(args) -> int:
     conn = db_connect()
     slug = project_slug(args.cwd or os.getcwd())
     return dream_run(conn, slug, dry_run=args.dry_run)
+
+
+def cross_subject_pairs(conn: sqlite3.Connection, threshold: float = DUP_CONTAINMENT
+                        ) -> "list[tuple[float, tuple, tuple]]":
+    """Active (user, user-model) belief pairs where one already carries the
+    other, best first. Read-only: it writes nothing and records no outcome.
+
+    ISSUE #50. dream_candidates above pairs beliefs WITHIN a subject -- which
+    is why the store accumulated cross-subject twins unchallenged: the
+    reconciler that already existed structurally could not see them. This is
+    its cross-subject counterpart, and it deliberately stops at listing. A
+    same-subject duplicate is a merge the dreamer can decide; a cross-subject
+    twin is a question about which channel OWNS the claim, and answering it
+    wrong files a preference the user STATED as an inference nobody made --
+    the exact confusion the two subjects exist to prevent. So this reports and
+    a human resolves.
+
+    Scored with the same containment measure and the same tokenizer the
+    stage-time check uses (pending.token_containment), so the number printed
+    here is the number that decides.
+    """
+    rows = {s: conn.execute(
+        f"SELECT {BELIEF_COLS} FROM beliefs WHERE subject = ? AND status = 'active'"
+        " ORDER BY id", (s,)).fetchall() for s in ("user", "user-model")}
+    pairs = []
+    for u in rows["user"]:
+        for m in rows["user-model"]:
+            score = max(token_containment(u[2], m[2]), token_containment(m[2], u[2]))
+            if score >= threshold:
+                pairs.append((score, u, m))
+    pairs.sort(key=lambda p: (-p[0], p[1][0], p[2][0]))
+    return pairs
+
+
+def cmd_crosscheck(args) -> int:
+    """`lore crosscheck` -- read-only report of cross-subject near-duplicate
+    beliefs (ISSUE #50). Lists both claims with their subjects and ids so a
+    human can decide which channel owns each one. It never retracts, never
+    merges and never records an outcome."""
+    conn = db_connect()
+    threshold = getattr(args, "threshold", None) or DUP_CONTAINMENT
+    pairs = cross_subject_pairs(conn, threshold)
+    n_user, n_model = (conn.execute(
+        "SELECT count(*) FROM beliefs WHERE subject = ? AND status = 'active'", (s,)
+    ).fetchone()[0] for s in ("user", "user-model"))
+    print(f"{n_user} active 'user' belief(s), {n_model} active 'user-model' belief(s);"
+          f" {len(pairs)} cross-subject pair(s) at containment >= {threshold:.0%}.")
+    if not pairs:
+        print("nothing to resolve.")
+        return 0
+    print("\n'user' = the user STATED it, and it may justify an action."
+          "\n'user-model' = derived, uncalibrated: it shapes tone, never authorizes."
+          "\nA claim belongs in ONE of them. Retract the copy in the wrong channel with"
+          "\n`lore belief retract <id> --reason ...`, or leave both if they really differ.\n")
+    for score, u, m in pairs:
+        print(f"[{score:.0%}]  user [{u[0]}] (conf {u[3]:.2f})  vs  user-model [{m[0]}]"
+              f" (conf {m[3]:.2f})")
+        print(f"    user       : {u[2]}")
+        print(f"    user-model : {m[2]}")
+    print(f"\n{len(pairs)} pair(s). Nothing was changed — this command only reads.")
+    return 0
