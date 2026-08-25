@@ -222,6 +222,20 @@ A disabled stage exits silently rather than failing, and drops its channel from 
 
 LORE also powers [DOXA](https://github.com/docwilde/doxa), a standalone agent terminal (Claude Agent SDK + Textual): `lore_core` runs in-process there — same files, same SQLite store, byte-compatible with this plugin. One codebase, two carriers. The plugin brings LORE to Claude Code; DOXA makes the memory model native, with detachable daemon sessions, belief-aware tooling behind the containment gate, and the STEER/CITE split rendered in the UI. Fixes land once and ship in both.
 
+### `lore_core` as a library
+
+The importable half of this repo installs like anything else, for a consumer that wants the memory model in its own process rather than in Claude Code:
+
+```
+uv add "lore-core @ git+https://github.com/docwilde/LORE@v0.35.1"
+```
+
+Only `lore_core/` is packaged — `bin/`, `hooks/`, `commands/` and `skills/` are plugin assets Claude Code loads by path, not library code. No runtime dependencies: stdlib-only is the promise this page makes, and the empty dependency list is now asserted by a test. No `lore` console script either, because the CLI belongs to the plugin and one machine should not have two of it.
+
+`.claude-plugin/plugin.json` stays the one place the version is written. The build reads it, `lore_core.__version__` reads it, and an installed wheel — which carries no manifest — falls back to its own metadata, built from that same file.
+
+**This changes nothing for plugin users.** `/plugin install lore` copies the same tree and runs the same `bin/lore.py`; nothing on the plugin path reads `pyproject.toml`.
+
 ## Lineage
 
 Curated memory follows the [Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory) pattern: hard caps, a reviewer that proposes but never applies, a snapshot that stays frozen rather than thrashing the prompt cache. The belief layer is [Honcho](https://github.com/plastic-labs/honcho)'s deriver/dreamer/dialectic split, run here on one SQLite file with no standing service.

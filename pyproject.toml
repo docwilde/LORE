@@ -1,0 +1,94 @@
+# Packaging metadata for `lore_core` -- the importable half of this repo.
+#
+# LORE is a Claude Code plugin first: `/plugin install lore` copies this
+# whole tree and runs `bin/lore.py` out of it. That path does not read this
+# file and is unchanged by it. What this file adds is the SECOND carrier --
+# `pip install`/`uv add` of `lore-core` as an ordinary distribution, so a
+# consumer that imports the library (DOXA, whose daemon runs lore_core
+# in-process) can DECLARE the dependency instead of reaching into a plugin
+# checkout on the machine and hoping it is there.
+#
+# Only `lore_core/` is packaged. `bin/`, `hooks/`, `commands/`, `skills/`
+# and `assets/` are plugin assets -- Claude Code loads them from the plugin
+# directory by path, they are not importable library code, and shipping
+# them in a wheel would put files nothing imports on the consumer's
+# sys.path.
+#
+# Still stdlib-only at runtime: `dependencies` is deliberately empty and
+# hatchling is a BUILD requirement, present only while a wheel is made.
+
+[project]
+name = "lore-core"
+description = "The importable core of LORE: Hermes-pattern curated memory, FTS5 session index, and a Honcho-pattern belief store on one SQLite file."
+readme = "README.md"
+# The version is NOT written here. `.claude-plugin/plugin.json` is the
+# single source of truth (it is what Claude Code reads to decide which
+# plugin build is installed), and this file derives from it -- see
+# [tool.hatch.version] below. Two hand-maintained version strings that can
+# disagree is a defect waiting for a release to expose it.
+dynamic = ["version"]
+requires-python = ">=3.11"
+dependencies = []
+# Not an SPDX-listed licence: LORE Noncommercial 1.0 is PolyForm-
+# Noncommercial with an amended "Noncommercial Organizations" section, so
+# it is carried as a LicenseRef, which is exactly what SPDX reserves for a
+# licence that is not on its list. The text itself travels in the wheel via
+# license-files, so nobody has to go and find it.
+license = "LicenseRef-LORE-Noncommercial-1.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Fabian Wilde", email = "fabian.wilde@contiamo.com" }]
+keywords = ["memory", "claude-code", "hermes", "honcho", "belief-store", "skills"]
+classifiers = [
+    # No "License ::" classifier: PEP 639 retired those in favour of the
+    # SPDX expression above, and there was never one that said this.
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Indexing",
+]
+
+[project.urls]
+Homepage = "https://github.com/docwilde/LORE"
+Repository = "https://github.com/docwilde/LORE"
+Changelog = "https://github.com/docwilde/LORE/blob/main/CHANGELOG.md"
+
+# No [project.scripts]. `lore` is the plugin's CLI, invoked as
+# `python3 <plugin>/bin/lore.py` from hooks and commands that resolve it by
+# path; installing a second `lore` binary on PATH from a library dependency
+# would give a machine two entry points that can be different versions.
+
+[build-system]
+# >=1.27 is the first hatchling that speaks PEP 639 (`license` as an SPDX
+# expression, `license-files`); older ones reject the table above.
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+# The version, read out of the plugin manifest at build time. One file
+# declares it; the wheel's metadata and `lore_core.__version__` both derive
+# (see lore_core/version.py for the runtime half of the same rule).
+[tool.hatch.version]
+path = ".claude-plugin/plugin.json"
+pattern = '"version":\s*"(?P<version>[^"]+)"'
+
+[tool.hatch.build.targets.wheel]
+packages = ["lore_core"]
+
+[tool.hatch.build.targets.sdist]
+# plugin.json is in the sdist BECAUSE it is the version source: a wheel
+# built from an unpacked sdist has to be able to read it, and an sdist that
+# cannot rebuild itself is a broken sdist. tests/ travel too, so a
+# downstream packager can run the suite against what they received.
+include = [
+    "/lore_core",
+    "/tests",
+    "/.claude-plugin/plugin.json",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/README.md",
+]
