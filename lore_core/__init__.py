@@ -21,6 +21,11 @@ in deriver.py's docstring):
     pending    staged proposals: list/approve/reject/archive
     context    memory snapshot rendering + SessionStart/refresh/MOTD
 
+Off that graph, importing nothing from the package and imported by
+nothing in it:
+
+    version    which version this copy is, plugin manifest or wheel metadata
+
 This package re-exports every public name from every submodule (see each
 module's own __all__) as the package's public surface -- import from
 `lore_core` directly, or from the specific submodule for a narrower
@@ -64,3 +69,12 @@ __all__ = [
     *_pending.__all__,
     *_context.__all__,
 ]
+
+# Deliberately outside __all__: a dunder is not part of a star-import's
+# surface. It is here so that `lore_core.__version__` answers the way every
+# other package on the machine does -- DOXA's /about reads exactly this,
+# and so does anything else that wants to know which LORE it got without
+# knowing whether it came from a plugin checkout or a wheel.
+from .version import resolve_version as _resolve_version  # noqa: E402
+
+__version__ = _resolve_version()
