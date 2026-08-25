@@ -30,7 +30,7 @@ Show this reference card, formatted as below, nothing else:
 
 **Flow:** sessions end → deriver stages proposals → you triage in `/lore:pending` → dreamer reconciles beliefs. Nothing writes to memory without approval.
 
-**CLI:** `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" <cmd>` — extra: `search`, `session <id>`, `index`, `dream`, `memory add|replace|remove|move|list`, `filemap show|add|replace|remove`.
+**CLI:** `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" <cmd>` — extra: `search`, `session <id>`, `index`, `dream`, `crosscheck` (read-only: `user` vs `user-model` near-duplicate beliefs), `memory add|replace|remove|move|list`, `filemap show|add|replace|remove`.
 **Env knobs:** `LORE_USER_CAP` / `LORE_MEMORY_CAP` (4500/8800), `LORE_FILEMAP_CAP` (4400), `LORE_DIGEST_LAST_N` / `LORE_DIGEST_TOTAL_CAP` (500/250k), `LORE_MEMORY_PROPOSAL_CAP` (3) / `LORE_DUP_CONTAINMENT` (0.60), `LORE_REFRESH_SECS`, `LORE_DEFER_DREAM`, `LORE_BELIEF_DORMANT_DAYS` (45) / `LORE_INCLUDE_DORMANT`, `LORE_NOTIFY`, `LORE_SKIP`.
 **Write gate (0.36.0):** the interactive agent and a human shell write directly; a write arriving from a HOOK or a detached process stages in `pending/` instead, tagged with the context that wrote it. `lore provenance` shows how every entry got in (approved / interactive / derived / unknown for pre-0.36 rows). Advisory, not a boundary — a caller that knows about the gate can forge what it reads; the README says so plainly.
 
