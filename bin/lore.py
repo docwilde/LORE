@@ -621,6 +621,16 @@ def main() -> int:
     sp.add_argument("--cwd")
     sp.set_defaults(fn=cmd_dream)
 
+    # ISSUE #50: read-only. `dream` reconciles WITHIN a subject and writes; this
+    # only looks ACROSS the two user subjects and only prints, because which
+    # channel owns a claim is a judgement a machine must not make.
+    sp = sub.add_parser("crosscheck",
+                        help="read-only report: user vs user-model near-duplicate beliefs")
+    sp.add_argument("--threshold", type=float,
+                    help=f"containment floor (default {DUP_CONTAINMENT:.2f},"
+                         " the same one that suppresses at derive time)")
+    sp.set_defaults(fn=cmd_crosscheck)
+
     sp = sub.add_parser("status", help="memory usage, index and pending counts")
     sp.add_argument("--cwd")
     sp.set_defaults(fn=cmd_status)
