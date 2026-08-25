@@ -8,7 +8,7 @@
   },
   "homepage": "https://github.com/docwilde/lore",
   "repository": "https://github.com/docwilde/lore",
-  "license": "LicenseRef-LORE-Noncommercial-1.0",
+  "license": "AGPL-3.0-only",
   "keywords": [
     "memory",
     "claude-code",

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Focused unit tests for the hardening batch (2026-08-22): secret scrubbing,
 reset refusal, dormant-transition SQL. Stdlib only, like the code under test.
 

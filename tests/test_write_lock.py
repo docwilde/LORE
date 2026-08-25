@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """The dreamer must not hold the WAL writer lock across its model call.
 
 WAL admits one writer at a time, and sqlite3 opens a write transaction on any

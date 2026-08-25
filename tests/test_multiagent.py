@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Focused unit tests for the multi-agent batch (2026-08-22): per-agent
 identity threading (job dict -> proposal json), snapshot scope filtering,
 live incremental indexing. Stdlib only, like the code under test.

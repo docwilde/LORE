@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Regression tests for issue #40 (fixed 2026-08-24): project memory and
 conclusions were attributed by cwd, never by subject -- a fact learned about
 repo A while sitting in repo B was written into B's memory, injected into

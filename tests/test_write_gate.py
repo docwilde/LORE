@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Tests for the write gate + provenance ledger (issue #43, 0.36.0).
 
 The claim under test: a curated-memory / belief / filemap write arriving from

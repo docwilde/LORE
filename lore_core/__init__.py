@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """lore_core -- the importable core of lore's Hermes-pattern memory.
 
 Extracted from the monolithic bin/lore.py (Phase 1 slice 1 of the lore-tui

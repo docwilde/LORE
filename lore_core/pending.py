@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Staged proposals: pending/*.json written by the deriver (memory, filemap
 or skill additions/updates awaiting approval), and the `lore pending`/
 `lore approve`/`lore reject` commands that list, cluster, apply and archive
