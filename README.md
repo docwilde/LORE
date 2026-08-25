@@ -59,7 +59,7 @@ Other agent-memory systems — Mem0, Letta, Zep, [Honcho](https://github.com/pla
 
 Everything runs as a plain CLI too — `python3 <plugin>/bin/lore.py --help`, stdlib only:
 
-`inject` · `snapshot` · `memory` · `filemap` · `search` · `session` · `index` · `review` · `backfill` · `pending` · `approve` · `reject` · `belief` · `ask` · `outcome` · `audit` · `consult` · `stats` · `dream` · `status` · `motd` · `statusline` · `provenance` · `config` · `doctor` · `teardown` · `reset`
+`inject` · `snapshot` · `memory` · `filemap` · `search` · `session` · `index` · `review` · `backfill` · `pending` · `approve` · `reject` · `belief` · `ask` · `outcome` · `audit` · `consult` · `stats` · `dream` · `crosscheck` · `status` · `motd` · `statusline` · `provenance` · `config` · `doctor` · `teardown` · `reset`
 
 ## How it works
 
@@ -132,6 +132,8 @@ The deriver writes beliefs straight to SQLite. Gating each one would gate data n
 - **World beliefs** — projects, systems, environment — reach the agent only on demand: `/lore:ask`, or `lore consult` at act time (opt in with `LORE_CONSULT=1`). Consult splits results into **STEER** (≥3 rows in the outcomes ledger, may shape the decision) and **CITE ONLY** (deriver-claimed — mention, never follow).
 - **User-model beliefs** (`subject: user-model`) ride into the snapshot openly, labeled uncalibrated. They shape tone and approach, never authorize an action, and stamp `last_referenced` so the influence stays auditable.
 
+**`user` and `user-model` are two channels, not two boxes for one claim** (0.38.0, issue #50). A preference the user **stated** is a fact and belongs in `user`, where a later session may act on it; a pattern the reviewer **inferred** from behaviour belongs in `user-model`, where it shapes tone and authorizes nothing. The deriver prompt now says exactly that, and a conclusion whose content the other channel already carries is dropped before it is written — asymmetrically: an inference already covered by a stated fact goes, a stated fact already covered by an inference stays, because stranding a stated preference in the uncalibrated channel is the failure the split exists to prevent. `lore crosscheck` lists whatever pairs a store already accumulated, read-only, for a human to resolve.
+
 LORE **measures** confidence instead of asserting it: `lore stats` prints per-bucket empirical precision from the outcomes ledger, and shouts UNCALIBRATED below 100 outcomes.
 
 **The cost, plainly.** A belief goes live the moment the deriver writes it; no human sees it first. Beliefs untouched for 45 days drop to dormant (`LORE_BELIEF_DORMANT_DAYS`; confidence ≥0.95 exempt) and two recorded contradictions retire one — but nothing re-verifies a claim that keeps getting referenced. A claim true when written can sit there indefinitely, and `/lore:ask` will cite it. Read the store yourself now and then:
@@ -143,6 +145,7 @@ lore belief show 42               # one belief, its evidence trail, its history
 lore belief retract 42            # remove one that has gone stale
 lore consult "deploy process"     # STEER if calibrated, else CITE ONLY
 lore dream --dry-run              # what the reconciler would merge, spending nothing
+lore crosscheck                   # user vs user-model near-duplicates, read-only
 ```
 
 ### The write gate: who is allowed to write directly
@@ -222,6 +225,8 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_REVIEW_MIN_MESSAGES` | 3 | skip review below this many user messages |
 | `LORE_DIGEST_LAST_N` | 500 | newest messages considered for the digest |
 | `LORE_DIGEST_TOTAL_CAP` | 250000 | chars kept for the whole digest |
+| `LORE_MEMORY_PROPOSAL_CAP` | 3 | memory proposals one review may stage — the ceiling the prompt states *and* staging enforces |
+| `LORE_DUP_CONTAINMENT` | 0.60 | drop a proposal whose tokens an existing entry in the same scope already carries by this fraction (a `replace` that matches a live entry is exempt) |
 | `LORE_CLAUDE_BIN` | `which claude` | claude binary for the worker |
 | `LORE_SKILLS_DIR` | `~/.claude/skills` | where approved skills install |
 | `LORE_REFRESH_ON_CHANGE` | `1` | re-inject the snapshot the prompt after its content changes; `0` opts out |
