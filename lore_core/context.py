@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Tier 1 + delta view: the memory snapshot injected at SessionStart/refresh
 (build_context, shared verbatim by cmd_inject, cmd_snapshot and cmd_refresh),
 the SessionStart MOTD (build_motd / cmd_motd) and its ASCII banner, and the

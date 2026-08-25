@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Belief store: Honcho-pattern queryable claims, distinct from curated core
 memory. belief_insert/supersede/subject own the beliefs table; the outcomes
 ledger (record_outcome, outcome_counts, calibrated_confidence) is the ground

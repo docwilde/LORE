@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Write gate + provenance ledger (ISSUE #43).
 
 WHY. LORE's premise is that everything steering the agent is either

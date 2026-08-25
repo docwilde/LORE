@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
 """lore — Hermes-pattern memory for Claude Code.
 
 Three tiers, after the Hermes Agent memory architecture:

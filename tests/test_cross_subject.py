@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """ISSUE #50 -- the deriver wrote the same claim to both `user` and `user-model`.
 
 Measured on a live store (641 active beliefs): 42 active `user`, 84 active

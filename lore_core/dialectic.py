@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Dialectic: `lore ask` and `lore consult` -- the no-LLM evidence-gathering
 commands a reasoning agent (main session or Agent-tool subagent) calls
 before answering a question or making a consequential decision. Neither

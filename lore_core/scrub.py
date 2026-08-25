@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Secret scrubbing -- the ingest choke point.
 
 Every place a transcript or a model's own output is about to be written to

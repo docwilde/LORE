@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Project file map: where the load-bearing files live. One `path — purpose`
 line per entry, per project slug, at ROOT/filemap/<slug>.md, plus the
 `lore filemap` CLI command.
