@@ -75,7 +75,8 @@ Everything runs as a plain CLI too — `python3 <plugin>/bin/lore.py --help`, st
 
 A project means the **git repo root**, so a session started in `repo/viz` shares the repo's memory instead of forking an invisible second scope.
 
-A project-scoped fact is about the repo it was learned in by default, but not always — reviewing a PR against another repo, or discussing a plugin from inside the project that consumes it, produces facts ABOUT a different project than the one the session ran in. The reviewer can name that project explicitly (rare, tightly instructed); a resolvable name retargets the write and shows as a cross-project note in `/lore:pending` and on approval, an unresolvable one stays filed under the session's own project — never a guess — with the ambiguity surfaced the same way. `lore memory move --scope project --match "<substring>" --to <slug>` relocates an already-mis-scoped entry after the fact, cap-enforced on the destination like any other write.
+- A project-scoped fact defaults to the repo it was learned in. When a session is clearly about a different repo (reviewing another repo's PR, discussing a plugin from its consumer), the reviewer can name that project explicitly; a resolvable name retargets the write and shows as a cross-project note in `/lore:pending`. An unresolvable name stays filed under the session's own project rather than guessing, flagged the same way.
+- `lore memory move --scope project --match "<substring>" --to <slug>` relocates an already-mis-scoped entry, cap-enforced on the destination like any other write.
 
 The snapshot injects at `SessionStart`, after `/clear` and compaction, and again whenever its content changes — `UserPromptSubmit` hashes it each prompt and re-sends only on a difference (`LORE_REFRESH_ON_CHANGE=0` opts out). It carries both memory scopes, a one-line file-map pointer, and the top user-model beliefs as a labeled interaction-model section.
 
@@ -127,16 +128,16 @@ Four rules keep the loop honest:
 
 ### The belief gate sits on read, not on write
 
-The deriver writes beliefs straight to SQLite. Gating each one would gate data nothing reads yet, so the gate moves to the read side:
+The deriver writes beliefs straight to SQLite, ungated. The gate sits on the read side instead:
 
 - **World beliefs** — projects, systems, environment — reach the agent only on demand: `/lore:ask`, or `lore consult` at act time (opt in with `LORE_CONSULT=1`). Consult splits results into **STEER** (≥3 rows in the outcomes ledger, may shape the decision) and **CITE ONLY** (deriver-claimed — mention, never follow).
 - **User-model beliefs** (`subject: user-model`) ride into the snapshot openly, labeled uncalibrated. They shape tone and approach, never authorize an action, and stamp `last_referenced` so the influence stays auditable.
 
-**`user` and `user-model` are two channels, not two boxes for one claim** (0.38.0, issue #50). A preference the user **stated** is a fact and belongs in `user`, where a later session may act on it; a pattern the reviewer **inferred** from behaviour belongs in `user-model`, where it shapes tone and authorizes nothing. The deriver prompt now says exactly that, and a conclusion whose content the other channel already carries is dropped before it is written — asymmetrically: an inference already covered by a stated fact goes, a stated fact already covered by an inference stays, because stranding a stated preference in the uncalibrated channel is the failure the split exists to prevent. `lore crosscheck` lists whatever pairs a store already accumulated, read-only, for a human to resolve.
+**`user` and `user-model` are separate channels.** A preference the user stated goes to `user`, where a later session may act on it; a pattern the reviewer inferred from behaviour goes to `user-model`, which authorizes nothing. A conclusion already covered by the other channel is dropped before it is written. Rationale, the channel rule, and the containment check behind the drop logic: [`docs/user-model-channel-separation.md`](docs/user-model-channel-separation.md). `lore crosscheck` lists cross-channel near-duplicate pairs, read-only, for a human to resolve.
 
-LORE **measures** confidence instead of asserting it: `lore stats` prints per-bucket empirical precision from the outcomes ledger, and shouts UNCALIBRATED below 100 outcomes.
+LORE measures confidence instead of asserting it: `lore stats` prints per-bucket empirical precision from the outcomes ledger, and shouts UNCALIBRATED below 100 outcomes.
 
-**The cost, plainly.** A belief goes live the moment the deriver writes it; no human sees it first. Beliefs untouched for 45 days drop to dormant (`LORE_BELIEF_DORMANT_DAYS`; confidence ≥0.95 exempt) and two recorded contradictions retire one — but nothing re-verifies a claim that keeps getting referenced. A claim true when written can sit there indefinitely, and `/lore:ask` will cite it. Read the store yourself now and then:
+**The cost, plainly.** A belief goes live the moment the deriver writes it; no human sees it first. Beliefs unreferenced for 45 days go dormant (`LORE_BELIEF_DORMANT_DAYS`; confidence ≥0.95 exempt) and two recorded contradictions retire one — but nothing re-verifies a claim that keeps getting cited. Read the store yourself now and then:
 
 ```sh
 lore belief list                  # everything active, newest first
@@ -150,51 +151,39 @@ lore crosscheck                   # user vs user-model near-duplicates, read-onl
 
 ### The write gate: who is allowed to write directly
 
-Curated memory and beliefs are injected into the model's context, which makes
-them the highest-trust surface LORE has — and until 0.36.0 anything that could
-run a shell command could write there. Claude Code hooks run arbitrary shell by
-design, and a plugin installs hooks by adding a marketplace entry, so the
-approval gate guarded one entrance to a room with several doors (issue #43).
-
-Every CLI write (`memory add|replace|remove|move`, `belief add|retract`,
-`filemap add|replace|remove`) is now classified by who is calling:
+Curated memory and beliefs are injected straight into the model's context —
+LORE's highest-trust surface. Every CLI write (`memory add|replace|remove|move`,
+`belief add|retract`, `filemap add|replace|remove`) is classified by who is
+calling. Rationale, the measured classification signals, and the gate's
+limits: [`docs/write-gate.md`](docs/write-gate.md).
 
 | Caller | How it is recognised | What happens |
 |---|---|---|
 | **interactive** — the agent's own Bash tool call | `AI_AGENT=claude-code_<v>_agent` | applies immediately (the intended path) |
 | **terminal** — a human in a shell | no Claude Code in the env, stdin is a tty | applies immediately |
-| **hook** — a command Claude Code ran as a hook | `AI_AGENT=..._harness`, or `CLAUDE_PROJECT_DIR` set without the agent marker, or a socket on stdin | **stages in `pending/`** |
+| **hook** — a command Claude Code ran as a hook | `AI_AGENT=..._harness`, or `CLAUDE_PROJECT_DIR` set without the agent marker | **stages in `pending/`** |
 | **detached** — cron, a daemon, a script | no Claude Code, no tty | **stages in `pending/`** |
 
-A staged write is not lost and not refused: it lands in the same `pending/`
-pile as every reviewer proposal and applies with `/lore:approve`. That is the
-premise made whole — staging becomes the *only* way in for untrusted callers,
-and `/lore:pending` marks these rows with the context that wrote them.
+A staged write lands in the same `pending/` pile as every reviewer proposal —
+applies with `/lore:approve`, archives unapplied with `/lore:reject`.
+`/lore:pending` marks these rows with the context that wrote them.
 
-**The gate is advisory, and calling it anything else would be dishonest.**
-Every signal it reads lives in the caller's own environment, and a hook runs as
-the same user with a full shell: one `AI_AGENT=claude-code_x_agent` in front of
-the command forges "interactive", as does `LORE_WRITE_GATE=off`. What the gate
-stops is the whole class of writes that is not *trying* to evade it — a
-plugin's hook, a third-party SessionEnd script, a cron job. A real boundary
-would need a secret the caller cannot read; Claude Code hands hooks and tool
-calls the same environment, so there is nothing of the sort to key on today.
-It also does not separate a **skill** or a **subagent** from the interactive
-agent: those are the agent's own tool calls and carry the same marker.
+**The gate is advisory** — forgeable via `AI_AGENT=..._agent` or
+`LORE_WRITE_GATE=off` — and does not distinguish a skill or a subagent from
+the interactive agent, since those carry the same marker. It stops writers
+not actively trying to evade it: a plugin's hook, a third-party script, a
+cron job.
 
-**Provenance is the half that holds regardless.** Every entry records how it
-got in — `approved`, `interactive`, `terminal`, `derived`, `dream`, or the
-untrusted class that wrote it — and the snapshot carries the counts per scope:
+**Provenance holds regardless.** Every entry records how it got in —
+`approved`, `interactive`, `terminal`, `derived`, `dream`, or `unknown` for
+anything that predates 0.36.0 — and the snapshot carries the counts per scope:
 
 ```
 ## Project memory (3120/8800 chars (35%)) — my-repo — provenance: 12 approved, 6 interactive, 9 unknown
 ```
 
-`lore provenance` lists it per entry; beliefs gain `writer`/`via` columns and
-show `via derived` / `via approved` in `lore belief list|show`. Entries that
-predate 0.36.0 read as **unknown** and are never back-filled with a guess:
-nothing in the store recorded who wrote them, and a retroactive label would be
-a fabrication dressed as an audit trail.
+`lore provenance` lists it per entry; beliefs show `via derived` /
+`via approved` in `lore belief list|show`.
 
 ### Where the agent looks
 
@@ -267,7 +256,7 @@ A disabled stage exits silently rather than failing, and drops its channel from 
 
 - **Indexing and search never leave the machine.** No embeddings, no API calls, no network.
 - **Review sends a digest to the same endpoint the session already used** — the Anthropic API via the `claude` CLI. LORE scrubs likely secrets (API keys, bearer tokens, JWTs, connection strings, PEM blocks) on the way in *and* on the way out, before anything reaches disk or the network. Logs stay in `LORE_ROOT/logs/`.
-- **Beliefs stay uncurated and ungated on write *by the deriver*.** No human approves one before it exists. This is the system's largest hallucination surface; the read-side gate mitigates it, and does not fix it. Since 0.36.0 a belief written through the *CLI* from a hook or detached context stages for approval instead (see [The write gate](#the-write-gate-who-is-allowed-to-write-directly)) — that gate is advisory, and the README says exactly what it does not stop.
+- **Beliefs stay uncurated and ungated on write *by the deriver*** — LORE's largest hallucination surface. The read-side gate (above) mitigates it, not fixes it. A belief written through the *CLI* from a hook or detached context stages for approval instead — see [The write gate](#the-write-gate-who-is-allowed-to-write-directly), which is advisory.
 - **`/lore:setup` edits `~/.claude/settings.json`** — auto-memory, the permission allowlist, the `"env"` block — each change behind its own confirmation, shown before it applies. `lore teardown` reverses all of it and exports curated memory back to the built-in format.
 - **The transcript format belongs to Claude Code** and can change between versions. The indexer parses defensively: a shape change degrades search, never crashes a hook.
 - **Cost:** one haiku call per qualifying session end, plus one sonnet call when beliefs need reconciling.
