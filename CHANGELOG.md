@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Relicensed from the LORE Noncommercial License 1.0 to **AGPL-3.0-only**, dual with a commercial option. The noncommercial terms were not open source by the OSI definition, which blocked distro packaging and deterred contributors; AGPL keeps a fork's source open, including when it is only offered over a network.
+- `LICENSE-COMMERCIAL.md` states the commercial option — an offer to negotiate, not a licence. `TRADEMARK.md` reserves the LORE name and mark, which the AGPL grant does not cover.
+- Source files carry `SPDX-License-Identifier: AGPL-3.0-only`; `pyproject.toml` and `.claude-plugin/plugin.json` declare it.
+- Contact address is now `docwilde@proton.me`, replacing a work address that had no business on a personal project being commercially licensed.
+
 ## 0.38.0 — 2026-08-25
 - Fix (#50): the deriver could write the same claim to both `user` and `user-model`, blurring a stated fact with an uncalibrated inference. The deriver prompt now states the channel rule explicitly (stated → `user`, inferred → `user-model`); the two subjects stay separate. Rationale and the measurement behind it: `docs/user-model-channel-separation.md`.
 - Reuses #48's containment check (threshold 0.60, `LORE_DUP_CONTAINMENT`) at the belief write site: a `user-model` claim already carried by a `user` fact is dropped; the reverse is kept and reported. Validated by replay against 3528 live cross-subject pairs — zero false positives.

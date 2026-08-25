@@ -9,9 +9,7 @@ commercial licence is available from the copyright holder.
 This is an offer to discuss and negotiate terms, not a licence in itself. No
 commercial rights exist until a separate written agreement is signed.
 
-To start that conversation, open an issue at
-[github.com/docwilde/LORE/issues](https://github.com/docwilde/LORE/issues)
-or reach the maintainer via the contact on the
-[GitHub profile](https://github.com/docwilde).
+To start that conversation, write to <docwilde@proton.me>, or open an issue
+at [github.com/docwilde/LORE/issues](https://github.com/docwilde/LORE/issues).
 
 Copyright (c) 2026 Fabian Wilde.

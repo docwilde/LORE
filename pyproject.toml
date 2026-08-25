@@ -36,7 +36,7 @@ dependencies = []
 # distribution is offered under, which is AGPL-3.0-only.
 license = "AGPL-3.0-only"
 license-files = ["LICENSE", "LICENSE-COMMERCIAL.md", "TRADEMARK.md"]
-authors = [{ name = "Fabian Wilde", email = "fabian.wilde@contiamo.com" }]
+authors = [{ name = "Fabian Wilde", email = "docwilde@proton.me" }]
 keywords = ["memory", "claude-code", "hermes", "honcho", "belief-store", "skills"]
 classifiers = [
     # No "License ::" classifier: PEP 639 retired those in favour of the
