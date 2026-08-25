@@ -644,6 +644,12 @@ def main() -> int:
     cp.add_argument("var")
     cp.set_defaults(fn=cmd_config, ccmd="unset")
 
+    sp = sub.add_parser(
+        "provenance",
+        help="who wrote each curated entry — approved, in-session, or merely written")
+    sp.add_argument("--cwd")
+    sp.set_defaults(fn=cmd_provenance)
+
     sp = sub.add_parser("doctor", help="environment checks")
     sp.set_defaults(fn=cmd_doctor)
 

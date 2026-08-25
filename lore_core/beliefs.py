@@ -23,6 +23,7 @@ from .config import (
     project_slug,
     utcnow,
 )
+from .gate import gate_write, writer_class
 from .store import db_connect, fts_expr
 
 
@@ -60,14 +61,19 @@ def belief_subject(scope: str, slug: str) -> str:
 def belief_insert(
     conn: sqlite3.Connection, subject: str, claim: str, confidence: float,
     session_id: str | None, project: str | None, note: str | None,
-    exclude_ids: "set[int] | None" = None,
+    exclude_ids: "set[int] | None" = None, *, via: str = "direct",
 ) -> tuple[int, bool]:
     """Insert or reinforce a belief; returns (id, created). An exact restatement
     of an active claim adds evidence and lifts confidence instead of duplicating.
     exclude_ids: never reinforce these ids -- the dreamer's merge passes the two
     source beliefs, because a merged claim identical to a source's text would
     otherwise reuse that source's id and make the caller supersede it by itself,
-    dropping the fact entirely (both sources terminal, no survivor)."""
+    dropping the fact entirely (both sources terminal, no survivor).
+    via (ISSUE #43): how this belief got in -- "derived" (deriver), "dream"
+    (reconciler), "direct" (a trusted CLI write), "approved" (a staged
+    proposal the user applied). Stored alongside the detected writer class;
+    reinforcement of an existing belief leaves both untouched, since the
+    claim's origin is where it FIRST entered the store."""
     claim = one_line(claim)
     confidence = min(max(confidence, 0.0), 1.0)
     now = utcnow()
@@ -86,9 +92,9 @@ def belief_insert(
         )
     else:
         cur = conn.execute(
-            "INSERT INTO beliefs(subject, claim, confidence, status, created, updated)"
-            " VALUES(?,?,?,'active',?,?)",
-            (subject, claim, confidence, now, now),
+            "INSERT INTO beliefs(subject, claim, confidence, status, created, updated,"
+            " writer, via) VALUES(?,?,?,'active',?,?,?,?)",
+            (subject, claim, confidence, now, now, writer_class(), via),
         )
         bid, created = cur.lastrowid, True
         conn.execute("INSERT INTO belief_fts(belief_id, claim) VALUES(?,?)", (bid, claim))
@@ -120,7 +126,13 @@ def format_belief(conn: sqlite3.Connection, row, with_evidence: bool = False) ->
     n_ev = conn.execute(
         "SELECT count(*) FROM belief_evidence WHERE belief_id = ?", (bid,)
     ).fetchone()[0]
-    out = f"[{bid}] ({subject}, conf {conf:.2f}, {status}, {n_ev} evidence) {claim}"
+    # ISSUE #43: show provenance when the row has it. Beliefs written before
+    # 0.36.0 have NULL via/writer and render exactly as they always did --
+    # no retroactive label for something the store never recorded.
+    prov = conn.execute("SELECT via, writer FROM beliefs WHERE id = ?", (bid,)).fetchone()
+    via = (prov[0] if prov else None) or ""
+    tag = f", via {via}" if via else ""
+    out = f"[{bid}] ({subject}, conf {conf:.2f}, {status}, {n_ev} evidence{tag}) {claim}"
     if with_evidence:
         for sid, proj, note, created in conn.execute(
             "SELECT session_id, project, note, created FROM belief_evidence"
@@ -139,13 +151,29 @@ def cmd_belief(args) -> int:
     slug = project_slug(getattr(args, "cwd", None) or os.getcwd())
     if args.bcmd == "add":
         subject = belief_subject(args.subject, slug) if args.subject in ("user", "project") else args.subject
+        # ISSUE #43 write gate: beliefs feed /lore:ask, consult and the
+        # interaction-model section of the snapshot, so a CLI belief write
+        # from a hook/detached context stages for approval. The DERIVER's own
+        # writes go through belief_insert directly and are untouched by this
+        # -- they are the outcome-calibrated half of the premise, not the
+        # unapproved half.
+        staged = gate_write({"kind": "belief", "action": "add", "subject": args.subject,
+                             "claim": " ".join(args.claim), "confidence": args.confidence,
+                             "evidence": args.evidence or "", "project": slug})
+        if staged is not None:
+            return staged
         bid, created = belief_insert(
-            conn, subject, " ".join(args.claim), args.confidence, None, slug, args.evidence
+            conn, subject, " ".join(args.claim), args.confidence, None, slug,
+            args.evidence, via="direct",
         )
         conn.commit()
         print(f"belief {bid} {'created' if created else 'reinforced'}.")
         return 0
     if args.bcmd == "retract":
+        staged = gate_write({"kind": "belief", "action": "retract", "id": args.id,
+                             "reason": args.reason or "", "project": slug})
+        if staged is not None:
+            return staged
         belief_supersede(conn, args.id, None, args.reason or "manually retracted")
         conn.execute("UPDATE beliefs SET status = 'retracted' WHERE id = ?", (args.id,))
         conn.commit()

@@ -9,9 +9,11 @@ import json
 import os
 import sys
 
+from .beliefs import belief_insert, belief_subject, belief_supersede
 from .config import ROOT, SKILLS_DIR, project_slug, utcnow
-from .filemap import filemap_add
-from .memory import memory_add, memory_replace
+from .filemap import filemap_add, filemap_remove, filemap_replace
+from .memory import memory_add, memory_move, memory_remove, memory_replace
+from .store import db_connect
 
 
 __all__ = [
@@ -92,6 +94,8 @@ def _cluster_pending(items) -> int:
     for pid, it in skills:
         if it.get("kind") == "filemap":
             print(f"{pid}  filemap  {it.get('path')}")
+        elif it.get("kind") == "belief":
+            print(f"{pid}  belief   {it.get('claim') or 'id ' + str(it.get('id'))}")
         else:
             print(f"{pid}  skill/{it.get('action', 'add')}  {it.get('name')}")
     print("\nbulk ops take ids: lore approve <id...>   lore reject <id...>")
@@ -114,14 +118,22 @@ def cmd_pending(args) -> int:
             print(f"{pid}  memory/{item['scope']}  {act}")
             print(f"    {item['text']}")
         elif item.get("kind") == "filemap":
-            print(f"{pid}  filemap  add")
+            print(f"{pid}  filemap  {item.get('action') or 'add'}")
             print(f"    {item.get('path')} — {item.get('purpose')}")
+        elif item.get("kind") == "belief":
+            print(f"{pid}  belief/{item.get('subject', '?')}  {item.get('action', 'add')}")
+            print(f"    {item.get('claim') or 'id ' + str(item.get('id'))}")
         else:
             print(f"{pid}  skill/{item.get('action', 'add')}  {item.get('name')}")
             print(f"    {item.get('description')}")
         by = item.get("derived_by")
         print(f"    from session {item.get('session_id')} [{item.get('project')}]"
               + (f" [by {by}]" if by else ""))
+        # ISSUE #43: a proposal that came from the write gate says which
+        # untrusted context wrote it, and on what evidence.
+        if item.get("writer"):
+            print(f"    !! staged by the write gate: {item['writer']} context"
+                  f" ({item.get('writer_evidence', 'no evidence recorded')})")
         note = cross_project_note(item)
         if note:
             print(f"    !! {note}")
@@ -149,16 +161,60 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
         # filemap_add updates the row in place when the path is already
         # mapped (a re-proposal that slipped past staging dedupe).
         slug = item.get("project") or project_slug(os.getcwd())
+        # ISSUE #43: a gated CLI write stages its own action; a deriver
+        # proposal carries none, and "add" stays its meaning -- so every
+        # proposal written before 0.36.0 applies exactly as it always did.
+        action = item.get("action") or "add"
+        if action == "replace" and item.get("match"):
+            return filemap_replace(slug, str(item["match"]), str(item.get("path") or ""),
+                                   str(item.get("purpose") or ""), via="approved")
+        if action == "remove":
+            return filemap_remove(slug, str(item.get("match") or ""))
         return filemap_add(slug, str(item.get("path") or ""),
-                           str(item.get("purpose") or ""))
+                           str(item.get("purpose") or ""), via="approved")
+    if item.get("kind") == "belief":
+        # ISSUE #43: a belief write that arrived from an untrusted context,
+        # applied only now that a human said so.
+        conn = db_connect()
+        slug = item.get("project") or project_slug(os.getcwd())
+        if item.get("action") == "retract":
+            bid = item.get("id")
+            if not isinstance(bid, int):
+                return f"belief retraction has no usable id ({bid!r})"
+            if not conn.execute("SELECT 1 FROM beliefs WHERE id = ?", (bid,)).fetchone():
+                return f"no belief {bid} — nothing to retract"
+            belief_supersede(conn, bid, None, str(item.get("reason") or "manually retracted"))
+            conn.execute("UPDATE beliefs SET status = 'retracted' WHERE id = ?", (bid,))
+            conn.commit()
+            return None
+        claim = str(item.get("claim") or "")
+        if not claim.strip():
+            return "belief proposal has no claim"
+        raw_subject = str(item.get("subject") or "project")
+        subject = (belief_subject(raw_subject, slug)
+                   if raw_subject in ("user", "project") else raw_subject)
+        try:
+            confidence = float(item.get("confidence", 0.8))
+        except (TypeError, ValueError):
+            confidence = 0.8
+        belief_insert(conn, subject, claim, confidence, item.get("session_id"), slug,
+                      str(item.get("evidence") or "") or None, via="approved")
+        conn.commit()
+        return None
     if item.get("kind") == "memory":
         slug = item.get("project") or project_slug(os.getcwd())
-        if item.get("action") == "replace" and item.get("match"):
-            err = memory_replace(item["scope"], slug, item["match"], item["text"])
+        action = item.get("action")
+        if action == "remove" and item.get("match"):
+            return memory_remove(item["scope"], slug, item["match"])
+        if action == "move" and item.get("match") and item.get("to"):
+            return memory_move(item["scope"], slug, item["match"], str(item["to"]))
+        if action == "replace" and item.get("match"):
+            err = memory_replace(item["scope"], slug, item["match"], item["text"],
+                                 via="approved")
             if err and err.startswith("no entry matches"):
-                err = memory_add(item["scope"], slug, item["text"])
+                err = memory_add(item["scope"], slug, item["text"], via="approved")
         else:
-            err = memory_add(item["scope"], slug, item["text"])
+            err = memory_add(item["scope"], slug, item["text"], via="approved")
         return err
     target = SKILLS_DIR / item["name"] / "SKILL.md"
     if item.get("action") == "retire":

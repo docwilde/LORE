@@ -99,6 +99,19 @@ def db_connect() -> sqlite3.Connection:
         conn.execute("UPDATE beliefs SET last_referenced = updated WHERE last_referenced IS NULL")
     except sqlite3.OperationalError:
         pass  # column already present
+    # PROVENANCE migration (ISSUE #43, 0.36.0): `writer` is the detected
+    # caller class at insert time (interactive / terminal / hook / detached),
+    # `via` is how the belief got in (derived / dream / direct / approved).
+    # Same ALTER-inside-except shape as the migration above, and deliberately
+    # NOT back-filled: a belief that predates these columns stays NULL and
+    # reads as "unknown", because nothing in the store records what wrote it
+    # and a retroactive label would be a guess dressed as a fact. Nothing
+    # reads these columns for behavior, so old rows keep working untouched.
+    for _col in ("writer", "via"):
+        try:
+            conn.execute(f"ALTER TABLE beliefs ADD COLUMN {_col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already present
     conn.execute(
         "CREATE TABLE IF NOT EXISTS belief_evidence("
         "belief_id INTEGER, session_id TEXT, project TEXT, note TEXT, created TEXT)"

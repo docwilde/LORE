@@ -1203,7 +1203,7 @@ def derive_conclusions(data: dict, slug: str, session_id: str) -> int:
                       f" known project -- filed under {slug}")
         belief_insert(
             conn, belief_subject(scope, target_slug), claim, confidence,
-            session_id, target_slug, evidence or None,
+            session_id, target_slug, evidence or None, via="derived",
         )
         derived += 1
     conn.commit()
