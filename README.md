@@ -59,7 +59,7 @@ Other agent-memory systems — Mem0, Letta, Zep, [Honcho](https://github.com/pla
 
 Everything runs as a plain CLI too — `python3 <plugin>/bin/lore.py --help`, stdlib only:
 
-`inject` · `snapshot` · `memory` · `filemap` · `search` · `session` · `index` · `review` · `backfill` · `pending` · `approve` · `reject` · `belief` · `ask` · `outcome` · `audit` · `consult` · `stats` · `dream` · `status` · `motd` · `statusline` · `config` · `doctor` · `teardown` · `reset`
+`inject` · `snapshot` · `memory` · `filemap` · `search` · `session` · `index` · `review` · `backfill` · `pending` · `approve` · `reject` · `belief` · `ask` · `outcome` · `audit` · `consult` · `stats` · `dream` · `status` · `motd` · `statusline` · `provenance` · `config` · `doctor` · `teardown` · `reset`
 
 ## How it works
 
@@ -145,6 +145,54 @@ lore consult "deploy process"     # STEER if calibrated, else CITE ONLY
 lore dream --dry-run              # what the reconciler would merge, spending nothing
 ```
 
+### The write gate: who is allowed to write directly
+
+Curated memory and beliefs are injected into the model's context, which makes
+them the highest-trust surface LORE has — and until 0.36.0 anything that could
+run a shell command could write there. Claude Code hooks run arbitrary shell by
+design, and a plugin installs hooks by adding a marketplace entry, so the
+approval gate guarded one entrance to a room with several doors (issue #43).
+
+Every CLI write (`memory add|replace|remove|move`, `belief add|retract`,
+`filemap add|replace|remove`) is now classified by who is calling:
+
+| Caller | How it is recognised | What happens |
+|---|---|---|
+| **interactive** — the agent's own Bash tool call | `AI_AGENT=claude-code_<v>_agent` | applies immediately (the intended path) |
+| **terminal** — a human in a shell | no Claude Code in the env, stdin is a tty | applies immediately |
+| **hook** — a command Claude Code ran as a hook | `AI_AGENT=..._harness`, or `CLAUDE_PROJECT_DIR` set without the agent marker, or a socket on stdin | **stages in `pending/`** |
+| **detached** — cron, a daemon, a script | no Claude Code, no tty | **stages in `pending/`** |
+
+A staged write is not lost and not refused: it lands in the same `pending/`
+pile as every reviewer proposal and applies with `/lore:approve`. That is the
+premise made whole — staging becomes the *only* way in for untrusted callers,
+and `/lore:pending` marks these rows with the context that wrote them.
+
+**The gate is advisory, and calling it anything else would be dishonest.**
+Every signal it reads lives in the caller's own environment, and a hook runs as
+the same user with a full shell: one `AI_AGENT=claude-code_x_agent` in front of
+the command forges "interactive", as does `LORE_WRITE_GATE=off`. What the gate
+stops is the whole class of writes that is not *trying* to evade it — a
+plugin's hook, a third-party SessionEnd script, a cron job. A real boundary
+would need a secret the caller cannot read; Claude Code hands hooks and tool
+calls the same environment, so there is nothing of the sort to key on today.
+It also does not separate a **skill** or a **subagent** from the interactive
+agent: those are the agent's own tool calls and carry the same marker.
+
+**Provenance is the half that holds regardless.** Every entry records how it
+got in — `approved`, `interactive`, `terminal`, `derived`, `dream`, or the
+untrusted class that wrote it — and the snapshot carries the counts per scope:
+
+```
+## Project memory (3120/8800 chars (35%)) — my-repo — provenance: 12 approved, 6 interactive, 9 unknown
+```
+
+`lore provenance` lists it per entry; beliefs gain `writer`/`via` columns and
+show `via derived` / `via approved` in `lore belief list|show`. Entries that
+predate 0.36.0 read as **unknown** and are never back-filled with a guess:
+nothing in the store recorded who wrote them, and a retroactive label would be
+a fabrication dressed as an audit trail.
+
 ### Where the agent looks
 
 ```mermaid
@@ -196,6 +244,7 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_DISABLE_PRECOMPACT` | unset | PreCompact review off on its own; SessionEnd keeps running |
 | `LORE_DISABLE_BELIEFS` | unset | belief store off; the deriver prompt drops the conclusions channel, `ask` serves memory + search |
 | `LORE_DISABLE_SKILLS` | unset | skillification off; skill proposals drop unstaged with a log line |
+| `LORE_WRITE_GATE` | `on` | `off` lets non-interactive callers write directly again (pre-0.36 behaviour). An escape hatch for your own automation — advisory, not a control: anything able to set it can equally forge the signals the gate reads |
 | `LORE_SKIP` | unset | any value no-ops every hook — the master off-switch above all stage switches |
 
 A disabled stage exits silently rather than failing, and drops its channel from the deriver prompt entirely — a model told about a channel will fill it.
@@ -213,7 +262,7 @@ A disabled stage exits silently rather than failing, and drops its channel from 
 
 - **Indexing and search never leave the machine.** No embeddings, no API calls, no network.
 - **Review sends a digest to the same endpoint the session already used** — the Anthropic API via the `claude` CLI. LORE scrubs likely secrets (API keys, bearer tokens, JWTs, connection strings, PEM blocks) on the way in *and* on the way out, before anything reaches disk or the network. Logs stay in `LORE_ROOT/logs/`.
-- **Beliefs stay uncurated and ungated on write.** No human approves one before it exists. This is the system's largest hallucination surface; the read-side gate mitigates it, and does not fix it.
+- **Beliefs stay uncurated and ungated on write *by the deriver*.** No human approves one before it exists. This is the system's largest hallucination surface; the read-side gate mitigates it, and does not fix it. Since 0.36.0 a belief written through the *CLI* from a hook or detached context stages for approval instead (see [The write gate](#the-write-gate-who-is-allowed-to-write-directly)) — that gate is advisory, and the README says exactly what it does not stop.
 - **`/lore:setup` edits `~/.claude/settings.json`** — auto-memory, the permission allowlist, the `"env"` block — each change behind its own confirmation, shown before it applies. `lore teardown` reverses all of it and exports curated memory back to the built-in format.
 - **The transcript format belongs to Claude Code** and can change between versions. The indexer parses defensively: a shape change degrades search, never crashes a hook.
 - **Cost:** one haiku call per qualifying session end, plus one sonnet call when beliefs need reconciling.

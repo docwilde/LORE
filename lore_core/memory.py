@@ -15,10 +15,18 @@ from .config import (
     project_slug,
     resolve_subject_slug,
 )
+from .gate import (
+    entry_provenance,
+    forget_entry,
+    gate_write,
+    provenance_tag,
+    record_entry,
+)
 
 
 __all__ = [
     'memory_path',
+    'memory_bucket',
     'memory_cap',
     'read_entries',
     'render_entries',
@@ -36,6 +44,12 @@ def memory_path(scope: str, slug: str) -> Path:
     if scope == "user":
         return ROOT / "USER.md"
     return ROOT / "projects" / slug / "MEMORY.md"
+
+
+def memory_bucket(scope: str, slug: str) -> str:
+    """The provenance ledger's key space for one memory scope (ISSUE #43).
+    User memory is global; project memory is per slug."""
+    return "user" if scope == "user" else f"project:{slug}"
 
 
 def memory_cap(scope: str) -> int:
@@ -84,7 +98,12 @@ def match_entries(entries: list[str], needle: str) -> list[int]:
     return [i for i, e in enumerate(entries) if low in e.lower()]
 
 
-def memory_add(scope: str, slug: str, text: str) -> str | None:
+def memory_add(scope: str, slug: str, text: str, *, via: str = "direct",
+               origin: "str | None" = None) -> str | None:
+    """`via` (ISSUE #43) records HOW this entry got in — "direct" for a write
+    by the interactive agent or the user's own shell, "approved" when
+    apply_item lands a staged proposal. It never changes what is written;
+    the ledger is a sidecar (see gate.py)."""
     text = one_line(text)
     if not text:
         return "empty text"
@@ -93,10 +112,14 @@ def memory_add(scope: str, slug: str, text: str) -> str | None:
     if any(text.lower() == e.lower() for e in entries):
         return None  # exact duplicate: fine, idempotent
     entries.append(text)
-    return write_entries(path, entries, memory_cap(scope), scope)
+    err = write_entries(path, entries, memory_cap(scope), scope)
+    if err is None:
+        record_entry("memory", memory_bucket(scope, slug), text, via=via, origin=origin)
+    return err
 
 
-def memory_replace(scope: str, slug: str, needle: str, text: str) -> str | None:
+def memory_replace(scope: str, slug: str, needle: str, text: str, *,
+                   via: str = "direct", origin: "str | None" = None) -> str | None:
     path = memory_path(scope, slug)
     entries = read_entries(path)
     hits = match_entries(entries, needle)
@@ -106,8 +129,14 @@ def memory_replace(scope: str, slug: str, needle: str, text: str) -> str | None:
     if len(hits) > 1:
         listing = "\n".join(f"  - {entries[i]}" for i in hits)
         return f"{needle!r} is ambiguous ({len(hits)} matches) — use a longer substring:\n{listing}"
-    entries[hits[0]] = one_line(text)
-    return write_entries(path, entries, memory_cap(scope), scope)
+    old, new = entries[hits[0]], one_line(text)
+    entries[hits[0]] = new
+    err = write_entries(path, entries, memory_cap(scope), scope)
+    if err is None:
+        bucket = memory_bucket(scope, slug)
+        forget_entry("memory", bucket, old)
+        record_entry("memory", bucket, new, via=via, origin=origin)
+    return err
 
 
 def memory_remove(scope: str, slug: str, needle: str) -> str | None:
@@ -119,8 +148,11 @@ def memory_remove(scope: str, slug: str, needle: str) -> str | None:
     if len(hits) > 1:
         listing = "\n".join(f"  - {entries[i]}" for i in hits)
         return f"{needle!r} is ambiguous ({len(hits)} matches) — use a longer substring:\n{listing}"
-    entries.pop(hits[0])
-    return write_entries(path, entries, memory_cap(scope), scope)
+    gone = entries.pop(hits[0])
+    err = write_entries(path, entries, memory_cap(scope), scope)
+    if err is None:
+        forget_entry("memory", memory_bucket(scope, slug), gone)
+    return err
 
 
 def memory_move(scope: str, from_slug: str, needle: str, to_slug: str) -> str | None:
@@ -152,12 +184,19 @@ def memory_move(scope: str, from_slug: str, needle: str, to_slug: str) -> str | 
     text = src_entries[hits[0]]
     dst_path = memory_path(scope, to_slug)
     dst_entries = read_entries(dst_path)
+    # ISSUE #43: a move carries the entry's provenance with it -- relocating a
+    # fact does not turn an approved entry into a freshly written one.
+    prov = entry_provenance("memory", memory_bucket(scope, from_slug), text)
     if not any(text.lower() == e.lower() for e in dst_entries):
         dst_entries.append(text)
         err = write_entries(dst_path, dst_entries, memory_cap(scope), scope)
         if err:
             return err  # refuse rather than truncate: nothing written anywhere
+        record_entry("memory", memory_bucket(scope, to_slug), text,
+                     via=prov.get("via", "direct"), origin=f"moved from {from_slug}",
+                     writer=prov.get("writer"))
     src_entries.pop(hits[0])
+    forget_entry("memory", memory_bucket(scope, from_slug), text)
     err = write_entries(src_path, src_entries, memory_cap(scope), scope)
     if err:
         return (f"moved into {to_slug} but failed to remove from {from_slug}"
@@ -171,7 +210,8 @@ def cmd_memory(args) -> int:
         scopes = [args.scope] if args.scope else ["user", "project"]
         for scope in scopes:
             entries = read_entries(memory_path(scope, slug))
-            print(f"## {scope} ({usage_line(entries, memory_cap(scope))})")
+            print(f"## {scope} ({usage_line(entries, memory_cap(scope))})"
+                  f"{provenance_tag('memory', memory_bucket(scope, slug), entries)}")
             print(render_entries(entries).rstrip() or "(empty)")
         return 0
     if args.mcmd == "move":
@@ -181,6 +221,13 @@ def cmd_memory(args) -> int:
                   " exact slug, an unambiguous repo name, or a path to its checkout"
                   " (`lore backfill --list` shows known slugs).", file=sys.stderr)
             return 1
+        # ISSUE #43 write gate: from a hook/detached context this stages
+        # instead of applying. Interactive/terminal callers fall through
+        # untouched.
+        staged = gate_write({"kind": "memory", "action": "move", "scope": args.scope,
+                             "project": slug, "match": args.match, "to": to_slug})
+        if staged is not None:
+            return staged
         err = memory_move(args.scope, slug, args.match, to_slug)
         if err:
             print(err, file=sys.stderr)
@@ -190,6 +237,14 @@ def cmd_memory(args) -> int:
               f" {usage_line(entries, memory_cap(args.scope))}")
         return 0
     text = " ".join(args.text) if hasattr(args, "text") else ""
+    # ISSUE #43 write gate: curated memory is injected into the model's
+    # context, so a write arriving from a hook, a plugin-supplied hook or a
+    # detached process stages in pending/ for approval rather than applying.
+    staged = gate_write({"kind": "memory", "action": args.mcmd, "scope": args.scope,
+                         "project": slug, "match": getattr(args, "match", "") or "",
+                         "text": text})
+    if staged is not None:
+        return staged
     if args.mcmd == "add":
         err = memory_add(args.scope, slug, text)
     elif args.mcmd == "replace":

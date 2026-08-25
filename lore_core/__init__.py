@@ -10,6 +10,7 @@ modules earlier in this list, plus one deliberate deferred exception noted
 in deriver.py's docstring):
 
     config     env-derived constants + dependency-free helpers
+    gate       write gate + provenance ledger (ISSUE #43)
     scrub      secret scrubbing (the ingest choke point)
     store      tier 2: session index (SQLite FTS5, transcript parsing)
     memory     tier 1: curated core memory (USER.md / MEMORY.md)
@@ -33,6 +34,7 @@ dependency footprint.
 """
 
 from .config import *  # noqa: F401,F403
+from .gate import *  # noqa: F401,F403
 from .scrub import *  # noqa: F401,F403
 from .store import *  # noqa: F401,F403
 from .memory import *  # noqa: F401,F403
@@ -45,6 +47,7 @@ from .pending import *  # noqa: F401,F403
 from .context import *  # noqa: F401,F403
 
 from . import config as _config
+from . import gate as _gate
 from . import scrub as _scrub
 from . import store as _store
 from . import memory as _memory
@@ -58,6 +61,7 @@ from . import context as _context
 
 __all__ = [
     *_config.__all__,
+    *_gate.__all__,
     *_scrub.__all__,
     *_store.__all__,
     *_memory.__all__,
