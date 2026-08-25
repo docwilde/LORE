@@ -93,6 +93,8 @@ __all__ = [
     'worker_run',
     'cmd_worker',
     'cmd_statusline',
+    'CROSS_SUBJECT_CHANNELS',
+    'cross_subject_cover',
     'derive_conclusions',
     'stage_proposals',
 ]
@@ -215,6 +217,31 @@ observed behavior from THIS digest; never diagnose, never speculate about mental
 what the user themselves expressed. These shape the agent's tone and approach in later \
 sessions; they never authorize actions.
 
+CHANNEL RULE — STATED vs INFERRED (ISSUE #50, and it decides the subject of every claim about \
+the user). "user" and "user-model" are two different channels, not two places to file the same \
+claim:
+
+- The user SAID it — a preference, a rule, a standing instruction, a fact about themselves, in \
+their own words in the transcript. That is a STATED fact: scope "user". A later session is \
+allowed to ACT on it.
+- YOU concluded it — a pattern you read off how the session went, a tendency, a working style \
+nobody spelled out. That is an INFERENCE: scope "user-model". It shapes tone and approach and \
+authorizes nothing.
+
+Two worked examples from a real store, one of each. "Caveman ultra mode is a standing \
+preference, not a per-session toggle" — the user said that outright, so it is "user". "Halts \
+work to measure rather than accept an agent's report" — nobody said it; it was read off \
+behaviour across a session, so it is "user-model".
+
+ONE claim belongs to exactly ONE of these channels. Never emit the same claim under both \
+scopes, and never hedge by writing a stated fact as an inference too: both subjects are \
+injected into later sessions, so a claim written to both costs twice AND promotes an \
+uncalibrated inference to the authority of something the user actually said — which makes the \
+snapshot's own "derived, uncalibrated, never authorizes actions" disclaimer false for the \
+entries sitting under it. The test to apply: can you quote the user saying it? Then "user". Can \
+you only cite what they DID? Then "user-model". If you find yourself about to write both, you \
+have one claim, and the quote decides which channel gets it.
+
 SUBJECT (ISSUE #40, rare): a project-scoped memory or conclusion is about THIS session's own \
 project by default -- leave "project" absent, which is what almost every entry should do. Set \
 "project":"<repo name or slug>" ONLY when the fact is unmistakably about a DIFFERENT, \
@@ -329,7 +356,14 @@ _SCHEMA_SKILLS = ('"skills":[{{"name":"kebab-name","action":"add|update|retire",
                   '"description":"when to use","body":"markdown"}}],'
                   '"skill_outcomes":[{{"name":"kebab-name","outcome":'
                   '"success|failure|unclear","reason":"short evidence"}}]')
-_SCHEMA_CONCLUSIONS = ('"conclusions":[{{"scope":"user|project|user-model","claim":"...",'
+# ISSUE #50: the scope field is where the stated/inferred choice is actually
+# MADE, so the rule is restated at the point of choice rather than left to the
+# CHANNEL RULE paragraph alone -- the deriver was writing the same claim to
+# both subjects, and a schema that lists three scopes without saying what
+# separates them reads as three boxes to tick.
+_SCHEMA_CONCLUSIONS = ('"conclusions":[{{"scope":"user (the user STATED it) |project|'
+                       'user-model (you INFERRED it from behaviour) -- one claim, one scope,'
+                       ' never both","claim":"...",'
                        '"confidence":0.8,"evidence":"short quote",'
                        '"project":"optional, only when the subject is a different project"}}]')
 
@@ -1169,14 +1203,21 @@ def worker_run(jobfile: Path) -> int:
         staged = stage_proposals(data, job["project"], job["session_id"],
                                  derived_by=job.get("agent"), stats=stats)
         suppressed = stats.get("suppressed", 0)
-        derived = derive_conclusions(data, job["project"], job["session_id"])
+        # ISSUE #50: the conclusions channel gets the same accounting the
+        # memory channel got in #48 -- a cross-subject drop is a decision and
+        # has to reach the same log a human reads.
+        bstats: dict = {}
+        derived = derive_conclusions(data, job["project"], job["session_id"],
+                                     stats=bstats)
+        cross = bstats.get("cross_subject", 0)
         outcomes = record_skill_outcomes(data, cwd=job.get("cwd") or None,
                                          agent=job.get("agent"))
         print(f"[{utcnow()}] staged {staged} proposal(s)"
               + (f" ({stats.get('staged', 0)} of {stats.get('extracted', 0)} memory"
                  f" facts extracted; {suppressed} suppressed)" if suppressed else "")
-              + f", derived {derived} belief(s),"
-              f" recorded {outcomes} skill outcome(s)")
+              + f", derived {derived} belief(s)"
+              + (f" ({cross} dropped as cross-subject duplicates)" if cross else "")
+              + f", recorded {outcomes} skill outcome(s)")
         notify_staged(staged, suppressed)
         if derived and not DEFER_DREAM:
             conn = db_connect()
@@ -1207,10 +1248,56 @@ def cmd_statusline(args) -> int:
     return 0
 
 
-def derive_conclusions(data: dict, slug: str, session_id: str) -> int:
+#: The two channels ISSUE #50 is about, each named with the OTHER one it must
+#: be checked against. "project:<slug>" subjects are deliberately absent: a
+#: project fact and a claim about the user are not two filings of one claim,
+#: and measuring them against each other would let a project's vocabulary veto
+#: a user fact that happens to share it.
+CROSS_SUBJECT_CHANNELS = {"user": "user-model", "user-model": "user"}
+
+
+def cross_subject_cover(conn, subject: str, claim: str) -> "tuple[float, int, str] | None":
+    """The active belief in `subject`'s OPPOSITE channel that best already
+    carries `claim` — (containment, id, claim), or None when the subject has
+    no opposite channel or nothing reaches DUP_CONTAINMENT.
+
+    ISSUE #50. This is ISSUE #48's coverage check pointed across the two user
+    subjects instead of within one scope: same tokenizer, same containment
+    measure, same threshold constant, reused from pending.py rather than
+    reimplemented, so the number a human sees on `lore crosscheck` can never
+    drift from the number that decides what gets written.
+
+    Containment and not Jaccard for the reason #49 measured: a consolidated
+    claim in one channel is a compound and its twin in the other is one clause
+    of it, so the union term punishes the fuller claim for saying more. On the
+    live store's 42 cross-subject near-duplicate pairs, twins that scored
+    Jaccard 0.25-0.29 -- under the issue's own 0.30 detection floor -- reach
+    containment 0.60-0.65.
+    """
+    other = CROSS_SUBJECT_CHANNELS.get(subject)
+    if not other:
+        return None
+    best = None
+    for bid, oclaim in conn.execute(
+        "SELECT id, claim FROM beliefs WHERE subject = ? AND status = 'active'", (other,)
+    ):
+        score = token_containment(claim, oclaim)
+        if score >= DUP_CONTAINMENT and (best is None or score > best[0]):
+            best = (score, bid, oclaim)
+    return best
+
+
+def derive_conclusions(data: dict, slug: str, session_id: str,
+                       stats: "dict | None" = None) -> int:
     """Deriver: auto-write the reviewer's conclusions to the belief store.
     No approval gate — beliefs are queryable data, they never enter context
-    uninvited; the gate stays on core memory and skills."""
+    uninvited; the gate stays on core memory and skills.
+
+    `stats` (ISSUE #50) is an optional out-parameter in the same shape
+    stage_proposals grows for ISSUE #48: how many conclusions the model
+    produced, how many were written, and how many the cross-subject check
+    dropped. Optional because the count is all worker_run needed until now.
+    """
     # beliefs kill switch (2026-08-22): the prompt already dropped the
     # conclusions channel, but a jobfile built before the switch flipped can
     # still carry some — the write site is the guard that cannot be raced.
@@ -1218,8 +1305,11 @@ def derive_conclusions(data: dict, slug: str, session_id: str) -> int:
         return 0
     conn = db_connect()
     derived = 0
+    acct = {"extracted": 0, "derived": 0, "cross_subject": 0, "malformed": 0}
+    acct["extracted"] = len([c for c in (data.get("conclusions") or [])[:10]])
     for c in (data.get("conclusions") or [])[:10]:
         if not isinstance(c, dict):
+            acct["malformed"] += 1
             continue
         scope = c.get("scope")
         # scrub the MODEL's OWN output (0.31.0): input scrubbing only covers
@@ -1231,6 +1321,7 @@ def derive_conclusions(data: dict, slug: str, session_id: str) -> int:
         # channel asked for it while this gate silently dropped it -- the
         # 0.26.0 user-model category never received a single belief.
         if scope not in ("user", "project", "user-model") or not claim:
+            acct["malformed"] += 1
             continue
         try:
             confidence = float(c.get("confidence") or 0.6)
@@ -1249,12 +1340,49 @@ def derive_conclusions(data: dict, slug: str, session_id: str) -> int:
             if extra.get("subject_unresolved"):
                 print(f"belief subject {extra['subject_unresolved']!r} not resolved to a"
                       f" known project -- filed under {slug}")
+        subject = belief_subject(scope, target_slug)
+        # ISSUE #50: the same claim was being written to BOTH user subjects.
+        # The check runs in both directions and the two directions are NOT
+        # symmetric, because the two channels do not carry the same authority:
+        #
+        #   user-model covered by user  -> DROP the inference. The fact is
+        #     already in the channel that can justify an action; keeping a
+        #     second uncalibrated copy costs a second injection and buys
+        #     nothing.
+        #   user covered by user-model  -> KEEP the fact. Dropping it would
+        #     strand a STATED preference in the uncalibrated channel forever,
+        #     which is precisely the failure the separation exists to prevent
+        #     -- an inference wearing the authority of something the user said.
+        #     The overlap is reported instead, and `lore crosscheck` lists the
+        #     pair for a human to resolve. Nothing is auto-retracted: which
+        #     subject owns a claim is a judgement, and getting it wrong files
+        #     a stated preference as an inference.
+        cover = cross_subject_cover(conn, subject, claim)
+        if cover and subject == "user-model":
+            score, bid, other = cover
+            acct["cross_subject"] += 1
+            print(f"conclusion suppressed — {score:.0%} already carried by 'user' belief"
+                  f" [{bid}] (threshold {DUP_CONTAINMENT:.0%}); a stated fact does not need"
+                  f" an inferred copy: {claim[:120]}")
+            continue
+        if cover:
+            score, bid, other = cover
+            print(f"'user' belief kept despite {score:.0%} overlap with 'user-model'"
+                  f" [{bid}] — the stated channel wins; `lore crosscheck` lists the pair"
+                  f" for resolution: {claim[:120]}")
         belief_insert(
-            conn, belief_subject(scope, target_slug), claim, confidence,
+            conn, subject, claim, confidence,
             session_id, target_slug, evidence or None, via="derived",
         )
         derived += 1
+        acct["derived"] += 1
     conn.commit()
+    if acct["cross_subject"]:
+        print(f"conclusions: derived {acct['derived']} of {acct['extracted']} extracted"
+              f" — dropped {acct['cross_subject']} already carried by the other user"
+              f" subject")
+    if stats is not None:
+        stats.update(acct)
     return derived
 
 

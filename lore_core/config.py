@@ -134,6 +134,16 @@ MEMORY_PROPOSAL_CAP = int(os.environ.get("LORE_MEMORY_PROPOSAL_CAP", "3"))
 # 0.07 margin is not a margin. Suppressing a fact the user wanted is strictly
 # worse than showing one they did not, so the threshold is set by the margin,
 # not by the catch.
+#
+# ISSUE #50 reuses this SAME constant for the cross-subject check on beliefs
+# ("user" vs "user-model") rather than adding a second knob that could drift
+# away from it -- and an independent replay lands on the same number. Over the
+# live store's 3528 cross-subject pairs, every pair scoring >= 0.42 is a
+# genuine twin by inspection (all 136 pairs at >= 0.38 were read one by one);
+# the highest score reached by a pair of genuinely DISTINCT claims is 0.40. So
+# 0.60 clears that observed ceiling by 50% relative, against the 40% margin
+# #48's replay left, and it catches 30 of the issue's 42 detected pairs plus 7
+# more that the issue's own jaccard-0.30 detection floor missed entirely.
 DUP_CONTAINMENT = float(os.environ.get("LORE_DUP_CONTAINMENT", "0.60"))
 
 
