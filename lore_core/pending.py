@@ -7,6 +7,7 @@ them.
 import difflib
 import json
 import os
+import re
 import sys
 
 from .beliefs import belief_insert, belief_subject, belief_supersede
@@ -25,7 +26,56 @@ __all__ = [
     'resolve_ids',
     'cmd_approve',
     'cmd_reject',
+    'overlap_tokens',
+    'token_jaccard',
+    'token_containment',
+    'CLUSTER_JACCARD',
 ]
+
+
+# ---------------------------------------------------------------------------
+# Token overlap. ONE tokenizer, shared by the two places that measure how much
+# two memory lines say the same thing: `pending --cluster` (display: group a
+# backfill pile into themes) and stage-time coverage suppression (ISSUE #48).
+# Splitting these would let the number a human sees on `--cluster` drift away
+# from the number that silently decides what never gets staged.
+# ---------------------------------------------------------------------------
+
+# `--cluster`'s grouping threshold. Display-only and deliberately loose: a
+# cluster that swallows a neighbour costs a human one extra glance, so it is
+# tuned for readability and is NOT reused as a suppression threshold.
+CLUSTER_JACCARD = 0.42
+
+
+def overlap_tokens(text: str) -> set[str]:
+    """Words of 3+ chars, lowercased, punctuation dropped. Short tokens are
+    excluded because they are almost all function words -- keeping them makes
+    every pair of English sentences look alike."""
+    return set(re.findall(r"[a-z0-9_]{3,}", text.lower()))
+
+
+def token_jaccard(a: set[str], b: set[str]) -> float:
+    """Symmetric overlap, |A n B| / |A u B|. What `--cluster` groups by."""
+    return len(a & b) / max(1, len(a | b))
+
+
+def token_containment(text: str, other: str) -> float:
+    """ASYMMETRIC: how much of `text` is already carried by `other`, |A n B| / |A|.
+
+    ISSUE #48. Jaccard is the wrong shape for "is this proposal already
+    covered by an existing entry", because a curated memory line is usually a
+    consolidated compound of several facts while a fresh proposal is one of
+    them. Measured on the live store: a proposal restating the user's
+    empirical-validation bar scored Jaccard 0.14 against the USER.md entry
+    that already carries it -- the union term punishes the entry for saying
+    MORE, which is exactly the case where re-proposing is most redundant.
+    Containment asks the question that actually decides, and since
+    |A u B| >= |A| it is never the less sensitive of the two.
+    """
+    a = overlap_tokens(text)
+    if not a:
+        return 0.0
+    return len(a & overlap_tokens(other)) / len(a)
 
 
 def cross_project_note(item: dict) -> "str | None":
@@ -65,19 +115,17 @@ def _cluster_pending(items) -> int:
     """--cluster: group memory proposals by token overlap (greedy Jaccard,
     no LLM) so a big-backfill pile reads as N themes instead of N-hundred
     rows. Skills are never clustered -- they stay their own lane."""
-    import re as _re
-    def toks(t): return set(_re.findall(r"[a-z0-9_]{3,}", t.lower()))
     mem = [(pid, it) for pid, it in items if it.get("kind") == "memory"]
     skills = [(pid, it) for pid, it in items if it.get("kind") != "memory"]
     clusters: list[dict] = []
     for pid, it in mem:
-        ts = toks(it.get("text") or "")
+        ts = overlap_tokens(it.get("text") or "")
         best, bi = 0.0, -1
         for i, c in enumerate(clusters):
-            j = len(ts & c["toks"]) / max(1, len(ts | c["toks"]))
+            j = token_jaccard(ts, c["toks"])
             if j > best:
                 best, bi = j, i
-        if best >= 0.42:
+        if best >= CLUSTER_JACCARD:
             clusters[bi]["ids"].append(pid)
             clusters[bi]["toks"] |= ts
         else:
