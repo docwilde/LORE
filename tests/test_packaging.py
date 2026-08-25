@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """lore_core ships as a distribution as well as a plugin (2026-08-25).
 
 Two carriers, one version. The plugin manifest declares it; `pyproject.toml`
@@ -179,20 +180,28 @@ class TestStillStdlibOnly(unittest.TestCase):
 
 
 class TestLicence(unittest.TestCase):
-    def test_the_licence_is_carried_as_the_licenseref_it_is(self):
-        """LORE Noncommercial 1.0 is not an SPDX-listed licence. Declaring
-        it as a LicenseRef is the correct, checkable statement; declaring
-        it as MIT or leaving it blank would not be."""
-        self.assertEqual(
-            PYPROJECT["project"]["license"], "LicenseRef-LORE-Noncommercial-1.0"
-        )
+    def test_the_licence_is_carried_as_the_spdx_id_it_is(self):
+        """AGPL-3.0-only is an SPDX-listed licence, declared directly rather
+        than as a LicenseRef (that form was for the old, non-SPDX-listed
+        LORE Noncommercial 1.0)."""
+        self.assertEqual(PYPROJECT["project"]["license"], "AGPL-3.0-only")
         self.assertEqual(PYPROJECT["project"]["license"], MANIFEST["license"])
         self.assertIn("LICENSE", PYPROJECT["project"]["license-files"])
         self.assertTrue((ROOT / "LICENSE").is_file())
 
+    def test_the_commercial_and_trademark_notices_travel_with_the_licence(self):
+        """The AGPL grant does not cover a commercial licence or the LORE
+        trademark; both are separate files, and both ship alongside
+        LICENSE."""
+        self.assertIn("LICENSE-COMMERCIAL.md", PYPROJECT["project"]["license-files"])
+        self.assertIn("TRADEMARK.md", PYPROJECT["project"]["license-files"])
+        self.assertTrue((ROOT / "LICENSE-COMMERCIAL.md").is_file())
+        self.assertTrue((ROOT / "TRADEMARK.md").is_file())
+
     def test_no_retired_license_classifier(self):
-        """PEP 639 retired `License ::` classifiers, and there was never
-        one that said this anyway."""
+        """PEP 639 retired `License ::` classifiers -- still true, and still
+        not added, even though an SPDX-listed licence like AGPL-3.0 does
+        have one."""
         for classifier in PYPROJECT["project"]["classifiers"]:
             self.assertFalse(classifier.startswith("License ::"), classifier)
 

@@ -29,18 +29,20 @@ readme = "README.md"
 dynamic = ["version"]
 requires-python = ">=3.11"
 dependencies = []
-# Not an SPDX-listed licence: LORE Noncommercial 1.0 is PolyForm-
-# Noncommercial with an amended "Noncommercial Organizations" section, so
-# it is carried as a LicenseRef, which is exactly what SPDX reserves for a
-# licence that is not on its list. The text itself travels in the wheel via
-# license-files, so nobody has to go and find it.
-license = "LicenseRef-LORE-Noncommercial-1.0"
-license-files = ["LICENSE"]
+# AGPL-3.0-only is an SPDX-listed identifier, so it is declared directly
+# (no LicenseRef needed). A commercial licence is available separately from
+# the copyright holder -- see LICENSE-COMMERCIAL.md -- but that is not a
+# packaging-metadata concern: PyPI's `license` field names the terms this
+# distribution is offered under, which is AGPL-3.0-only.
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "LICENSE-COMMERCIAL.md", "TRADEMARK.md"]
 authors = [{ name = "Fabian Wilde", email = "fabian.wilde@contiamo.com" }]
 keywords = ["memory", "claude-code", "hermes", "honcho", "belief-store", "skills"]
 classifiers = [
     # No "License ::" classifier: PEP 639 retired those in favour of the
-    # SPDX expression above, and there was never one that said this.
+    # SPDX expression above, so it is not added even though one exists for
+    # this licence ("License :: OSI Approved :: GNU Affero General Public
+    # License v3").
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
@@ -90,5 +92,7 @@ include = [
     "/.claude-plugin/plugin.json",
     "/CHANGELOG.md",
     "/LICENSE",
+    "/LICENSE-COMMERCIAL.md",
+    "/TRADEMARK.md",
     "/README.md",
 ]

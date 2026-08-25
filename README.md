@@ -6,7 +6,7 @@
   <img src="https://img.shields.io/badge/writes-human--approved-2f9e44" alt="nothing writes without approval">
   <img src="https://img.shields.io/badge/search-SQLite%20FTS5-044a64" alt="SQLite FTS5 search">
   <img src="https://img.shields.io/badge/no%20embeddings-no%20API%20calls-555" alt="no embeddings, no API calls">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Noncommercial%201.0-8a8073" alt="license"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-8a8073" alt="license"></a>
 </p>
 
 # LORE — Lots Of Reconciled Engrams
@@ -72,4 +72,4 @@ The name means the accumulated knowledge of a craft — and, coincidentally, Dat
 
 ## License
 
-[LORE Noncommercial 1.0](LICENSE), derived from PolyForm-Noncommercial: free for personal, research and noncommercial use. Commercial use needs the author's consent under a separate license.
+[AGPL-3.0](LICENSE) for everyone, including commercial use. A [commercial license](LICENSE-COMMERCIAL.md) is available where those terms don't fit. "LORE" and its mark are [reserved](TRADEMARK.md).

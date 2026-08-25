@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """ISSUE #48 -- the deriver's proposal precision.
 
 Measured on a live store: 1240 archived rejections against 25 approvals, a 2%

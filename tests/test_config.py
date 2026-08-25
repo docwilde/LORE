@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Focused unit tests for the stage kill switches + `lore config set/unset`
 (2026-08-22): settings round-trip, LORE_*-only restriction, channel drops in
 the review prompt, skill-staging skip, disabled dream. Stdlib only, like the

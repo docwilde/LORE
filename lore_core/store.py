@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Tier 2: session index. SQLite schema/connection, transcript parsing, the
 incremental (index_sessions) and streaming (index_live) indexers, FTS5
 search, and the `lore search`/`lore session`/`lore index` CLI commands.
