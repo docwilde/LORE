@@ -1306,8 +1306,9 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
     conn = db_connect()
     derived = 0
     acct = {"extracted": 0, "derived": 0, "cross_subject": 0, "malformed": 0}
-    acct["extracted"] = len([c for c in (data.get("conclusions") or [])[:10]])
-    for c in (data.get("conclusions") or [])[:10]:
+    conclusions = (data.get("conclusions") or [])[:10]
+    acct["extracted"] = len(conclusions)
+    for c in conclusions:
         if not isinstance(c, dict):
             acct["malformed"] += 1
             continue
