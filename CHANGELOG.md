@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.39.0 — 2026-08-26
 
+- Fix: `KV_SECRET` in `lore_core/scrub.py` redacted a *reference* to a secret the same as the secret itself — a real transcript showed an `op://…` 1Password pointer next to `GITLAB_TOKEN=` turned into `[REDACTED:value]`, leaving a command nobody could run. `REFERENCE_SHAPES` now exempts value shapes that are pointers, not material — `op://`, `vault:`/`vault://`, `keyring://`, `${VAR}`/`$VAR`, `<placeholder>` — each anchored against the *whole* captured value, so a real credential under the same key still redacts.
+- `aws-vault:`, `gopass:` and `pass:` were considered and left out: none has an established inline value-reference convention the way `op://`/`vault://`/`keyring://` do (they're exec-wrapper CLIs, not schemes a value gets set to), and the module's asymmetry — under-redaction leaks a credential, over-redaction only mangles a command — means a shape without a citable convention doesn't get allowlisted.
+- Audited `HEX_RUN`/`BASE64_RUN` for the same class of bug (reference mistaken for material). Found none beyond the already-documented, accepted trade-off (a git SHA or content hash gets redacted too; see `_base64_sub`'s path exemption and the module docstring) — left both alone.
+- Tests: `tests/test_hardening.py` (29; 13 new, each paired with a same-key real-material case that still redacts).
 - Relicensed from the LORE Noncommercial License 1.0 to **AGPL-3.0-only**, dual with a commercial option. The noncommercial terms were not open source by the OSI definition, which blocked distro packaging and deterred contributors; AGPL keeps a fork's source open, including when it is only offered over a network.
 - `LICENSE-COMMERCIAL.md` states the commercial option — an offer to negotiate, not a licence. `TRADEMARK.md` reserves the LORE name and mark, which the AGPL grant does not cover.
 - Source files carry `SPDX-License-Identifier: AGPL-3.0-only`; `pyproject.toml` and `.claude-plugin/plugin.json` declare it.
