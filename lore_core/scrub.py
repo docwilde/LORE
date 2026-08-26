@@ -21,6 +21,7 @@ import re
 __all__ = [
     'SECRET_PATTERNS',
     'KV_SECRET',
+    'REFERENCE_SHAPES',
     'HEX_RUN',
     'BASE64_RUN',
     'scrub_secrets',
@@ -53,8 +54,43 @@ KV_SECRET = re.compile(
     r"\b(\w*(?:password|passwd|secret|token|api_key|apikey))(\s*[=:]\s*)(\S{8,})",
     re.IGNORECASE,
 )
+
+# Value shapes that are a POINTER to a secret, not the secret material —
+# resolving one back into material needs the vault/keyring/shell it names,
+# which this scrubber never has. Redacting the pointer instead of the
+# material is its own failure: it destroys the one part of a command that
+# was safe to keep. (Observed live: an `op://` reference in a DOXA
+# transcript rendered as `[REDACTED:value]`, leaving a command nobody could
+# run.) Each pattern anchors the WHOLE captured value (\A...\Z) — a scheme
+# prefix is a distinct, well-specified shape, not just a string to strip, so
+# a value that only partly looks like one still redacts as material. Kept
+# deliberately short: under-redaction leaks a credential, over-redaction
+# only mangles a command, and those costs are not symmetric — a shape
+# without a citable, standard "this value is a pointer" convention stays
+# OUT rather than being guessed at. aws-vault:, gopass: and pass: were all
+# considered and left out on that basis: each is primarily an exec-wrapper
+# CLI (`aws-vault exec profile -- cmd`, `pass show path`), not an
+# established inline value-reference scheme the way op://, vault:// and
+# keyring:// are, so anchoring against them would be inventing a shape, not
+# citing one.
+REFERENCE_SHAPES: list[re.Pattern] = [
+    re.compile(r"\Aop://\S+\Z"),                           # 1Password CLI reference
+    re.compile(r"\Avault(?:://|:)\S+\Z", re.IGNORECASE),   # HashiCorp Vault path
+    re.compile(r"\Akeyring://\S+\Z", re.IGNORECASE),       # OS/credential-keyring reference
+    re.compile(r"\A\$\{[A-Za-z_][A-Za-z0-9_]*\}\Z"),       # ${VAR} shell expansion
+    re.compile(r"\A\$[A-Za-z_][A-Za-z0-9_]*\Z"),           # $VAR shell expansion
+    re.compile(r"\A<[^<>\s]+>\Z"),                          # <placeholder> in example commands
+]
+
 HEX_RUN = re.compile(r"\b[a-fA-F0-9]{40,}\b")
 BASE64_RUN = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])")
+
+
+def _kv_sub(m: re.Match) -> str:
+    key, sep, value = m.group(1), m.group(2), m.group(3)
+    if any(pat.match(value) for pat in REFERENCE_SHAPES):
+        return m.group(0)
+    return f"{key}{sep}[REDACTED:value]"
 
 
 def _base64_sub(m: re.Match) -> str:
@@ -79,6 +115,6 @@ def scrub_secrets(text: str) -> str:
     """
     for kind, pat in SECRET_PATTERNS:
         text = pat.sub(f"[REDACTED:{kind}]", text)
-    text = KV_SECRET.sub(r"\1\2[REDACTED:value]", text)
+    text = KV_SECRET.sub(_kv_sub, text)
     text = HEX_RUN.sub("[REDACTED:hex]", text)
     return BASE64_RUN.sub(_base64_sub, text)

@@ -65,6 +65,76 @@ class TestScrubSecrets(unittest.TestCase):
         text = "token: short12"
         self.assertEqual(lore.scrub_secrets(text), text)
 
+    def test_op_reference_survives(self):
+        # The bug this guards: an op:// pointer is safe to keep verbatim --
+        # resolving it needs the 1Password vault, which scrub_secrets never
+        # has. Redacting it destroys a command nobody can then run.
+        out = lore.scrub_secrets(
+            "op run --env-file=<(echo 'GITLAB_TOKEN=op://Employee/Telekom "
+            "GLab PAT/<field>') -- glab api user")
+        self.assertIn("GITLAB_TOKEN=op://Employee/Telekom", out)
+        self.assertNotIn("REDACTED", out)
+
+    def test_op_reference_paired_with_real_token(self):
+        # Same key, same shape of command -- but the value is material, not
+        # a pointer, so it must still redact.
+        out = lore.scrub_secrets("GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx")
+        self.assertIn("GITLAB_TOKEN=[REDACTED:value]", out)
+        self.assertNotIn("glpat-", out)
+
+    def test_vault_reference_survives(self):
+        out = lore.scrub_secrets("DB_PASSWORD=vault:secret/data/myapp#password")
+        self.assertIn("DB_PASSWORD=vault:secret/data/myapp#password", out)
+        self.assertNotIn("REDACTED", out)
+
+    def test_vault_reference_paired_with_real_password(self):
+        out = lore.scrub_secrets("DB_PASSWORD=hunter2hunter2")
+        self.assertIn("DB_PASSWORD=[REDACTED:value]", out)
+        self.assertNotIn("hunter2hunter2", out)
+
+    def test_vault_url_scheme_reference_survives(self):
+        out = lore.scrub_secrets("API_TOKEN=vault://secret/foo/bar")
+        self.assertIn("API_TOKEN=vault://secret/foo/bar", out)
+        self.assertNotIn("REDACTED", out)
+
+    def test_vault_url_scheme_paired_with_real_token(self):
+        out = lore.scrub_secrets("API_TOKEN=abcdefgh12345678")
+        self.assertIn("API_TOKEN=[REDACTED:value]", out)
+        self.assertNotIn("abcdefgh12345678", out)
+
+    def test_keyring_reference_survives(self):
+        out = lore.scrub_secrets("SECRET=keyring://myservice/myaccount")
+        self.assertIn("SECRET=keyring://myservice/myaccount", out)
+        self.assertNotIn("REDACTED", out)
+
+    def test_keyring_reference_paired_with_real_secret(self):
+        out = lore.scrub_secrets("SECRET=correcthorsebattery")
+        self.assertIn("SECRET=[REDACTED:value]", out)
+        self.assertNotIn("correcthorsebattery", out)
+
+    def test_braced_var_expansion_survives(self):
+        out = lore.scrub_secrets("TOKEN=${MY_TOKEN}")
+        self.assertEqual(out, "TOKEN=${MY_TOKEN}")
+
+    def test_bare_var_expansion_survives(self):
+        out = lore.scrub_secrets("TOKEN=$MY_SECRET_TOKEN")
+        self.assertEqual(out, "TOKEN=$MY_SECRET_TOKEN")
+
+    def test_var_expansion_paired_with_real_token(self):
+        # Same key, value that is NOT a $VAR shape -- must still redact.
+        out = lore.scrub_secrets("TOKEN=notarealvarname12345")
+        self.assertIn("TOKEN=[REDACTED:value]", out)
+        self.assertNotIn("notarealvarname12345", out)
+
+    def test_placeholder_survives(self):
+        out = lore.scrub_secrets("API_KEY=<your-key-here>")
+        self.assertEqual(out, "API_KEY=<your-key-here>")
+
+    def test_placeholder_paired_with_real_key(self):
+        out = lore.scrub_secrets("API_KEY=abcdefgh12345678")
+        self.assertIn("API_KEY=[REDACTED:value]", out)
+        self.assertNotIn("abcdefgh12345678", out)
+
     def test_pem_block(self):
         pem = ("-----BEGIN RSA PRIVATE KEY-----\n"
                "MIIEpAIBAAKCAQEA7\nmoremoremore\n"
