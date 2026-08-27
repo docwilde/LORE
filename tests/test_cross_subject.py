@@ -245,14 +245,26 @@ class CrossSubjectCoverage(unittest.TestCase):
         self.assertIn("the stated channel wins", printed)
         self.assertIn("lore crosscheck", printed)
 
-    def test_same_subject_duplicates_are_left_to_the_dreamer(self):
-        """Cross-subject only. Same-subject reconciliation is dream_run's lane
-        and it merges rather than drops -- silently taking it over here would
-        lose the merged claim."""
-        _seed_belief("user-model", STATED)
-        n, stats, _printed, _rows = _derive(
+    def test_same_subject_near_duplicate_folds_instead_of_leaving_a_new_row(self):
+        """ISSUE #51: this used to be left entirely to the dreamer's slower,
+        capped reconciliation pass -- which is how four sessions' independent
+        re-derivations of one lesson sat as four separate beliefs, each with
+        evidence one, until something noticed. Same-subject containment above
+        threshold now folds AT WRITE TIME: no new row, evidence attached to
+        the existing belief instead. The dreamer still does its own job
+        (contradiction resolution, promotion) -- this just means it no longer
+        has to clean up duplication that never needed to exist."""
+        bid = _seed_belief("user-model", STATED)
+        n, stats, printed, rows = _derive(
             [{"scope": "user-model", "claim": INFERRED_TWIN, "confidence": 0.9}])
-        self.assertEqual((n, stats["cross_subject"]), (1, 0))
+        self.assertEqual((n, stats["cross_subject"]), (0, 0))
+        self.assertEqual(stats["folded"], 1)
+        self.assertEqual([r[0] for r in rows], ["user-model"])
+        self.assertIn(f"folded into existing [{bid}]", printed)
+        ev = _conn().execute(
+            "SELECT count(*) FROM belief_evidence WHERE belief_id = ?", (bid,)
+        ).fetchone()[0]
+        self.assertEqual(ev, 2)  # seed evidence + the fold
 
     def test_a_project_belief_is_never_measured_against_a_user_belief(self):
         """A project fact and a claim about the user are not two filings of one

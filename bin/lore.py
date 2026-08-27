@@ -590,6 +590,15 @@ def main() -> int:
     bp.add_argument("id", type=int)
     bp.add_argument("--reason")
     bp.set_defaults(fn=cmd_belief)
+    # ISSUE #51: read-only, like `crosscheck` beside it -- lists same-subject
+    # near-duplicate pairs (the population the write-time containment fold
+    # now prevents going forward) so a human can retract the redundant one.
+    bp = bsub.add_parser("dedup-report",
+                         help="read-only report: same-subject near-duplicate beliefs")
+    bp.add_argument("--threshold", type=float,
+                    help=f"containment floor (default {DUP_CONTAINMENT:.2f},"
+                         " the same one that folds at derive time)")
+    bp.set_defaults(fn=cmd_dedup_report)
 
     sp = sub.add_parser("ask", help="dialectic evidence pack: beliefs + memory + session hits")
     sp.add_argument("question")
