@@ -31,6 +31,7 @@ from .store import db_connect, fts_expr
 __all__ = [
     'belief_subject',
     'belief_insert',
+    'belief_reinforce',
     'belief_supersede',
     'format_belief',
     'BELIEF_COLS',
@@ -59,6 +60,34 @@ def belief_subject(scope: str, slug: str) -> str:
     return "user" if scope == "user" else f"project:{slug}"
 
 
+def belief_reinforce(
+    conn: sqlite3.Connection, bid: int, confidence: float,
+    session_id: str | None, project: str | None, note: str | None,
+) -> None:
+    """Attach a new derivation to an EXISTING belief as evidence, instead of a
+    new row: lift confidence to the max of old/new and touch `updated`. This is
+    what "the same fact, said again" should cost -- one more evidence row on
+    the belief that already carries it, not a second belief with its own
+    evidence count of one.
+
+    Split out of belief_insert's exact-match branch (ISSUE #51: same-subject
+    near-duplicate fold) so both callers that decide "this claim already
+    exists" -- an exact restatement here, and a containment match at the
+    deriver's write site -- reinforce the same way through one path, rather
+    than the fold growing a second copy of this UPDATE+INSERT that could drift.
+    """
+    row = conn.execute("SELECT confidence FROM beliefs WHERE id = ?", (bid,)).fetchone()
+    now = utcnow()
+    conn.execute(
+        "UPDATE beliefs SET confidence = ?, updated = ? WHERE id = ?",
+        (max(row[0], confidence) if row else confidence, now, bid),
+    )
+    conn.execute(
+        "INSERT INTO belief_evidence VALUES(?,?,?,?,?)",
+        (bid, session_id, project, one_line(note or "")[:300] or None, now),
+    )
+
+
 def belief_insert(
     conn: sqlite3.Connection, subject: str, claim: str, confidence: float,
     session_id: str | None, project: str | None, note: str | None,
@@ -77,7 +106,6 @@ def belief_insert(
     claim's origin is where it FIRST entered the store."""
     claim = one_line(claim)
     confidence = min(max(confidence, 0.0), 1.0)
-    now = utcnow()
     row = conn.execute(
         "SELECT id, confidence FROM beliefs WHERE subject = ? AND lower(claim) = lower(?)"
         " AND status = 'active'",
@@ -87,11 +115,9 @@ def belief_insert(
         row = None
     if row:
         bid, created = row[0], False
-        conn.execute(
-            "UPDATE beliefs SET confidence = ?, updated = ? WHERE id = ?",
-            (max(row[1], confidence), now, bid),
-        )
+        belief_reinforce(conn, bid, confidence, session_id, project, note)
     else:
+        now = utcnow()
         cur = conn.execute(
             "INSERT INTO beliefs(subject, claim, confidence, status, created, updated,"
             " writer, via) VALUES(?,?,?,'active',?,?,?,?)",
@@ -99,10 +125,10 @@ def belief_insert(
         )
         bid, created = cur.lastrowid, True
         conn.execute("INSERT INTO belief_fts(belief_id, claim) VALUES(?,?)", (bid, claim))
-    conn.execute(
-        "INSERT INTO belief_evidence VALUES(?,?,?,?,?)",
-        (bid, session_id, project, one_line(note or "")[:300] or None, now),
-    )
+        conn.execute(
+            "INSERT INTO belief_evidence VALUES(?,?,?,?,?)",
+            (bid, session_id, project, one_line(note or "")[:300] or None, now),
+        )
     return bid, created
 
 

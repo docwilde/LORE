@@ -22,12 +22,14 @@ import os
 import queue
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .beliefs import belief_insert, belief_subject
+from .beliefs import belief_insert, belief_reinforce, belief_subject
 from .config import (
     DEFER_DREAM,
     DERIVER_MODEL,
@@ -50,9 +52,9 @@ from .config import (
 )
 from .filemap import filemap_entries
 from .memory import match_entries, memory_path, read_entries, render_entries
-from .pending import load_pending, token_containment
+from .pending import load_pending, overlap_tokens, token_containment
 from .scrub import scrub_secrets
-from .store import db_connect, extract_text, parse_transcript
+from .store import db_connect, extract_text, fts_expr, parse_transcript
 
 
 __all__ = [
@@ -96,6 +98,8 @@ __all__ = [
     'cmd_statusline',
     'CROSS_SUBJECT_CHANNELS',
     'cross_subject_cover',
+    'same_subject_cover',
+    'belief_neighbourhood',
     'derive_conclusions',
     'stage_proposals',
 ]
@@ -311,6 +315,8 @@ is unbounded and nothing retires it, so a claim that goes stale sits there indef
 answers questions wrongly, whereas a memory at least competes for a slot. The durability \
 test above applies here in full, and task narration is still excluded.
 
+Before writing a conclusion, check it against "Existing beliefs that may already state your conclusion" below (when present). If one of those already says what you were about to conclude, do NOT restate it as a new conclusion -- instead cite its id in "evidence_for" and this session becomes another confirmation of that belief, not a fourth copy of it. Independent convergent derivations of the SAME fact across sessions are honestly counted as repeated evidence for ONE belief, never as separate beliefs each with evidence one -- four sessions re-deriving one lesson is one well-evidenced belief, not four unconfirmed ones.
+
 Three ways a conclusion goes stale, each seen in practice:
 
 1. A durable claim with an expiring tail welded on. "ids are minted only by the writer, never \
@@ -366,7 +372,10 @@ _SCHEMA_CONCLUSIONS = ('"conclusions":[{{"scope":"user (the user STATED it) |pro
                        'user-model (you INFERRED it from behaviour) -- one claim, one scope,'
                        ' never both","claim":"...",'
                        '"confidence":0.8,"evidence":"short quote",'
-                       '"project":"optional, only when the subject is a different project"}}]')
+                       '"project":"optional, only when the subject is a different project",'
+                       '"evidence_for":"optional -- id of an existing belief listed below that'
+                       ' this conclusion confirms rather than restates; when set, this session is'
+                       ' recorded as evidence for that id instead of a new belief"}}]')
 
 
 def review_prompt_template() -> str:
@@ -650,6 +659,17 @@ def build_review_job(transcript: Path, slug: str,
     if fm:
         prompt += ("\nCurrent file map (do not re-propose these paths):\n"
                    + "\n".join(f"- {p} — {u}" for p, u in fm) + "\n")
+    # ISSUE #51 part 2: same append-after-digest treatment as the file map
+    # above, and for the same reason -- the template's kwarg set is a
+    # compatibility surface. Gated on the beliefs kill switch: the
+    # neighbourhood only matters to a channel that might write "evidence_for".
+    if not stage_disabled("beliefs"):
+        neigh = belief_neighbourhood(
+            db_connect(), [belief_subject("user", slug), belief_subject("project", slug),
+                          "user-model"], messages)
+        if neigh:
+            prompt += ("\nExisting beliefs that may already state your conclusion below -- cite"
+                       " the id in \"evidence_for\" instead of restating:\n" + neigh + "\n")
     if older:
         prompt += RECENCY_NOTE
     sid = transcript.stem if part is None else f"{transcript.stem}-{part}"
@@ -1211,6 +1231,9 @@ def worker_run(jobfile: Path) -> int:
         derived = derive_conclusions(data, job["project"], job["session_id"],
                                      stats=bstats)
         cross = bstats.get("cross_subject", 0)
+        # ISSUE #51: same accounting treatment -- a fold is a decision too
+        # (evidence attached to an existing belief instead of a new row).
+        folded = bstats.get("folded", 0)
         outcomes = record_skill_outcomes(data, cwd=job.get("cwd") or None,
                                          agent=job.get("agent"))
         print(f"[{utcnow()}] staged {staged} proposal(s)"
@@ -1218,6 +1241,7 @@ def worker_run(jobfile: Path) -> int:
                  f" facts extracted; {suppressed} suppressed)" if suppressed else "")
               + f", derived {derived} belief(s)"
               + (f" ({cross} dropped as cross-subject duplicates)" if cross else "")
+              + (f" ({folded} folded into existing beliefs)" if folded else "")
               + f", recorded {outcomes} skill outcome(s)")
         notify_staged(staged, suppressed)
         if derived and not DEFER_DREAM:
@@ -1257,6 +1281,80 @@ def cmd_statusline(args) -> int:
 CROSS_SUBJECT_CHANNELS = {"user": "user-model", "user-model": "user"}
 
 
+def same_subject_cover(conn, subject: str, claim: str) -> "tuple[float, int, str] | None":
+    """The active belief in the SAME subject that best already carries `claim`
+    -- (containment, id, claim), or None when nothing reaches DUP_CONTAINMENT.
+
+    ISSUE #51: four sessions independently re-derived one conclusion (a
+    monkeypatch/lazy-import pitfall) into four beliefs, each with its own
+    single evidence row, because nothing measured a new conclusion against
+    what the belief store ALREADY holds for this subject. belief_insert's
+    exact-match reinforcement (see belief_reinforce) only catches a BYTE-exact
+    restatement -- these four scored 0.56-0.94 containment on each other, not
+    1.00, so every one of them sailed past it as a new row.
+
+    Same tokenizer, same threshold, same asymmetric containment measure as
+    cross_subject_cover beside it -- reused, not reimplemented, so `lore
+    belief dedup-report` shows the number that actually decides a fold. Active
+    rows only (status = 'active' in the query): a claim that happens to match
+    a RETRACTED belief must not silently resurrect it by attaching new
+    evidence to a belief a human already terminated -- see derive_conclusions,
+    which inserts fresh in that case and notes it.
+    """
+    best = None
+    for bid, oclaim in conn.execute(
+        "SELECT id, claim FROM beliefs WHERE subject = ? AND status = 'active'", (subject,)
+    ):
+        score = token_containment(claim, oclaim)
+        if score >= DUP_CONTAINMENT and (best is None or score > best[0]):
+            best = (score, bid, oclaim)
+    return best
+
+
+def belief_neighbourhood(conn, subjects: "list[str]", messages: "list[tuple[str, str, str]]",
+                         n_themes: int = 5, k_per_theme: int = 6) -> str:
+    """A small, cheap, deterministic slice of the belief store to show the
+    deriver BEFORE it derives conclusions -- id + claim for whatever is
+    already active and looks related to this session, not the whole store.
+
+    ISSUE #51 part 2: the prompt never carried existing beliefs at all, so the
+    deriver had no way to know a conclusion it was about to write already
+    existed -- the four-twin duplication was invisible to the model, not just
+    to the write-time filter (same_subject_cover is the backstop for what this
+    misses). "Themes" are the most frequent content tokens in the digest
+    (pending.overlap_tokens -- the same tokenizer the containment measure
+    uses, so what the prompt shows and what the filter checks never drift
+    apart); each theme is one belief_fts MATCH, k_per_theme results, ordered
+    by bm25. n_themes/k_per_theme are both small on purpose: this is a
+    pointer list for the model to check against, not a second belief store
+    embedded in the prompt -- see build_review_job for the measured cost.
+    """
+    tokens = overlap_tokens(build_digest(messages))
+    if not tokens or not subjects:
+        return ""
+    themes = [t for t, _ in Counter(tokens).most_common(n_themes)]
+    placeholders = ",".join("?" * len(subjects))
+    seen: dict[int, str] = {}
+    for theme in themes:
+        expr = fts_expr(theme)
+        if not expr:
+            continue
+        try:
+            rows = conn.execute(
+                f"SELECT b.id, b.claim FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id"
+                f" WHERE belief_fts MATCH ? AND b.status = 'active' AND b.subject IN ({placeholders})"
+                " ORDER BY bm25(belief_fts) LIMIT ?",
+                (expr, *subjects, k_per_theme),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            continue  # a theme token that doesn't parse as an FTS5 term -- skip it, not fatal
+        for bid, claim in rows:
+            seen.setdefault(bid, claim)
+    if not seen:
+        return ""
+    return "\n".join(f"- [{bid}] {claim}" for bid, claim in sorted(seen.items()))
+
+
 def cross_subject_cover(conn, subject: str, claim: str) -> "tuple[float, int, str] | None":
     """The active belief in `subject`'s OPPOSITE channel that best already
     carries `claim` — (containment, id, claim), or None when the subject has
@@ -1294,10 +1392,12 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
     No approval gate — beliefs are queryable data, they never enter context
     uninvited; the gate stays on core memory and skills.
 
-    `stats` (ISSUE #50) is an optional out-parameter in the same shape
-    stage_proposals grows for ISSUE #48: how many conclusions the model
-    produced, how many were written, and how many the cross-subject check
-    dropped. Optional because the count is all worker_run needed until now.
+    `stats` (ISSUE #50, grown by ISSUE #51) is an optional out-parameter in the
+    same shape stage_proposals grows for ISSUE #48: how many conclusions the
+    model produced, how many were written as NEW belief rows ("derived"), how
+    many were folded into an existing same-subject belief as evidence instead
+    ("folded"), and how many the cross-subject check dropped. Optional because
+    the count is all worker_run needed until now.
     """
     # beliefs kill switch (2026-08-22): the prompt already dropped the
     # conclusions channel, but a jobfile built before the switch flipped can
@@ -1306,7 +1406,9 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
         return 0
     conn = db_connect()
     derived = 0
-    acct = {"extracted": 0, "derived": 0, "cross_subject": 0, "malformed": 0}
+    acct = {"extracted": 0, "derived": 0, "cross_subject": 0, "folded": 0,
+            "retracted_cited": 0, "malformed": 0}
+    folded_ids: list[int] = []
     conclusions = (data.get("conclusions") or [])[:10]
     acct["extracted"] = len(conclusions)
     for c in conclusions:
@@ -1372,6 +1474,57 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
             print(f"'user' belief kept despite {score:.0%} overlap with 'user-model'"
                   f" [{bid}] — the stated channel wins; `lore crosscheck` lists the pair"
                   f" for resolution: {claim[:120]}")
+        # ISSUE #51: same-subject convergent derivation. Four sessions each
+        # re-deriving one lesson is one well-evidenced belief, not four
+        # unconfirmed ones -- the honest count of independent confirmation is
+        # evidence on ONE row, not four rows with evidence one apiece.
+        #
+        # Two ways in, both landing on the same fold:
+        #  - EXPLICIT: the model named an existing belief in "evidence_for"
+        #    (belief_neighbourhood showed it the candidates). Trusted only
+        #    when that id is active AND in this exact subject -- never across
+        #    subjects (#50's settled boundary) and never onto a
+        #    superseded/retracted belief (a retracted belief does not
+        #    silently absorb its own resurrection; that gets a note and an
+        #    ordinary insert instead).
+        #  - IMPLICIT: same_subject_cover, the deterministic backstop for
+        #    whatever the model didn't self-report, at the same containment
+        #    threshold and tokenizer as #48/#49/#50 (threshold held by a
+        #    52,210-pair replay against a live store -- 0.40.0's CHANGELOG
+        #    carries the distribution).
+        fold_id, fold_note = None, None
+        ev_for = c.get("evidence_for")
+        if ev_for is not None:
+            try:
+                ev_id = int(ev_for)
+            except (TypeError, ValueError):
+                ev_id = None
+            if ev_id is not None:
+                row = conn.execute(
+                    "SELECT subject, status FROM beliefs WHERE id = ?", (ev_id,)
+                ).fetchone()
+                if row and row[0] == subject and row[1] == "active":
+                    fold_id, fold_note = ev_id, "cited via evidence_for"
+                elif row and row[0] == subject:
+                    acct["retracted_cited"] += 1
+                    print(f"conclusion cited {row[1]} belief [{ev_id}] via evidence_for — a"
+                          f" {row[1]} belief does not absorb its own resurrection; inserting"
+                          f" fresh instead: {claim[:120]}")
+                # a cross-subject evidence_for id is silently ignored: never
+                # merge across subjects, #50's boundary applies here too.
+        if fold_id is None:
+            same = same_subject_cover(conn, subject, claim)
+            if same:
+                score, fold_id, _oclaim = same
+                fold_note = f"{score:.0%} contained"
+        if fold_id is not None:
+            belief_reinforce(conn, fold_id, confidence, session_id, target_slug,
+                             evidence or claim)
+            acct["folded"] += 1
+            folded_ids.append(fold_id)
+            print(f"conclusion folded into existing [{fold_id}] ({fold_note}, same subject) —"
+                  f" evidence attached instead of a new row: {claim[:120]}")
+            continue
         belief_insert(
             conn, subject, claim, confidence,
             session_id, target_slug, evidence or None, via="derived",
@@ -1379,10 +1532,19 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
         derived += 1
         acct["derived"] += 1
     conn.commit()
-    if acct["cross_subject"]:
+    if acct["cross_subject"] or acct["folded"] or acct["retracted_cited"]:
+        parts = []
+        if acct["folded"]:
+            parts.append(f"folded {acct['folded']} into existing (ids "
+                        f"{', '.join(str(i) for i in folded_ids)})")
+        if acct["cross_subject"]:
+            parts.append(f"dropped {acct['cross_subject']} already carried by the other user"
+                        f" subject")
+        if acct["retracted_cited"]:
+            parts.append(f"{acct['retracted_cited']} cited a non-active belief and inserted"
+                        f" fresh")
         print(f"conclusions: derived {acct['derived']} of {acct['extracted']} extracted"
-              f" — dropped {acct['cross_subject']} already carried by the other user"
-              f" subject")
+              f" — {'; '.join(parts)}")
     if stats is not None:
         stats.update(acct)
     return derived
