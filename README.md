@@ -1,6 +1,7 @@
 <p align="center"><img src="assets/banner.png" width="720" alt="LORE — Lots Of Reconciled Engrams: the coral crab beside the block wordmark, a belief trail rising from its claw"></p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/status-alpha-e03131" alt="alpha: interfaces change between releases">
   <a href="https://github.com/docwilde/LORE/releases"><img src="https://img.shields.io/github/v/release/docwilde/LORE?label=release&color=ff7f50" alt="latest release"></a>
   <img src="https://img.shields.io/badge/Claude%20Code-plugin-d97757" alt="Claude Code plugin">
   <img src="https://img.shields.io/badge/writes-human--approved-2f9e44" alt="nothing writes without approval">
@@ -12,6 +13,23 @@
 # LORE — Lots Of Reconciled Engrams
 
 **Persistent memory for Claude Code that nothing writes to without your approval.** Curated memory stays hard-capped and human-directed. A derived belief store keeps everything the agent concluded on its own — and reaches the agent only when you ask for it.
+
+> [!WARNING]
+> **Alpha — work in progress.** LORE is `0.x` and moves daily: 42 releases took it
+> from `0.6.0` to `0.40.0` in a week. Config keys, command surfaces and the
+> curated-memory caps change between releases — the SQLite store migrates itself
+> additively, nothing else promises to.
+>
+> What that means concretely for you: it reads every transcript under
+> `~/.claude/projects/`, sends a scrubbed session digest to the same Anthropic
+> endpoint the session already used, and edits `~/.claude/settings.json` when you
+> run `/lore:setup` (`lore teardown` reverses that). Curated memory is gated —
+> nothing writes without your approval — but the belief store is not: the deriver
+> writes ungated, the largest hallucination surface here, and `0.40.0` exists
+> because one fact sat in a live store as four separate beliefs and nothing in the
+> pipeline caught it. It has one author, and most defects so far were found by
+> using it, not by the tests. Read [Data & safety](#data--safety) before pointing
+> it at anything you would be upset to have mis-remembered.
 
 Other agent-memory systems — Mem0, Letta, Zep, [Honcho](https://github.com/plastic-labs/honcho) — compete on recall. LORE bets containment is the scarcer problem: not that the agent remembers more, but that nothing steers it that has not earned the right to.
 
