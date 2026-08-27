@@ -1489,8 +1489,9 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
         #    ordinary insert instead).
         #  - IMPLICIT: same_subject_cover, the deterministic backstop for
         #    whatever the model didn't self-report, at the same containment
-        #    threshold and tokenizer as #48/#49/#50 (see the replay in
-        #    docs/belief-dedup.md).
+        #    threshold and tokenizer as #48/#49/#50 (threshold held by a
+        #    52,210-pair replay against a live store -- 0.40.0's CHANGELOG
+        #    carries the distribution).
         fold_id, fold_note = None, None
         ev_for = c.get("evidence_for")
         if ev_for is not None:
