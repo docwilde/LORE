@@ -88,16 +88,16 @@ replayed `token_containment` over every active same-subject belief pair:
 | 0.70 | 55 |
 
 Roughly 250 pairs across the 0.19-1.00 range were read individually. Nearly
-every pair down to ~0.30 turned out to be a genuine near-duplicate on this
-store -- the duplication problem here is broader than the four named twins,
-concentrated in a handful of recurring themes (an empirical-validation bar,
-caveman-mode as a standing preference, release-discipline atomicity, a
-silent-row-drop pipeline pattern, the monkeypatch/lazy-import pitfall
-itself). The first clean false positives -- claims that share vocabulary but
-are not the same fact -- appeared at 0.294 (a backup-script fact vs. an
-infrastructure-as-code fact) and a borderline case at 0.417 (two related but
-distinct GPU/embedding-pipeline facts). No genuinely distinct pair scored
-higher than that in the sampled range.
+every pair down to ~0.30 turned out to be a genuine near-duplicate on the
+store it was replayed against -- the duplication problem is broader than
+the four named twins, concentrated in a handful of recurring themes rather
+than spread evenly. The first clean false positives -- claims that share
+vocabulary but are not the same fact -- appeared at 0.294, with one
+borderline case at 0.417. No genuinely distinct pair scored higher than
+that in the sampled range. (The replay ran against a private store; theme
+descriptions and per-pair claim text stay out of this public document by
+design -- the distribution table above is the evidence the threshold
+argument needs.)
 
 0.60 clears the observed distinct-pair ceiling (~0.42) by ~43% relative --
 in the same range as #48's 40% margin over its approved-claim ceiling of
