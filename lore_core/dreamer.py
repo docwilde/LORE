@@ -11,6 +11,18 @@ cmd_crosscheck list `user` vs `user-model` near-duplicates. They live beside
 dream_candidates on purpose -- that function pairs beliefs WITHIN a subject,
 so nothing in the store ever looked across the two user channels, which is how
 they filled up with twins. `lore crosscheck`.
+
+And the read-only same-subject report (ISSUE #51): same_subject_pairs /
+cmd_dedup_report list near-duplicate pairs WITHIN one subject -- the
+population belief_write's containment fold now catches going forward, and
+the one a store that filled up BEFORE this release still carries. Not folded
+into `cmd_crosscheck`: that command's whole shape (one 'user' list against
+one 'user-model' list) is specific to the two-channel pairing #50 fixed:
+same_subject_pairs instead walks every subject in the store (`user-model`,
+`user`, and every `project:<slug>`) against itself, which is a different
+loop, a different report header, and a different set of subjects entirely --
+sharing a command would mean one flag doing two unrelated jobs. `lore belief
+dedup-report`.
 """
 
 import os
@@ -48,6 +60,8 @@ __all__ = [
     'cmd_dream',
     'cross_subject_pairs',
     'cmd_crosscheck',
+    'same_subject_pairs',
+    'cmd_dedup_report',
 ]
 
 DREAM_PROMPT = """You are the dreamer of a belief store (Honcho-pattern): you reconcile \
@@ -320,5 +334,73 @@ def cmd_crosscheck(args) -> int:
               f" (conf {m[3]:.2f})")
         print(f"    user       : {u[2]}")
         print(f"    user-model : {m[2]}")
+    print(f"\n{len(pairs)} pair(s). Nothing was changed — this command only reads.")
+    return 0
+
+
+def same_subject_pairs(conn: sqlite3.Connection, threshold: float = DUP_CONTAINMENT
+                       ) -> "list[tuple[float, tuple, tuple, str]]":
+    """Active same-subject belief pairs where one already carries the other,
+    best first, across EVERY subject in the store -- `user-model`, `user`,
+    and every `project:<slug>` -- not just the two user channels
+    cross_subject_pairs walks. Read-only: writes nothing, records no outcome,
+    retracts nothing and merges nothing. #50's reasoning about mechanical
+    merges applies here verbatim: which of two convergent wordings should
+    survive as the canonical claim is a judgement, the same kind of judgement
+    as which channel owns a cross-subject twin.
+
+    ISSUE #51. `same_subject_cover` (deriver.py) now folds a claim this close
+    to an existing belief AT WRITE TIME, so a store using this release will
+    not accumulate new pairs here. This report is for what a store already
+    had BEFORE that existed -- the four-belief duplication that motivated the
+    fix is exactly this kind of pair, four times over. Same tokenizer, same
+    measure, same threshold constant as the write-time fold (imported, not
+    reimplemented), so the number here is the number that decides a fold
+    going forward too.
+    """
+    rows = conn.execute(
+        f"SELECT {BELIEF_COLS} FROM beliefs WHERE status = 'active' ORDER BY subject, id"
+    ).fetchall()
+    by_subject: dict[str, list] = {}
+    for row in rows:
+        by_subject.setdefault(row[1], []).append(row)
+    pairs = []
+    for subject, group in by_subject.items():
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                a, b = group[i], group[j]
+                score = max(token_containment(a[2], b[2]), token_containment(b[2], a[2]))
+                if score >= threshold:
+                    pairs.append((score, a, b, subject))
+    pairs.sort(key=lambda p: (-p[0], p[1][0], p[2][0]))
+    return pairs
+
+
+def cmd_dedup_report(args) -> int:
+    """`lore belief dedup-report` -- read-only report of same-subject
+    near-duplicate beliefs (ISSUE #51): the population the write-time
+    containment fold now prevents going forward, surfaced for a store that
+    already accumulated some before this release. Lists both claims with
+    their subject, ids and confidence so a human can retract the redundant
+    one by hand; it never retracts or merges anything itself, for the same
+    reason `lore crosscheck` doesn't -- see same_subject_pairs."""
+    conn = db_connect()
+    threshold = getattr(args, "threshold", None) or DUP_CONTAINMENT
+    pairs = same_subject_pairs(conn, threshold)
+    n_active = conn.execute("SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
+    print(f"{n_active} active belief(s) across every subject;"
+          f" {len(pairs)} same-subject pair(s) at containment >= {threshold:.0%}.")
+    if not pairs:
+        print("nothing to resolve.")
+        return 0
+    print("\nEach pair below is two active beliefs in the SAME subject that likely say the"
+          "\nsame thing. Going forward a claim this close to an existing belief folds"
+          "\nautomatically (evidence attached, no new row); these pairs predate that fix."
+          "\nNothing here is retracted or merged automatically -- pick the one you judge"
+          "\nredundant: `lore belief retract <id> --reason ...`\n")
+    for score, a, b, subject in pairs:
+        print(f"[{score:.0%}]  {subject}  [{a[0]}] (conf {a[3]:.2f})  vs  [{b[0]}] (conf {b[3]:.2f})")
+        print(f"    [{a[0]}]: {a[2]}")
+        print(f"    [{b[0]}]: {b[2]}")
     print(f"\n{len(pairs)} pair(s). Nothing was changed — this command only reads.")
     return 0
