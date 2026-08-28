@@ -55,3 +55,13 @@ Finish with `lore status` for the new pending and belief counts, and send the us
 ## Uninstalling
 
 Everything this setup wires is reversed by `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" teardown`: it exports the curated memory files into the built-in auto-memory format (one `lore-export-<scope>.md` per scope, pointer appended to any existing `MEMORY.md`), sets `autoMemoryEnabled` back to `true`, removes the `LORE_*` env keys from `~/.claude/settings.json`, and prints what remains on disk with the one-liner to delete it. Run with `--dry-run` first to show the plan; nothing is deleted by teardown itself.
+
+## Belief graph
+
+Run `lore doctor` and read its `belief graph` line. A fresh install has no edges, and neither path runs on its own.
+
+1. If it reports `0 edges` or superseded beliefs without a `supersedes` edge, offer `lore graph backfill`. It is free — structural edges straight off the store's own columns, no model call, idempotent.
+2. If it reports no asserted relations, offer `lore graph derive --dry-run` first. That prints the prompt and its token estimate and calls nothing; show the estimate, then ask before running the real pass. It reads the belief store and no transcript.
+3. Do not offer `lore backfill` here. It re-reads transcripts at one model call per window and produces new beliefs — a different job, and a much larger spend.
+
+Leave the graph empty if the user declines. Nothing else depends on it.

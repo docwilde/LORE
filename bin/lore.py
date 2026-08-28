@@ -269,6 +269,40 @@ def cmd_doctor(args) -> int:
     else:
         print('off   mid-session deriver — reviews fire at SessionEnd/PreCompact only.'
               ' Set LORE_REVIEW_SECS (e.g. "3600") for an hourly incremental review.')
+    # BELIEF GRAPH. A fresh install has an empty one and nothing else says so:
+    # the structural edges are one free command away and the asserted ones one
+    # cheap call, but neither happens on its own, so a store can sit for weeks
+    # with a graph nobody knew was empty.
+    try:
+        conn = db_connect()
+        n_active = conn.execute(
+            "SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
+        n_edges = conn.execute("SELECT count(*) FROM belief_edges").fetchone()[0]
+        n_asserted = conn.execute(
+            "SELECT count(*) FROM belief_edges WHERE source = 'derived'").fetchone()[0]
+        pending_sup = conn.execute(
+            "SELECT count(*) FROM beliefs b WHERE b.superseded_by IS NOT NULL"
+            " AND NOT EXISTS (SELECT 1 FROM belief_edges e WHERE e.src = b.id"
+            "                 AND e.dst = b.superseded_by AND e.rel = 'supersedes')"
+        ).fetchone()[0]
+        if n_active < 2:
+            print(f"ok    belief graph: {n_active} active belief(s) — nothing to relate yet")
+        elif not n_edges:
+            print(f"off   belief graph: 0 edges over {n_active} beliefs."
+                  " Free: `lore graph backfill` (structural, no model call)."
+                  " Then `lore graph derive --dry-run` to price the asserted verbs.")
+        else:
+            print(f"ok    belief graph: {n_edges} stored edge(s) over {n_active} beliefs,"
+                  f" {n_asserted} asserted")
+            if pending_sup:
+                print(f"warn  belief graph: {pending_sup} superseded belief(s) have no"
+                      " `supersedes` edge — run `lore graph backfill` (free)")
+            if not n_asserted:
+                print("off   belief graph: no asserted relations."
+                      " `lore graph derive --dry-run` prices one pass over the store;"
+                      " it reads no transcript.")
+    except sqlite3.Error as e:
+        print(f"warn  belief graph: could not be read ({e})")
     return 0 if ok else 1
 
 
