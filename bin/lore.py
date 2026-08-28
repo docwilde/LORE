@@ -635,6 +635,18 @@ def main() -> int:
     gp = gsub.add_parser("backfill",
                          help="write the edges the store already implies (supersedes)")
     _common(gp)
+    # EXPERIMENTAL: the block LORE_GRAPH_CONTEXT injects on UserPromptSubmit,
+    # runnable here against any prompt so the selection and the budget can be
+    # inspected without turning the stage on.
+    gp = gsub.add_parser("context",
+                         help="preview the experimental graph-context injection")
+    gp.add_argument("--prompt", nargs="*", help="score against this prompt")
+    gp.add_argument("--cap", type=int, default=GRAPH_CONTEXT_CAP,
+                    help=f"char budget (default {GRAPH_CONTEXT_CAP})")
+    gp.add_argument("--hops", type=int, default=GRAPH_CONTEXT_HOPS,
+                    help=f"expansion depth (default {GRAPH_CONTEXT_HOPS})")
+    gp.add_argument("--cwd")
+    gp.set_defaults(fn=cmd_graph)
     gp = gsub.add_parser("html",
                          help="render the graph as mermaid and open it in a browser")
     gp.add_argument("--belief", type=int,

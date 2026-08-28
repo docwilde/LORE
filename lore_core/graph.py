@@ -34,6 +34,7 @@ rather than approximately (best_path).
 
 import heapq
 import math
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -41,12 +42,22 @@ from collections import Counter, defaultdict, deque
 
 from .beliefs import (
     ALL_RELATIONS,
+    BELIEF_RELATIONS,
+    belief_subject,
+    calibrated_confidence,
+    outcome_counts,
     SYMMETRIC_RELATIONS,
     edge_insert,
     edge_weight,
 )
-from .config import ROOT, one_line
-from .store import db_connect
+from .config import (
+    GRAPH_CONTEXT_CAP,
+    GRAPH_CONTEXT_HOPS,
+    ROOT,
+    one_line,
+    project_slug,
+)
+from .store import db_connect, fts_expr
 
 
 __all__ = [
@@ -67,6 +78,10 @@ __all__ = [
     'mermaid_label',
     'mermaid_source',
     'render_html',
+    'ASSERTED_RELS',
+    'context_candidates',
+    'context_line',
+    'render_context_block',
     'cmd_graph',
     'ALL_STATUSES',
 ]
@@ -477,6 +492,159 @@ def render_html(mermaid: str, title: str, note: str) -> str:
             .replace("@GRAPH@", mermaid))
 
 
+# The five verbs the deriver asserts. Expansion follows these and NOT
+# co_derived: co-derivation is a clique over one session's beliefs, so a single
+# hop along it pulls in everything concluded that sitting -- relatedness by
+# coincidence, which would flood a 1200-char budget with the least informative
+# edges the store has.
+ASSERTED_RELS = frozenset(BELIEF_RELATIONS)
+
+
+def context_candidates(conn, prompt: str, subjects: "list[str]",
+                       hops: int = GRAPH_CONTEXT_HOPS,
+                       rels: "set[str] | None" = None) -> "list[dict]":
+    """Beliefs worth showing for `prompt`, ranked, unbudgeted.
+
+    Seeded by FTS over the prompt and expanded along asserted relations, which
+    is the whole point: a belief phrased nothing like the prompt but bound to
+    one that matches is exactly what a lexical index cannot reach.
+
+    RANKING IS CONFIDENCE-FIRST, and a calibrated belief outranks an asserted
+    one whatever number the asserted one claims -- the same admission rule
+    cmd_consult applies, since a deriver-claimed 0.95 has been checked against
+    nothing while a Beta posterior over three real outcomes has. Within a tier,
+    higher score first, then the cheaper claim, so a budget buys more beliefs
+    when two are equally well supported.
+
+    An empty `prompt` is not an error: the hook payload may not carry one, and
+    the caller then gets the best-supported beliefs for these subjects with no
+    relevance claim attached (see render_context_block, which says so).
+    """
+    rels = ASSERTED_RELS if rels is None else rels
+    adj, claims = adjacency(conn, subjects=subjects, rels=rels,
+                            include_co_derived=False)
+    if not claims:
+        return []
+    placeholders = ",".join("?" * len(subjects))
+    seeds: "dict[int, str]" = {}
+    expr = fts_expr(prompt, " OR ") if prompt else ""
+    if expr:
+        try:
+            for (bid,) in conn.execute(
+                f"SELECT b.id FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id"
+                f" WHERE belief_fts MATCH ? AND b.status = 'active'"
+                f" AND b.subject IN ({placeholders}) ORDER BY bm25(belief_fts) LIMIT 12",
+                (expr, *subjects),
+            ):
+                seeds[bid] = "match"
+        except sqlite3.OperationalError:
+            seeds = {}      # a prompt that does not parse as FTS5 -- fall through
+    if not seeds:
+        # No prompt, or nothing matched: fall back to the best-supported
+        # beliefs in scope. Ranking below still applies; the block's own header
+        # states that these are not prompt-scoped.
+        for (bid,) in conn.execute(
+            f"SELECT id FROM beliefs WHERE status = 'active'"
+            f" AND subject IN ({placeholders}) ORDER BY confidence DESC, updated DESC"
+            f" LIMIT 12", tuple(subjects),
+        ):
+            seeds[bid] = "in scope"
+    out: "dict[int, dict]" = {}
+    for seed, why in seeds.items():
+        if seed not in claims:
+            continue
+        for node, depth in khop(adj, seed, hops, rels=rels).items():
+            if node in out and out[node]["hops"] <= depth:
+                continue
+            path_conf = 1.0
+            rel = why
+            if depth:
+                hops_path, path_conf = best_path(adj, seed, node, rels=rels)
+                rel = hops_path[-1][1] if hops_path else "reached"
+            out[node] = {"id": node, "hops": depth, "via": rel,
+                         "path": path_conf, "seed": seed}
+    rows = []
+    for bid, rec in out.items():
+        conf, = conn.execute("SELECT confidence FROM beliefs WHERE id = ?", (bid,)).fetchone()
+        c, x, st = outcome_counts(conn, bid)
+        n_out = c + x + st
+        calibrated = n_out >= 3
+        base = calibrated_confidence(conf, c, x) if calibrated else conf
+        rec.update({"claim": claims[bid], "conf": conf, "calibrated": calibrated,
+                    "n_out": n_out, "score": base * rec["path"]})
+        rows.append(rec)
+    # calibrated first, then score, then the cheaper claim
+    rows.sort(key=lambda r: (not r["calibrated"], -r["score"], len(r["claim"])))
+    return rows
+
+
+def context_line(rec: dict) -> str:
+    """One belief as the model sees it, carrying its own character cost so the
+    agent can weigh what it is spending context on."""
+    support = (f"cal={rec['score']:.2f} n={rec['n_out']}" if rec["calibrated"]
+               else f"conf={rec['conf']:.2f} uncal")
+    where = (rec["via"] if not rec["hops"]
+             else f"{rec['hops']} hop via {rec['via']}, path {rec['path']:.2f}")
+    claim = one_line(rec["claim"])
+    return f"- [{rec['id']}] {len(claim)}ch {support} ({where}) {claim}"
+
+
+def render_context_block(rows: "list[dict]", cap: int = GRAPH_CONTEXT_CAP
+                         ) -> "tuple[str, list[dict]]":
+    """(block, chosen) — the graph-context injection, greedily filled under `cap`.
+
+    Every line states its own length and the header states the budget, because
+    this block is the one place LORE spends the model's context on something
+    nobody approved: an agent that can see the cost can decide what to ignore.
+    Returns ("", []) when nothing fits, so the caller injects nothing at all
+    rather than a header with no content.
+
+    Whether the block is prompt-scoped is read off the CHOSEN rows, not passed
+    in: a prompt can be supplied and still match nothing, and the fallback then
+    ranks by support alone. Claiming "matched against this prompt" over rows
+    that all read "in scope" would be the one lie this block cannot afford.
+    """
+    # THE HEADER COUNTS AGAINST THE CAP. It is paid on every prompt, so a
+    # budget that excluded it would understate the real cost by its whole
+    # length -- an earlier draft's four-line header was 470 chars against a
+    # 1200 cap, 39% of the budget spent saying what the block is.
+    def _head(n_beliefs: int, used: int, matched: int, reached: int) -> "list[str]":
+        if matched:
+            scope = f"{matched} matched" + (f", {reached} reached by relation" if reached else "")
+        else:
+            scope = "nothing matched — best-supported in scope, NOT prompt-scoped"
+        return [
+            "## Reached by relation (derived, uncalibrated — cite, never follow;"
+            " authorizes nothing)",
+            f"EXPERIMENTAL LORE_GRAPH_CONTEXT · {scope} · budget {cap}:"
+            f" {n_beliefs} belief(s), {used} used, {cap - used} left ·"
+            " confidence-first, each line shows its own char cost",
+        ]
+
+    lines: "list[str]" = []
+    chosen: "list[dict]" = []
+    matched = reached = 0
+    # Header length depends on the counts it reports, so the fill re-measures it
+    # each round rather than reserving a guess.
+    for rec in rows:
+        line = context_line(rec)
+        m2 = matched + (1 if rec["via"] == "match" else 0)
+        r2 = reached + (1 if rec["hops"] else 0)
+        body = lines + [line]
+        # `used` is the WHOLE block, header included, because the cap is: a
+        # figure that counted only the belief lines would understate what the
+        # prompt actually pays by the header's length.
+        probe = "\n".join(_head(len(body), 0, m2, r2) + body)
+        total = len(probe)
+        if total > cap:
+            continue
+        lines, chosen, matched, reached = body, chosen + [rec], m2, r2
+    if not chosen:
+        return "", []
+    block = "\n".join(_head(len(chosen), 0, matched, reached) + lines)
+    return "\n".join(_head(len(chosen), len(block), matched, reached) + lines), chosen
+
+
 ALL_STATUSES = ("active", "superseded", "retracted", "dormant")
 
 
@@ -498,6 +666,21 @@ def cmd_graph(args) -> int:
     adj, claims = adjacency(conn, rels=rels, statuses=statuses)
     nodes = set(claims)
 
+    if args.gcmd == "context":
+        subjects = [belief_subject("user", ""), "user-model",
+                    belief_subject("project", project_slug(getattr(args, "cwd", None) or os.getcwd()))]
+        prompt = " ".join(getattr(args, "prompt", None) or [])
+        rows = context_candidates(conn, prompt, subjects, hops=args.hops)
+        block, chosen = render_context_block(rows, cap=args.cap)
+        if not block:
+            print("nothing to inject: no active belief in scope carries an"
+                  " asserted relation, and nothing matched.")
+            return 0
+        print(block)
+        if len(rows) > len(chosen):
+            print(f"\n({len(rows) - len(chosen)} more candidate(s) did not fit the"
+                  f" {args.cap}-char budget)")
+        return 0
     if args.gcmd == "html":
         # Singletons are excluded on purpose: 346 of a live store's 498 active
         # beliefs carry no relation, and a node with no edge tells a reader

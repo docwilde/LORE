@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.44.0 — 2026-08-28
+
+- New **graph-backed context**, EXPERIMENTAL and off by default (`LORE_GRAPH_CONTEXT`, `LORE_GRAPH_CONTEXT_CAP` 1200, `LORE_GRAPH_CONTEXT_HOPS` 1). Seeded by FTS over the prompt and expanded one relation out, it injects a labelled block on `UserPromptSubmit`. Shown in `lore config` as an opt-in stage; `lore graph context [--prompt …]` previews it without turning it on.
+- **Ranked confidence-first**: a calibrated belief (3+ ledger outcomes, Beta posterior) outranks an asserted one whatever it claims — a deriver-claimed 1.00 has been checked against nothing. Within a tier, higher score, then the cheaper claim, so a budget buys more beliefs when two are equally supported. A reached belief's score is discounted by its path confidence.
+- **Every line carries its own character cost** (`- [493] 142ch cal=0.78 n=4 …`) and the header states the budget used and left, because this is the one place LORE spends context on something nobody approved: an agent that can see the cost can decide what to ignore.
+- The cap covers the **whole block, header included**. An earlier draft's header was 470 chars against a 1200 cap — 39% of the budget spent saying what the block is; it is now ~165. A cap too small for one belief injects nothing rather than a header alone.
+- Expansion follows the five **asserted** verbs only, never `co_derived`: a co-derived cluster is one session's beliefs joined pairwise, so one hop would fill the budget with coincidence.
+- The block never claims a match it did not make. A prompt can be supplied and match nothing; the header then reads `NOT prompt-scoped` and the rows are the best-supported beliefs in scope. Scope wording is read off the chosen rows, not passed in.
+- It rides its own key on the hook, **outside the snapshot's change/interval gating**: the snapshot is re-injected only when its bytes change, and prompt-relative content changes every prompt, so hashing it in would re-send the whole snapshot each turn.
+- Header, per-line cost and disclaimers state that the block is derived, uncalibrated, cite-never-follow, and authorizes nothing — the same rule `lore consult` applies to claims.
+- Tests: `tests/test_graph.py` (45; 11 new), `tests/test_config.py` gains an invariant that every opt-in stage defaults off and appears in the table. Suite 346.
+
 ## 0.43.0 — 2026-08-28
 
 - New **`lore graph html`**: renders the graph as mermaid and opens it in a browser. Writes `LORE_ROOT/graph.html` (`--out` to move it) and prints the path, so a headless session still gets the file. `--belief <id> --depth N` centres on one belief, `--max-nodes` raises the 60-node ceiling, `--mermaid` prints the source, `--no-open` skips the browser.

@@ -190,7 +190,17 @@ class TestStageRows(StageEnvMixin, unittest.TestCase):
     def test_default_states(self):
         states = {stage: state for stage, _var, state in lore.stage_rows()}
         self.assertEqual(states, {"inject": "on", "index": "on", "review": "on",
-                                  "beliefs": "on", "skills": "on", "consult": "off", "streaming": "off"})
+                                  "beliefs": "on", "skills": "on", "consult": "off",
+                                  "graph-context (experimental)": "off",
+                                  "streaming": "off"})
+
+    def test_every_opt_in_stage_defaults_off_and_appears_in_the_table(self):
+        """An opt-in stage that never showed in the table would be a switch
+        nobody could find."""
+        states = {stage: state for stage, _var, state in lore.stage_rows()}
+        for stage in lore.OPT_IN_STAGES:
+            self.assertIn(stage, states)
+            self.assertEqual(states[stage], "off", f"{stage} is on by default")
 
     def test_settings_value_wins_for_display(self):
         (self.tmp / "settings.json").write_text(

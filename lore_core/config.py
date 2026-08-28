@@ -42,6 +42,9 @@ __all__ = [
     'DIGEST_TOTAL_CAP',
     'DIGEST_LAST_N',
     'MEMORY_PROPOSAL_CAP',
+    'GRAPH_CONTEXT',
+    'GRAPH_CONTEXT_CAP',
+    'GRAPH_CONTEXT_HOPS',
     'DUP_CONTAINMENT',
     'utcnow',
     'project_root',
@@ -148,6 +151,19 @@ MEMORY_PROPOSAL_CAP = int(os.environ.get("LORE_MEMORY_PROPOSAL_CAP", "3"))
 # #48's replay left, and it catches 30 of the issue's 42 detected pairs plus 7
 # more that the issue's own jaccard-0.30 detection floor missed entirely.
 DUP_CONTAINMENT = float(os.environ.get("LORE_DUP_CONTAINMENT", "0.60"))
+
+# GRAPH CONTEXT (EXPERIMENTAL, off by default). The one channel that puts
+# beliefs into the model's context without being asked for them, which is why
+# it is opt-in and labelled everywhere it appears: every other belief surface
+# is pull (`lore ask`, `lore consult`) or is the interaction-model section the
+# snapshot already declares as uncalibrated.
+#
+# Its cap is SEPARATE from USER_CAP/MEMORY_CAP on purpose: curated memory is
+# hard-capped and human-directed, and a derived block must never be able to
+# crowd it out. 1200 chars is roughly eight beliefs.
+GRAPH_CONTEXT = os.environ.get("LORE_GRAPH_CONTEXT", "") not in ("", "0", "off", "false")
+GRAPH_CONTEXT_CAP = int(os.environ.get("LORE_GRAPH_CONTEXT_CAP", "1200"))
+GRAPH_CONTEXT_HOPS = int(os.environ.get("LORE_GRAPH_CONTEXT_HOPS", "1"))
 
 
 def utcnow() -> str:
@@ -364,6 +380,7 @@ STAGE_SWITCHES = {
 # the config table but never routed through stage_disabled().
 OPT_IN_STAGES = {
     "consult": "LORE_CONSULT",
+    "graph-context (experimental)": "LORE_GRAPH_CONTEXT",
 }
 
 
