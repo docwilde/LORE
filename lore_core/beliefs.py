@@ -349,16 +349,24 @@ def belief_supersede(conn: sqlite3.Connection, bid: int, by: int | None, reason:
 
 def format_belief(conn: sqlite3.Connection, row, with_evidence: bool = False) -> str:
     bid, subject, claim, conf, status = row[:5]
-    n_ev = conn.execute(
-        "SELECT count(*) FROM belief_evidence WHERE belief_id = ?", (bid,)
-    ).fetchone()[0]
+    n_ev, n_sess = conn.execute(
+        "SELECT count(*), count(DISTINCT session_id) FROM belief_evidence"
+        " WHERE belief_id = ?", (bid,)
+    ).fetchone()
     # ISSUE #43: show provenance when the row has it. Beliefs written before
     # 0.36.0 have NULL via/writer and render exactly as they always did --
     # no retroactive label for something the store never recorded.
     prov = conn.execute("SELECT via, writer FROM beliefs WHERE id = ?", (bid,)).fetchone()
     via = (prov[0] if prov else None) or ""
     tag = f", via {via}" if via else ""
-    out = f"[{bid}] ({subject}, conf {conf:.2f}, {status}, {n_ev} evidence{tag}) {claim}"
+    # BOTH counts, because they answer different questions and only one of them
+    # is corroboration: a live store held a belief with 12 evidence rows from 6
+    # sessions, and the row count alone reads as twice the independent support
+    # it has. Shown only when they differ, so the common case is unchanged.
+    ev = f"{n_ev} evidence"
+    if n_sess and n_sess != n_ev:
+        ev += f" / {n_sess} session" + ("s" if n_sess != 1 else "")
+    out = f"[{bid}] ({subject}, conf {conf:.2f}, {status}, {ev}{tag}) {claim}"
     if with_evidence:
         for sid, proj, note, created in conn.execute(
             "SELECT session_id, project, note, created FROM belief_evidence"
@@ -379,7 +387,11 @@ def format_edges(conn: sqlite3.Connection, bid: int) -> str:
     out = ["  relations:"]
     for direction, other, rel, source, support, claim, status in rows:
         arrow = f"--{rel}-->" if direction == "out" else f"<--{rel}--"
-        tag = f"{source}, n={support}" + (f", {status}" if status != "active" else "")
+        # a structural edge came from the store's own state, not from a session
+        # asserting it, so it has no session count and needs none -- "n=0" would
+        # read as "nobody has corroborated this" about an edge that is certain.
+        basis = "observed" if source == "structural" else f"n={support}"
+        tag = f"{source}, {basis}" + (f", {status}" if status != "active" else "")
         out.append(f"    {arrow} [{other}] ({tag}) {one_line(claim)[:120]}")
     return "\n".join(out)
 
