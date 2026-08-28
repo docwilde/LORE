@@ -821,6 +821,15 @@ class MermaidExport(unittest.TestCase):
         self.assertIn("needs network", html)
         self.assertIn("cdn.jsdelivr.net", html)
 
+    def test_the_two_notes_do_not_contradict_each_other(self):
+        """The co-derived hint used to advise the whole asserted view, which is
+        exactly what the cluster note warns produces a ribbon."""
+        src = pathlib.Path(GRAPH.__file__).read_text()
+        i = src.index("of drawn relations are co_derived")
+        hint = src[i:i + 700]
+        self.assertIn("--belief", hint)
+        self.assertNotIn("pass --rel depends_on", hint)
+
     def test_a_cluster_cap_exists_because_the_node_cap_is_the_wrong_knob(self):
         """Mermaid stacks disconnected pieces vertically, so a view's shape is
         set by how MANY islands it draws. Measured on a live store's

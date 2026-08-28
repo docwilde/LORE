@@ -1017,9 +1017,17 @@ def cmd_graph(args) -> int:
         n_edges = sum(rel_counts.values())
         n_co = rel_counts.get("co_derived", 0)
         if n_edges and n_co / n_edges > 0.8:
+            # Point at --belief, NOT at a whole asserted view: filtering to the
+            # asserted verbs removes the co-derived edges holding these clusters
+            # together, which is how a readable view becomes 44 islands and a
+            # ribbon. Advising the thing the cluster note warns about would make
+            # the tool argue with itself.
             print(f"note: {100 * n_co // n_edges}% of drawn relations are co_derived"
-                  " (one session's beliefs, joined pairwise) — pass --rel depends_on"
-                  " --rel explains … to see only what the deriver asserted")
+                  " (one session's beliefs, joined pairwise), which means only"
+                  " \"concluded together\". To read asserted structure, centre on a"
+                  " belief: --belief <id> --depth 2. Filtering the whole graph with"
+                  " --rel fragments it, since co-derivation is what holds these"
+                  " clusters together.")
         # Say what was left out and how to see it, rather than silently drawing
         # a fraction: a reader who cannot tell a capped view from a whole one
         # will read absence as evidence.

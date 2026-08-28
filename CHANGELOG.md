@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.48.2 — 2026-08-28
+
+- The co-derived hint pointed at the whole asserted view, which is exactly what the cluster note warns produces an unreadable ribbon — the tool argued with itself. It now points at `--belief <id> --depth 2`, and says why filtering the whole graph fragments it: co-derivation is what holds the drawn clusters together.
+- Tests: `tests/test_graph.py` (85; 1 new, asserting the two notes agree). Suite 386.
+
 ## 0.48.1 — 2026-08-28
 
 - New `--max-clusters` (default 8), and it is the knob that decides whether a view is readable. Mermaid stacks disconnected clusters vertically, so a view's shape follows how MANY islands it draws, not how many nodes: measured on a live store's asserted-only graph, the top 1/3/6 components render at aspect 2.87/0.83/0.48 and read fine, while all 44 render 1188x13814 — aspect 0.09, fitting at 5%, legible at no zoom level. A 60-node cap over three-node islands is already 20 clusters, so the node cap could not prevent it.
