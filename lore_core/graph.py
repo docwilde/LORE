@@ -36,6 +36,7 @@ import heapq
 import math
 import os
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from collections import Counter, defaultdict, deque
@@ -51,6 +52,7 @@ from .beliefs import (
     edge_weight,
 )
 from .config import (
+    DREAMER_MODEL,
     GRAPH_CONTEXT_CAP,
     GRAPH_CONTEXT_HOPS,
     ROOT,
@@ -84,6 +86,9 @@ __all__ = [
     'skill_line',
     'SKILL_RESERVE',
     'render_context_block',
+    'DERIVE_PROMPT',
+    'DERIVE_SESSION',
+    'derive_relations',
     'cmd_graph',
     'ALL_STATUSES',
 ]
@@ -705,6 +710,136 @@ _SKILLS_HEAD = ("Learned recipes, ranked by track record and filled only from th
                 " budget the beliefs above left. A recipe is not a fact.")
 
 
+# One run reads the same claims whatever the date, so the assertion id is
+# STABLE: re-running a derive pass is not independent corroboration of the edges
+# it finds, and a fresh id each time would inflate every edge's distinct-session
+# support off one store read. A later run adds edges it missed; it does not make
+# the old ones better evidenced.
+DERIVE_SESSION = "graph-derive"
+
+DERIVE_PROMPT = """You are given every active belief in a memory store, one per line, as `id | claim`.
+
+Your only job is to name RELATIONS BETWEEN THESE CLAIMS. Do not restate a claim, do not \
+propose a new one, do not judge whether one is true. The five relations, from the claim on the \
+left to the claim on the right:
+
+- depends_on: the left claim holds only while the right one holds.
+- specializes: the left claim is a narrower case of the right one.
+- explains: the left claim gives the mechanism behind the right one.
+- contradicts: the two cannot both be true. Mutual — state it once, either order.
+- applies_when: the right claim states the condition the left one applies under.
+
+WHAT NOT TO EMIT, because it is what makes a graph useless:
+
+- Two claims about the same file, tool, command or project are NOT related. Sharing a subject is \
+not a relation. The store already has a full-text index for "mentions the same thing".
+- A claim that merely resembles another is not related to it — that is a duplicate, and a \
+different pass handles it.
+- If you cannot say which of the five verbs applies, there is no edge. Most pairs have none.
+
+Emit at most {cap} edges, and fewer is the normal answer. A store of {n} claims that genuinely \
+supports 20 edges should get 20, not {cap}. Precision is the whole value: one wrong \
+`depends_on` makes every real one suspect.
+
+Both ids must come from the list. Never relate a claim to itself.
+
+Beliefs:
+{beliefs}
+
+Output ONLY minified JSON, no prose, no fences:
+{{"edges":[{{"from":<id>,"to":<id>,"rel":"depends_on|specializes|explains|contradicts|applies_when","why":"short"}}]}}
+If nothing genuinely relates output {{"edges":[]}}
+"""
+
+
+def derive_relations(conn, subjects: "list[str]", cap: int = 60,
+                     model: "str | None" = None, dry_run: bool = False) -> "dict[str, int]":
+    """Ask a model for relations BETWEEN the store's existing claims.
+
+    THE CHEAP PATH TO EDGES. The five verbs are judgements about claims, not
+    about the transcripts claims came from, so getting them does not require
+    re-reading a single session: the whole active store of a live machine is 500
+    beliefs and ~82k chars, one prompt, against tens of millions of tokens to
+    page 718 transcripts through the deriver again. Nothing here reads a
+    transcript, writes a belief, or changes one.
+
+    Every id the model returns is checked against the set it was shown, and
+    every relation against BELIEF_RELATIONS -- a hallucinated id or an invented
+    verb is dropped and counted, never written.
+    """
+    rows = conn.execute(
+        f"SELECT id, claim FROM beliefs WHERE status = 'active'"
+        f" AND subject IN ({','.join('?' * len(subjects))}) ORDER BY id",
+        tuple(subjects),
+    ).fetchall()
+    acct = {"claims": len(rows), "proposed": 0, "written": 0, "reasserted": 0,
+            "bad_id": 0, "bad_rel": 0, "self": 0, "malformed": 0}
+    if len(rows) < 2:
+        print("fewer than two active beliefs in scope — nothing to relate.")
+        return acct
+    # Deferred: deriver.py imports from this module at its own top level, so
+    # this direction is function-local -- the same shape that module's docstring
+    # documents for its own import of dream_run.
+    from .deriver import extract_json, find_claude, run_claude
+    valid = {r[0] for r in rows}
+    listing = "\n".join(f"{bid} | {one_line(claim)}" for bid, claim in rows)
+    prompt = DERIVE_PROMPT.format(cap=cap, n=len(rows), beliefs=listing)
+    if dry_run:
+        print(prompt)
+        print(f"\n--- {len(prompt)} chars (~{len(prompt) // 4} tokens),"
+              f" {len(rows)} claims, model {model or DREAMER_MODEL}")
+        return acct
+    claude = find_claude()
+    if not claude:
+        print("no claude binary (set LORE_CLAUDE_BIN).", file=sys.stderr)
+        return acct
+    try:
+        proc = run_claude(claude, prompt, model or DREAMER_MODEL, "graph-derive")
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"model call failed: {e}", file=sys.stderr)
+        return acct
+    data = extract_json(proc.stdout) if proc.returncode == 0 else None
+    if data is None:
+        print(f"no JSON from the model: {(proc.stdout or proc.stderr)[-400:]}",
+              file=sys.stderr)
+        return acct
+    edges = (data.get("edges") or [])[:cap]
+    acct["proposed"] = len(edges)
+    for e in edges:
+        if not isinstance(e, dict):
+            acct["malformed"] += 1
+            continue
+        rel = e.get("rel")
+        try:
+            a, b = int(e.get("from")), int(e.get("to"))
+        except (TypeError, ValueError):
+            acct["malformed"] += 1
+            continue
+        if rel not in BELIEF_RELATIONS:
+            acct["bad_rel"] += 1
+            continue
+        if a == b:
+            acct["self"] += 1
+            continue
+        if a not in valid or b not in valid:
+            acct["bad_id"] += 1
+            continue
+        note = one_line(str(e.get("why") or ""))[:200] or None
+        if edge_insert(conn, a, b, rel, "derived", DERIVE_SESSION, note):
+            acct["written"] += 1
+            print(f"  [{a}] --{rel}--> [{b}]" + (f"  {note}" if note else ""))
+        else:
+            acct["reasserted"] += 1
+    conn.commit()
+    dropped = acct["bad_id"] + acct["bad_rel"] + acct["self"] + acct["malformed"]
+    print(f"\n{acct['claims']} claims in scope, {acct['proposed']} edge(s) proposed,"
+          f" {acct['written']} written, {acct['reasserted']} already present,"
+          f" {dropped} dropped"
+          + (f" (ids {acct['bad_id']}, verbs {acct['bad_rel']},"
+             f" self {acct['self']}, malformed {acct['malformed']})" if dropped else ""))
+    return acct
+
+
 ALL_STATUSES = ("active", "superseded", "retracted", "dormant")
 
 
@@ -811,6 +946,18 @@ def cmd_graph(args) -> int:
                 print(f"could not open a browser ({e}) — open the file above yourself")
         return 0
 
+    if args.gcmd == "derive":
+        subjects = ([s for s in args.subject] if args.subject else
+                    [belief_subject("user", ""), "user-model",
+                     belief_subject("project", project_slug(
+                         getattr(args, "cwd", None) or os.getcwd()))])
+        if args.all:
+            subjects = [r[0] for r in conn.execute(
+                "SELECT DISTINCT subject FROM beliefs WHERE status = 'active'")]
+        print(f"scope: {len(subjects)} subject(s)")
+        derive_relations(conn, subjects, cap=args.max_edges, model=args.model,
+                         dry_run=args.dry_run)
+        return 0
     if args.gcmd == "stats":
         by_rel = Counter(r for v in adj.values() for _d, r, _w in v)
         deg = degree(adj)

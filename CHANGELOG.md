@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.46.0 — 2026-08-28
+
+- New **`lore graph derive`**: asks a model for relations between the beliefs the store already holds. The five verbs are judgements about *claims*, not about the transcripts claims came from, so this reads no transcript — a whole 500-belief store is one call of ~22k tokens against the tens of millions it costs to page a few hundred sessions back through the deriver. It writes no belief and changes none.
+- `--dry-run` prints the prompt and its token estimate and calls nothing. `--subject` (repeatable) or `--all` set the scope; the default is `user`, `user-model` and the current project, so cross-subject edges are reachable. `--max-edges` (60) and `--model` (default `LORE_DREAMER_MODEL`).
+- Every returned id is checked against the set the model was shown and every verb against `BELIEF_RELATIONS`; a hallucinated id, an invented verb, a self-loop or a malformed entry is dropped and counted, never written. `supersedes` is refused — a structural transition is not a judgement a model may assert.
+- The assertion id is **stable** (`DERIVE_SESSION`): a derive pass reads the same claims however often it runs, so re-running it is not independent corroboration and must not inflate an edge's distinct-session support off one store read.
+- The prompt states what NOT to emit, since precision is the whole value: two claims about the same file, tool or project are not related, a resemblance is a duplicate rather than a relation, and most pairs have no edge. Measured live on a 5-belief subject: 3 proposed, 3 written, 0 dropped.
+- `/lore:graph` corrected. It said the asserted verbs "cannot be backfilled without re-deriving" — true of what was built, not of what was possible. It now names both paths and what each actually buys.
+- Tests: `tests/test_graph.py` (66; 11 new, model call stubbed). Suite 367.
+
 ## 0.45.0 — 2026-08-28
 
 - Learned skills join the graph-context block as a **second tier**. New **`skill_candidates`** (`lore_core/deriver.py`) ranks them by track record: a recipe whose last outcome is a success and whose successes outnumber its failures comes first, then tested, then untested.
