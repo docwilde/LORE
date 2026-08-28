@@ -29,7 +29,7 @@ Then read the numbers and say which of these the store actually needs:
 - Lineage: `--history --rel supersedes` includes superseded and retracted beliefs, which is the only view where a `supersedes` chain is traversable.
 - `--mermaid` also prints the source; `--no-open` writes without launching a browser.
 
-Mermaid loads from a CDN, so the page needs network the first time it is opened. It says so in place of the diagram when it cannot load.
+The page fits the whole diagram on load, then: **drag to pan, wheel to zoom** (anchored on the cursor), double-click or `f` to re-fit, `+`/`-` to step. Mermaid loads from a CDN, so the page needs network the first time it is opened; it says so in place of the diagram when it cannot, and names the `file://` null-origin case.
 
 If the note reports co-derivation as most of the drawn relations, say so: a co-derived cluster is every belief from one session joined to every other, which draws as a hairball and means only "these were concluded together".
 

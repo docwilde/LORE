@@ -81,7 +81,7 @@ Beliefs carry typed relations to each other: `depends_on`, `specializes`, `expla
 - `lore graph stats` — nodes, relations, components, most connected beliefs.
 - `lore graph neighbours <id>` — what a belief rests on and what rests on it.
 - `lore graph path <a> <b>` — the most confident chain between two beliefs.
-- `lore graph html` — draw it as mermaid and open it in a browser.
+- `lore graph html` — draw it as mermaid and open it in a browser: drag to pan, wheel to zoom, double-click to fit. `--belief <id> --depth N` centres on one belief; `--rel <verb>` (repeatable) hides the co-derived hairball.
 - `lore graph backfill` — free structural edges; `lore graph derive` — one cheap pass for the asserted verbs, reading the store and no transcript.
 
 A relation says two beliefs are bound, not that either is true or that either answers a question. Cite an edge, never follow it.
