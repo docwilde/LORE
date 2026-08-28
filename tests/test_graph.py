@@ -446,6 +446,93 @@ class GraphContext(unittest.TestCase):
         self.assertIn("EXPERIMENTAL", block)
 
 
+class SkillsTier(unittest.TestCase):
+    """Learned recipes beside the beliefs. A recipe is not a fact, so it fills
+    from a small reserve and from what the beliefs leave, never by displacing
+    one."""
+
+    def _skill(self, name, ok=0, fail=0, uses=0, last=""):
+        return {"name": name, "desc": f"a recipe about {name} " + "x" * 30,
+                "ok": ok, "fail": fail, "uses": uses, "last": last,
+                "confirmed": ok > 0 and last != "failure", "tested": uses > 0,
+                "overlap": 1}
+
+    def test_an_untested_recipe_says_so(self):
+        self.assertIn("UNTESTED", GRAPH.skill_line(self._skill("a")))
+
+    def test_a_confirmed_recipe_shows_its_record(self):
+        line = GRAPH.skill_line(self._skill("a", ok=3, uses=3, last="success"))
+        self.assertIn("3 ok/0 failed", line)
+        self.assertNotIn("UNTESTED", line)
+
+    def test_a_recipe_that_last_failed_is_not_confirmed(self):
+        rec = self._skill("a", ok=2, fail=1, uses=3, last="failure")
+        self.assertFalse(rec["confirmed"])
+        self.assertIn("last failure", GRAPH.skill_line(rec))
+
+    def test_every_recipe_line_states_its_char_cost(self):
+        self.assertRegex(GRAPH.skill_line(self._skill("a")), r"\d+ch ")
+
+    def test_beliefs_fill_before_recipes(self):
+        """Structural, not a sort key: with a cap that fits only one line, the
+        belief takes it."""
+        _reset()
+        _seed(0)
+        rows = GRAPH.context_candidates(_conn(), "", [SUBJ])
+        block, chosen = GRAPH.render_context_block(
+            rows, cap=420, skills=[self._skill("recipe", ok=9, uses=9, last="success")])
+        self.assertEqual(len(chosen), 1)
+        self.assertNotIn("skill:recipe", block)
+
+    def test_a_reserve_keeps_the_tier_from_being_decorative(self):
+        """Filling beliefs against the whole cap made recipes unreachable on a
+        real store: five matches took 1173 of 1200 chars."""
+        _reset()
+        for i in range(8):
+            _seed(i)
+        rows = GRAPH.context_candidates(_conn(), "", [SUBJ])
+        block, _c = GRAPH.render_context_block(
+            rows, cap=1200, skills=[self._skill("recipe", ok=2, uses=2, last="success")])
+        self.assertIn("skill:recipe", block)
+        self.assertLessEqual(len(block), 1200)
+
+    def test_the_reserve_returns_to_beliefs_when_no_recipe_qualifies(self):
+        _reset()
+        for i in range(8):
+            _seed(i)
+        rows = GRAPH.context_candidates(_conn(), "", [SUBJ])
+        with_none, chosen_none = GRAPH.render_context_block(rows, cap=1200, skills=[])
+        _w, chosen_some = GRAPH.render_context_block(
+            rows, cap=1200, skills=[self._skill("recipe")])
+        self.assertGreaterEqual(len(chosen_none), len(chosen_some))
+
+    def test_the_block_with_recipes_still_respects_the_cap(self):
+        _reset()
+        for i in range(6):
+            _seed(i)
+        rows = GRAPH.context_candidates(_conn(), "", [SUBJ])
+        skills = [self._skill(f"r{i}", ok=i, uses=i, last="success") for i in range(4)]
+        for cap in (300, 600, 900, 1500):
+            block, _c = GRAPH.render_context_block(rows, cap=cap, skills=skills)
+            self.assertLessEqual(len(block), cap, f"cap {cap} overflowed")
+
+    def test_the_tier_says_a_recipe_is_not_a_fact(self):
+        _reset()
+        _seed(0)
+        rows = GRAPH.context_candidates(_conn(), "", [SUBJ])
+        block, _c = GRAPH.render_context_block(
+            rows, cap=1500, skills=[self._skill("recipe", ok=1, uses=1, last="success")])
+        self.assertIn("A recipe is not a fact", block)
+
+    def test_one_shared_common_word_does_not_make_a_recipe_relevant(self):
+        """`setup` and `linux` are shared by unrelated recipes; a prompt of
+        three tokens or more needs two."""
+        DERIVER = sys.modules["lore_core.deriver"]
+        got = DERIVER.skill_candidates("wireguard nmcli setup on linux mint")
+        self.assertTrue(all("cloudflare" not in r["name"] for r in got),
+                        f"a coincidence of common words matched: {[r['name'] for r in got]}")
+
+
 class MermaidExport(unittest.TestCase):
     def setUp(self):
         _reset()

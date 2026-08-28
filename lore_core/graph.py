@@ -81,6 +81,8 @@ __all__ = [
     'ASSERTED_RELS',
     'context_candidates',
     'context_line',
+    'skill_line',
+    'SKILL_RESERVE',
     'render_context_block',
     'cmd_graph',
     'ALL_STATUSES',
@@ -589,7 +591,42 @@ def context_line(rec: dict) -> str:
     return f"- [{rec['id']}] {len(claim)}ch {support} ({where}) {claim}"
 
 
-def render_context_block(rows: "list[dict]", cap: int = GRAPH_CONTEXT_CAP
+def skill_line(rec: dict) -> str:
+    """One learned skill as the model sees it, carrying its char cost and its
+    real track record. An untested recipe says so: it has never been recorded
+    working, and a line that implied otherwise would be the same overclaim the
+    belief lines are built to avoid."""
+    if rec["confirmed"]:
+        record = f"{rec['ok']} ok/{rec['fail']} failed"
+    elif rec["tested"]:
+        record = f"used {rec['uses']}x, {rec['ok']} ok/{rec['fail']} failed"
+        if rec["last"]:
+            record += f", last {rec['last']}"
+    else:
+        record = "UNTESTED"
+    desc = one_line(rec["desc"])
+    return f"- skill:{rec['name']} {len(desc)}ch {record} — {desc}"
+
+
+def _fill_beliefs(rows, budget, cap, head):
+    """Greedy fill of belief lines under `budget`, re-measuring the header each
+    round because its length depends on the counts it reports."""
+    lines: "list[str]" = []
+    chosen: "list[dict]" = []
+    matched = reached = 0
+    for rec in rows:
+        line = context_line(rec)
+        m2 = matched + (1 if rec["via"] == "match" else 0)
+        r2 = reached + (1 if rec["hops"] else 0)
+        body = lines + [line]
+        if len("\n".join(head(len(body), 0, m2, r2) + body)) > budget:
+            continue
+        lines, chosen, matched, reached = body, chosen + [rec], m2, r2
+    return lines, chosen, matched, reached
+
+
+def render_context_block(rows: "list[dict]", cap: int = GRAPH_CONTEXT_CAP,
+                         skills: "list[dict] | None" = None
                          ) -> "tuple[str, list[dict]]":
     """(block, chosen) — the graph-context injection, greedily filled under `cap`.
 
@@ -603,6 +640,16 @@ def render_context_block(rows: "list[dict]", cap: int = GRAPH_CONTEXT_CAP
     in: a prompt can be supplied and still match nothing, and the fallback then
     ranks by support alone. Claiming "matched against this prompt" over rows
     that all read "in scope" would be the one lie this block cannot afford.
+
+    `skills` is a SECOND TIER. Beliefs fill first, which is what makes "a
+    high-confidence belief outranks a confirmed skill" structural rather than a
+    sort key a later edit could quietly invert. But filling beliefs against the
+    WHOLE cap made the tier decorative: on a real store five matching beliefs
+    took 1173 of 1200 chars and no recipe ever appeared. So when skills qualify,
+    a small slice (SKILL_RESERVE, or a quarter of the cap, whichever is less) is
+    held back from the belief pass and returned to them if it goes unused. A
+    skill still cannot displace a belief — it can only spend what the reserve
+    and the beliefs' own leftovers allow.
     """
     # THE HEADER COUNTS AGAINST THE CAP. It is paid on every prompt, so a
     # budget that excluded it would understate the real cost by its whole
@@ -621,28 +668,41 @@ def render_context_block(rows: "list[dict]", cap: int = GRAPH_CONTEXT_CAP
             " confidence-first, each line shows its own char cost",
         ]
 
-    lines: "list[str]" = []
-    chosen: "list[dict]" = []
-    matched = reached = 0
-    # Header length depends on the counts it reports, so the fill re-measures it
-    # each round rather than reserving a guess.
-    for rec in rows:
-        line = context_line(rec)
-        m2 = matched + (1 if rec["via"] == "match" else 0)
-        r2 = reached + (1 if rec["hops"] else 0)
-        body = lines + [line]
-        # `used` is the WHOLE block, header included, because the cap is: a
-        # figure that counted only the belief lines would understate what the
-        # prompt actually pays by the header's length.
-        probe = "\n".join(_head(len(body), 0, m2, r2) + body)
-        total = len(probe)
-        if total > cap:
-            continue
-        lines, chosen, matched, reached = body, chosen + [rec], m2, r2
+    # Held back only when there is a recipe to spend it on; unused, it returns
+    # to the beliefs through the skills pass measuring against the full cap.
+    #
+    # A RESERVE NEVER COSTS THE FIRST BELIEF. The header runs to ~280 chars, so
+    # on a small cap the reserve could leave no room for a single belief line
+    # and the block came back empty -- a recipe starving the fact it was meant
+    # to accompany. If reserving yields nothing, the fill runs again with the
+    # whole cap and the recipes take only what is left.
+    reserve = min(SKILL_RESERVE, cap // 4) if skills else 0
+    lines, chosen, matched, reached = _fill_beliefs(rows, cap - reserve, cap, _head)
+    if not chosen and reserve:
+        lines, chosen, matched, reached = _fill_beliefs(rows, cap, cap, _head)
     if not chosen:
         return "", []
-    block = "\n".join(_head(len(chosen), 0, matched, reached) + lines)
-    return "\n".join(_head(len(chosen), len(block), matched, reached) + lines), chosen
+    # SKILLS TAKE THE REMAINDER. Measured against the same total-length rule as
+    # the beliefs above, so the cap still covers the whole block.
+    skill_lines: "list[str]" = []
+    for rec in (skills or []):
+        line = skill_line(rec)
+        probe = "\n".join(_head(len(chosen), 0, matched, reached) + lines
+                          + [_SKILLS_HEAD] + skill_lines + [line])
+        if len(probe) > cap:
+            continue
+        skill_lines.append(line)
+    body = lines + ([_SKILLS_HEAD] + skill_lines if skill_lines else [])
+    block = "\n".join(_head(len(chosen), 0, matched, reached) + body)
+    return "\n".join(_head(len(chosen), len(block), matched, reached) + body), chosen
+
+
+# One or two recipe lines. Small on purpose: the reserve exists so the tier is
+# real, not so it can compete with the beliefs.
+SKILL_RESERVE = 320
+
+_SKILLS_HEAD = ("Learned recipes, ranked by track record and filled only from the"
+                " budget the beliefs above left. A recipe is not a fact.")
 
 
 ALL_STATUSES = ("active", "superseded", "retracted", "dormant")
@@ -671,7 +731,12 @@ def cmd_graph(args) -> int:
                     belief_subject("project", project_slug(getattr(args, "cwd", None) or os.getcwd()))]
         prompt = " ".join(getattr(args, "prompt", None) or [])
         rows = context_candidates(conn, prompt, subjects, hops=args.hops)
-        block, chosen = render_context_block(rows, cap=args.cap)
+        # deferred: deriver imports graph-adjacent helpers at its own top level,
+        # so this direction is function-local -- the same shape deriver.py's
+        # docstring documents for its import of dream_run.
+        from .deriver import skill_candidates
+        block, chosen = render_context_block(
+            rows, cap=args.cap, skills=skill_candidates(prompt))
         if not block:
             print("nothing to inject: no active belief in scope carries an"
                   " asserted relation, and nothing matched.")
