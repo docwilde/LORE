@@ -71,6 +71,7 @@ __all__ = [
     'build_digest',
     'pending_texts',
     'learned_skills',
+    'skill_candidates',
     'skill_usage_path',
     'load_skill_usage',
     'skill_record',
@@ -511,6 +512,53 @@ def learned_skills() -> dict[str, str]:
         m = re.search(r'^description:\s*"?(.+?)"?\s*$', head, re.MULTILINE)
         out[p.parent.name] = m.group(1) if m else ""
     return out
+
+
+def skill_candidates(prompt: str = "", limit: int = 4) -> "list[dict]":
+    """Learned skills worth showing beside graph-context beliefs, ranked.
+
+    A skill is a recipe, not a fact, so it never competes line-for-line with a
+    belief: render_context_block fills beliefs first and offers skills whatever
+    budget is left (see its `skills` argument). Within that remainder the order
+    is track record — a skill whose last recorded outcome is a success and that
+    has more successes than failures comes first.
+
+    An UNTESTED skill is admitted but labelled and sorted last. Gating the tier
+    on a confirmed record would make it permanently empty on a store where
+    nothing has recorded a skill outcome yet, and a relevant recipe is worth
+    knowing exists as long as the line does not pretend it has been proven.
+
+    A prompt filters by token overlap against name and description, and ONE
+    shared token is not enough: "wireguard nmcli setup on linux mint" shares
+    "setup" with a cloudflare-tunnel recipe and "linux" with a laptop-hardware
+    one. A prompt of three tokens or more needs two, so the gate rejects a
+    coincidence of common words. Overlap also breaks ties inside a tier, which
+    is what orders a set of equally untested skills usefully. An empty prompt
+    admits everything and lets the track record decide.
+    """
+    learned = learned_skills()
+    if not learned:
+        return []
+    usage = load_skill_usage()
+    want = overlap_tokens(prompt) if prompt else set()
+    rows = []
+    need = 2 if len(want) >= 3 else 1
+    for name, desc in learned.items():
+        shared = want & overlap_tokens(name.replace("-", " ") + " " + desc)
+        if want and len(shared) < need:
+            continue
+        rec = usage.get(name) or {}
+        ok, fail = int(rec.get("ok", 0)), int(rec.get("fail", 0))
+        uses = int(rec.get("uses", 0))
+        last = rec.get("last_outcome") or ""
+        confirmed = ok > 0 and last != "failure"
+        rows.append({"name": name, "desc": desc, "ok": ok, "fail": fail,
+                     "uses": uses, "last": last, "confirmed": confirmed,
+                     "tested": uses > 0, "overlap": len(shared)})
+    rows.sort(key=lambda r: (not r["confirmed"], not r["tested"],
+                             -(r["ok"] - r["fail"]), -r["uses"],
+                             -r["overlap"], r["name"]))
+    return rows[:limit]
 
 
 def skill_usage_path() -> Path:

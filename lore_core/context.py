@@ -29,7 +29,7 @@ from .config import (
     read_hook_input,
     stage_disabled,
 )
-from .deriver import learned_skills, load_skill_usage
+from .deriver import learned_skills, load_skill_usage, skill_candidates
 from .filemap import filemap_entries
 from .gate import provenance_tag
 from .graph import context_candidates, render_context_block
@@ -583,8 +583,10 @@ def _graph_context_block(hook: dict, cwd: str) -> str:
         slug = project_slug(cwd)
         subjects = [belief_subject("user", slug), "user-model",
                     belief_subject("project", slug)]
-        rows = context_candidates(conn, str(hook.get("prompt") or ""), subjects)
-        block, _chosen = render_context_block(rows)
+        prompt = str(hook.get("prompt") or "")
+        rows = context_candidates(conn, prompt, subjects)
+        block, _chosen = render_context_block(
+            rows, skills=(skill_candidates(prompt) if not stage_disabled("skills") else None))
         return block
     except Exception:                                       # noqa: BLE001
         return ""

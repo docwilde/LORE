@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.45.0 — 2026-08-28
+
+- Learned skills join the graph-context block as a **second tier**. New **`skill_candidates`** (`lore_core/deriver.py`) ranks them by track record: a recipe whose last outcome is a success and whose successes outnumber its failures comes first, then tested, then untested.
+- Beliefs fill first, which makes "a high-confidence belief outranks a confirmed skill" structural rather than a sort key a later edit could invert. A recipe cannot displace a belief.
+- Filling beliefs against the whole cap made the tier decorative — five matching beliefs took 1173 of 1200 chars on a live store and no recipe ever appeared — so `SKILL_RESERVE` (320, or a quarter of the cap) is held back when a recipe qualifies, and returns to the beliefs unused.
+- **A reserve never costs the first belief.** The header runs to ~280 chars, so on a small cap the reserve left no room for one belief line and the block came back empty; the fill now re-runs against the whole cap when reserving yields nothing.
+- An **untested** recipe is admitted but labelled `UNTESTED` and sorted last. Gating the tier on a confirmed record would leave it permanently empty on a store where nothing has recorded a skill outcome — 8 learned skills, 0 with any usage record.
+- Relevance needs **two** shared tokens once a prompt has three: `wireguard nmcli setup on linux mint` shares `setup` with a cloudflare-tunnel recipe and `linux` with a laptop-hardware one. Overlap also breaks ties inside a tier.
+- Each recipe line carries its own char cost and its record; the tier header states that a recipe is not a fact. The skills kill switch (`LORE_DISABLE_SKILLS`) removes the tier.
+- Tests: `tests/test_graph.py` (55; 10 new). Suite 356.
+
 ## 0.44.0 — 2026-08-28
 
 - New **graph-backed context**, EXPERIMENTAL and off by default (`LORE_GRAPH_CONTEXT`, `LORE_GRAPH_CONTEXT_CAP` 1200, `LORE_GRAPH_CONTEXT_HOPS` 1). Seeded by FTS over the prompt and expanded one relation out, it injects a labelled block on `UserPromptSubmit`. Shown in `lore config` as an opt-in stage; `lore graph context [--prompt …]` previews it without turning it on.
