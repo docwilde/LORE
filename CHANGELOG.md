@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.47.0 — 2026-08-28
+
+- `lore doctor` reports the **belief graph**: stored edges, how many are asserted, superseded beliefs still missing a `supersedes` edge, and the exact command for each gap. A fresh install has an empty graph and nothing else said so — neither the free structural pass nor the cheap asserted one runs on its own, so a store could sit for weeks with a graph nobody knew was empty.
+- A store with fewer than two active beliefs reports `nothing to relate yet` instead of nagging.
+- `/lore:setup` gains a gated graph step: offer `lore graph backfill` (free) when there are no edges, then `lore graph derive --dry-run` to price the asserted verbs before running them. It explicitly does not offer `lore backfill` — that re-reads transcripts and produces beliefs, a different job at a much larger spend.
+- `skills/lore/SKILL.md` describes the graph, so the auto-triggered skill can reach `stats`, `neighbours`, `path`, `html`, `backfill` and `derive` instead of only the memory and search tiers. It states the read rule too: an edge says two beliefs are bound, not that either is true.
+- Tests: `tests/test_graph.py` (71; 5 new). Suite 372.
+
 ## 0.46.0 — 2026-08-28
 
 - New **`lore graph derive`**: asks a model for relations between the beliefs the store already holds. The five verbs are judgements about *claims*, not about the transcripts claims came from, so this reads no transcript — a whole 500-belief store is one call of ~22k tokens against the tens of millions it costs to page a few hundred sessions back through the deriver. It writes no belief and changes none.

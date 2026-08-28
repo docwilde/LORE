@@ -634,6 +634,65 @@ class SkillsTier(unittest.TestCase):
                         f"a coincidence of common words matched: {[r['name'] for r in got]}")
 
 
+class DoctorReportsTheGraph(unittest.TestCase):
+    """A fresh install has an empty graph and nothing else says so: neither the
+    free structural pass nor the cheap asserted one runs on its own."""
+
+    def setUp(self):
+        _reset()
+
+    def _doctor(self) -> str:
+        out = io.StringIO()
+        args = SimpleNamespace(cwd=None)
+        with contextlib.redirect_stdout(out):
+            with contextlib.suppress(Exception):
+                lore.cmd_doctor(args)
+        return out.getvalue()
+
+    def test_an_empty_graph_is_reported_with_the_free_command(self):
+        for i in range(3):
+            _seed(i)
+        text = self._doctor()
+        self.assertIn("belief graph: 0 edges", text)
+        self.assertIn("lore graph backfill", text)
+
+    def test_a_store_too_small_to_relate_is_not_nagged(self):
+        _seed(0)
+        self.assertIn("nothing to relate yet", self._doctor())
+
+    def test_a_missing_supersedes_edge_is_reported(self):
+        a, b, c = _seed(0), _seed(1), _seed(2)
+        conn = _conn()
+        lore.edge_insert(conn, a, b, "depends_on", "derived", "s1")
+        lore.belief_supersede(conn, b, c, "merged")
+        conn.execute("DELETE FROM belief_edges WHERE rel = 'supersedes'")
+        conn.commit()
+        text = self._doctor()
+        self.assertIn("no `supersedes` edge", text)
+        self.assertIn("lore graph backfill", text)
+
+    def test_no_asserted_relation_points_at_the_dry_run(self):
+        a, b, c = _seed(0), _seed(1), _seed(2)
+        conn = _conn()
+        lore.belief_supersede(conn, b, c, "merged")
+        conn.commit()
+        GRAPH.backfill_structural(conn)
+        text = self._doctor()
+        self.assertIn("no asserted relations", text)
+        self.assertIn("--dry-run", text)
+        self.assertIn("reads no transcript", text)
+
+    def test_a_populated_graph_reports_counts_and_stops_nagging(self):
+        a, b = _seed(0), _seed(1)
+        conn = _conn()
+        lore.edge_insert(conn, a, b, "depends_on", "derived", "s1")
+        conn.commit()
+        text = self._doctor()
+        self.assertRegex(text, r"belief graph: \d+ stored edge")
+        self.assertNotIn("0 edges", text)
+        self.assertNotIn("no asserted relations", text)
+
+
 class MermaidExport(unittest.TestCase):
     def setUp(self):
         _reset()

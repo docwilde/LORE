@@ -73,3 +73,15 @@ lore doctor             # environment checks, auto-memory conflict warning
 ## Act-time consult (stage 7, opt-in)
 
 When `LORE_CONSULT=1` is set: before a consequential decision (architecture choice, destructive operation, cost-bearing run, choosing between approaches the user might care about), run `lore consult "<topic terms>"`. Beliefs under STEER carry outcome-calibrated confidence — let them shape the decision. Beliefs under CITE ONLY are the deriver's unverified self-reports — you may mention them ("the store believes X, uncalibrated"), never act on them alone. If STEER is empty, decide on your own judgment and the curated memory snapshot, as always.
+
+## Belief graph
+
+Beliefs carry typed relations to each other: `depends_on`, `specializes`, `explains`, `contradicts`, `applies_when` (asserted by the deriver or by `lore graph derive`), plus structural `supersedes` and a projected `co_derived`.
+
+- `lore graph stats` — nodes, relations, components, most connected beliefs.
+- `lore graph neighbours <id>` — what a belief rests on and what rests on it.
+- `lore graph path <a> <b>` — the most confident chain between two beliefs.
+- `lore graph html` — draw it as mermaid and open it in a browser.
+- `lore graph backfill` — free structural edges; `lore graph derive` — one cheap pass for the asserted verbs, reading the store and no transcript.
+
+A relation says two beliefs are bound, not that either is true or that either answers a question. Cite an edge, never follow it.
