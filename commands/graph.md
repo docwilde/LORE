@@ -23,9 +23,10 @@ Then read the numbers and say which of these the store actually needs:
 
 `lore graph html` renders the graph as mermaid and opens it in a browser. It writes `LORE_ROOT/graph.html` (override with `--out`) and prints the path, so a headless or SSH session still gets the file.
 
-- Whole graph: `lore graph html`. Singleton beliefs are excluded — a node with no edge says nothing a list would not. Capped at 60 nodes, largest components first; `--max-nodes N` to change it.
+- Whole graph: `lore graph html`. Singleton beliefs are excluded — a node with no edge says nothing a list would not. Capped at 8 clusters and 60 nodes, largest first; `--max-clusters N` / `--max-nodes N` to change either.
+- **The cluster cap is the one that decides readability.** Mermaid stacks disconnected clusters vertically, so a view of many small islands renders as a tall ribbon nothing can read at any zoom. If the output says clusters were left out, either raise the cap deliberately or centre on one belief instead.
 - One belief's neighbourhood: `lore graph html --belief <id> --depth 2`.
-- Asserted relations only, once the store has some: `--rel depends_on --rel specializes --rel explains --rel contradicts --rel applies_when`.
+- Asserted relations only: `--rel depends_on --rel specializes --rel explains --rel contradicts --rel applies_when`. Expect this to FRAGMENT — asserted structure is mostly small clusters, because the co-derived edges that hold the default view together are exactly what this filter removes. It is the right view for reading one relation, and the wrong one for a first look at the graph.
 - Lineage: `--history --rel supersedes` includes superseded and retracted beliefs, which is the only view where a `supersedes` chain is traversable.
 - `--mermaid` also prints the source; `--no-open` writes without launching a browser.
 

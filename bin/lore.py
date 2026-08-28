@@ -704,6 +704,11 @@ def main() -> int:
                     help="hops from --belief (default 2)")
     gp.add_argument("--max-nodes", type=int, default=HTML_MAX_NODES, dest="max_nodes",
                     help=f"node ceiling for the whole-graph view (default {HTML_MAX_NODES})")
+    gp.add_argument("--max-clusters", type=int, default=HTML_MAX_CLUSTERS,
+                    dest="max_clusters",
+                    help=f"how many disconnected clusters to draw (default"
+                         f" {HTML_MAX_CLUSTERS}) — the knob that decides whether the"
+                         f" layout is readable or a vertical ribbon")
     gp.add_argument("--out", help="write here instead of LORE_ROOT/graph.html")
     gp.add_argument("--mermaid", action="store_true", help="also print the mermaid source")
     gp.add_argument("--no-open", action="store_true", dest="no_open",
