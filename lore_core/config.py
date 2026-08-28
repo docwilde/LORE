@@ -45,6 +45,8 @@ __all__ = [
     'DUP_CONTAINMENT',
     'utcnow',
     'project_root',
+    'project_identity_root',
+    'worktree_parent_repo',
     'project_slug',
     'known_project_slugs',
     'resolve_subject_slug',
@@ -168,15 +170,100 @@ def project_root(cwd: str) -> str:
     return root
 
 
+def project_identity_root(cwd: str) -> str:
+    """The path that IDENTIFIES the project a cwd belongs to: the MAIN
+    worktree's root when the cwd is inside a linked git worktree, otherwise
+    the same answer as project_root.
+
+    WHY this is not project_root: `git rev-parse --show-toplevel` inside a
+    linked worktree reports the WORKTREE's root, so a session run in
+    `<repo>/.claude-worktrees/fix-63` minted its own project slug and its own
+    project memory. Facts derived there landed in a store that dies with the
+    branch — a live store carried 17 memory and 20 filemap proposals staged
+    under six throwaway worktree slugs of one repo, plus three more under two
+    of another, all invisible to the repo they were actually about.
+
+    `--git-common-dir` is what separates the two: it points at the MAIN
+    repository's .git from anywhere, including a linked worktree, so its
+    parent is the main worktree's root. Both values come from one `git
+    rev-parse`, and a layout where that parent is not a directory or the
+    common dir is not named `.git` (a separate-git-dir or bare setup) falls
+    back to the toplevel — no guess, just today's answer.
+
+    project_root stays what the FILE MAP relativizes against, deliberately:
+    inside a worktree a path is only meaningful relative to that worktree,
+    while the project it gets filed under is this function's answer.
+    """
+    try:
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel", "--git-common-dir"],
+                           cwd=str(cwd), capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return worktree_parent_repo(cwd) or project_root(cwd)
+    if r.returncode != 0:
+        # git could not answer -- most often because the directory is gone,
+        # which is the normal state of a merged worktree whose transcripts a
+        # backfill is still reading.
+        return worktree_parent_repo(cwd) or project_root(cwd)
+    lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+    if len(lines) != 2:
+        return project_root(cwd)
+    toplevel, common = lines
+    # relative in the main worktree (".git", "../../.git"), absolute in a
+    # linked one -- resolved against the cwd either way.
+    common_path = Path(common) if Path(common).is_absolute() else Path(cwd) / common
+    if common_path.name == ".git":
+        candidate = common_path.parent
+        if candidate.is_dir():
+            return str(candidate.resolve())
+    return toplevel or project_root(cwd)
+
+
+# A directory whose name ends in "worktree"/"worktrees", with or without a
+# leading dot: `.claude-worktrees` (Claude Code's own), `.doxa-worktrees`,
+# `worktrees`. Deliberately not a fixed list -- each tool that creates linked
+# checkouts names its container after itself.
+WORKTREE_CONTAINER = re.compile(r"^\.?[\w-]*worktrees?$")
+
+
+def worktree_parent_repo(cwd: str) -> "str | None":
+    """The repository a DELETED worktree path belonged to, or None.
+
+    project_identity_root asks git, which needs the directory to still be
+    there. A worktree is deleted when its branch merges, and the transcripts
+    of sessions that ran in it outlive it -- so a backfill over history hands
+    project_slug a path git cannot resolve at all, and the worktree slug comes
+    back. This reads the path instead: a `<container>/<name>` tail whose
+    container looks like a worktree container is dropped, and the result is
+    accepted ONLY when what remains is itself a git repository.
+
+    That guard is what keeps this from guessing. `<repo>/.claude-worktrees/
+    fix-63` leaves `<repo>`, which is a repo, so it resolves. A container that
+    is not a sibling of its repo -- `~/.doxa-worktrees/doxa-b8aeaa83` leaves
+    `~` -- leaves something that is not a repo, and None sends the caller back
+    to the path it already had rather than filing the fact under a home
+    directory.
+    """
+    path = Path(str(cwd))
+    for i, part in enumerate(path.parts):
+        if not WORKTREE_CONTAINER.match(part) or i == 0:
+            continue
+        parent = Path(*path.parts[:i])
+        if not (parent / ".git").exists():
+            continue
+        return str(parent.resolve())
+    return None
+
+
 def project_slug(cwd: str) -> str:
-    """Slug for the PROJECT a cwd belongs to — the git repo root when inside
-    one, the cwd itself otherwise. WHY (2026-08-22 incident): a session run
-    from re_ab_harness/viz and one run from re_ab_harness got two different
-    project memories; 22 curated entries were invisible to half the sessions
-    of the same repo. Git toplevel is the identity of a project, not the
-    subdirectory someone happened to start in. Non-repo cwds keep the old
-    behavior byte-identically."""
-    return re.sub(r"[^A-Za-z0-9]", "-", project_root(cwd))
+    """Slug for the PROJECT a cwd belongs to — the main worktree's root when
+    inside a git repo, the cwd itself otherwise. WHY (2026-08-22 incident): a
+    session run from re_ab_harness/viz and one run from re_ab_harness got two
+    different project memories; 22 curated entries were invisible to half the
+    sessions of the same repo. Git toplevel is the identity of a project, not
+    the subdirectory someone happened to start in — and per
+    project_identity_root, not the linked worktree someone happened to branch
+    into either. Non-repo cwds keep the old behavior byte-identically."""
+    return re.sub(r"[^A-Za-z0-9]", "-", project_identity_root(cwd))
 
 
 def known_project_slugs() -> set[str]:

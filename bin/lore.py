@@ -562,7 +562,7 @@ def main() -> int:
     sp.add_argument("ids", nargs="+")
     sp.set_defaults(fn=cmd_reject)
 
-    sp = sub.add_parser("belief", help="belief store: list/search/show/add/retract")
+    sp = sub.add_parser("belief", help="belief store: list/search/show/edges/add/retract")
     bsub = sp.add_subparsers(dest="bcmd", required=True)
     bp = bsub.add_parser("list")
     bp.add_argument("--subject")
@@ -585,6 +585,12 @@ def main() -> int:
     bp.add_argument("--evidence")
     bp.add_argument("--cwd")
     bp.add_argument("claim", nargs="+")
+    bp.set_defaults(fn=cmd_belief)
+    # the binding layer's reader: what this belief rests on and what rests
+    # on it. `show` prints the same block under the evidence trail.
+    bp = bsub.add_parser("edges",
+                         help="relations touching a belief, both directions")
+    bp.add_argument("id", type=int)
     bp.set_defaults(fn=cmd_belief)
     bp = bsub.add_parser("retract")
     bp.add_argument("id", type=int)

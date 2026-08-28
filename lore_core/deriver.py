@@ -29,7 +29,13 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .beliefs import belief_insert, belief_reinforce, belief_subject
+from .beliefs import (
+    BELIEF_RELATIONS,
+    belief_insert,
+    belief_reinforce,
+    belief_subject,
+    edge_insert,
+)
 from .config import (
     DEFER_DREAM,
     DERIVER_MODEL,
@@ -52,7 +58,7 @@ from .config import (
 )
 from .filemap import filemap_entries
 from .memory import match_entries, memory_path, read_entries, render_entries
-from .pending import load_pending, overlap_tokens, token_containment
+from .pending import containment, load_pending, overlap_tokens, token_containment
 from .scrub import scrub_secrets
 from .store import db_connect, extract_text, fts_expr, parse_transcript
 
@@ -256,6 +262,11 @@ never to name a project only mentioned in passing. When unsure, leave it absent 
 under the session's own project is at worst awkwardly placed and still easy to find; one sent to \
 the wrong subject is invisible to everyone who needed it.
 
+A GIT WORKTREE IS NOT A PROJECT. A linked checkout -- under `.claude-worktrees/`, \
+`worktrees/`, or a directory named for a branch or an issue -- is one view of a repository, and \
+the repository is the project. Never set "project" to a worktree path, a branch name or an issue \
+key: the checkout is deleted when the branch merges, and a fact filed under it dies with it.
+
 Personal data stays out of both stores. Do NOT record names, email addresses, phone numbers, \
 postal addresses, usernames or account handles of people, the name of any customer, client, \
 employer or third-party company, or anything that reads as a credential — no tokens, keys, \
@@ -330,6 +341,27 @@ it demonstrated, or do not make the claim.
 out for the same reason a person's name is: write what was learned, not who it concerned. \
 "corporate-design decks need a licensed-font fallback" carries the lesson that naming the \
 client and their brand colour does not.
+4. A claim about a throwaway checkout. "the rv-64 worktree needs its venv rebuilt" names a \
+directory that will not exist next week -- name the repository and the condition instead. Branch \
+names, worktree paths and issue keys belong in a claim only when it is about how this project \
+NAMES things.
+
+"""
+
+# binding layer: the relations BETWEEN conclusions and existing beliefs.
+_REVIEW_RELATES = """A conclusion may carry "relates": at most 2 bindings to ids from the \
+"Existing beliefs" list. "evidence_for" means SAME fact; "relates" means a DIFFERENT fact in a \
+named relation to one. Never both on one conclusion.
+
+- "depends_on": your conclusion holds only while the named belief holds.
+- "specializes": it is a narrower case of the named belief.
+- "explains": it gives the mechanism behind the named belief.
+- "contradicts": the two cannot both be true.
+- "applies_when": the named belief states the condition it applies under.
+
+Sharing a subject, a file or a tool is not a relation; a fact that is only true BECAUSE another \
+one is, is. The session index already finds beliefs that mention the same thing, and topical \
+edges bury the real ones. Most conclusions relate to nothing.
 
 """
 
@@ -375,7 +407,9 @@ _SCHEMA_CONCLUSIONS = ('"conclusions":[{{"scope":"user (the user STATED it) |pro
                        '"project":"optional, only when the subject is a different project",'
                        '"evidence_for":"optional -- id of an existing belief listed below that'
                        ' this conclusion confirms rather than restates; when set, this session is'
-                       ' recorded as evidence for that id instead of a new belief"}}]')
+                       ' recorded as evidence for that id instead of a new belief",'
+                       '"relates":[{{"to":<id of a belief listed below>,"rel":"depends_on|'
+                       'specializes|explains|contradicts|applies_when"}}]}}]')
 
 
 def review_prompt_template() -> str:
@@ -400,6 +434,7 @@ def review_prompt_template() -> str:
         parts.append(_REVIEW_SKILLS_RECIPE)
     if beliefs_on:
         parts.append(_REVIEW_CONCLUSIONS)
+        parts.append(_REVIEW_RELATES)
     parts.append(_REVIEW_CONTEXT)
     if skills_on:
         parts.append(_REVIEW_CONTEXT_SKILLS)
@@ -1301,11 +1336,12 @@ def same_subject_cover(conn, subject: str, claim: str) -> "tuple[float, int, str
     evidence to a belief a human already terminated -- see derive_conclusions,
     which inserts fresh in that case and notes it.
     """
+    tclaim = overlap_tokens(claim)
     best = None
     for bid, oclaim in conn.execute(
         "SELECT id, claim FROM beliefs WHERE subject = ? AND status = 'active'", (subject,)
     ):
-        score = token_containment(claim, oclaim)
+        score = containment(tclaim, overlap_tokens(oclaim))
         if score >= DUP_CONTAINMENT and (best is None or score > best[0]):
             best = (score, bid, oclaim)
     return best
@@ -1376,14 +1412,71 @@ def cross_subject_cover(conn, subject: str, claim: str) -> "tuple[float, int, st
     other = CROSS_SUBJECT_CHANNELS.get(subject)
     if not other:
         return None
+    tclaim = overlap_tokens(claim)
     best = None
     for bid, oclaim in conn.execute(
         "SELECT id, claim FROM beliefs WHERE subject = ? AND status = 'active'", (other,)
     ):
-        score = token_containment(claim, oclaim)
+        score = containment(tclaim, overlap_tokens(oclaim))
         if score >= DUP_CONTAINMENT and (best is None or score > best[0]):
             best = (score, bid, oclaim)
     return best
+
+
+RELATES_PER_CONCLUSION = 2
+
+
+def relate_conclusion(conn, src: int, c: dict, session_id: str, acct: dict) -> int:
+    """Write the conclusion's "relates" edges, anchored at `src` -- the belief
+    this conclusion became, whether that is a fresh row or the existing one it
+    folded into. Returns how many edges are new.
+
+    A target is taken only when it is an ACTIVE belief, the same bar
+    `evidence_for` holds its citation to: an edge onto a retracted belief
+    reads as live structure over a claim a human already terminated.
+
+    The target is NOT required to share the conclusion's subject, and that is
+    the one place this parts company with the fold checks beside it. Folding
+    across subjects is refused (ISSUE #50/#51) because it merges two claims
+    into one row and so merges their authority -- a stated preference wearing
+    an inference's uncertainty, or the reverse. An edge merges nothing. It
+    says a project convention holds because of a user preference, which is
+    true across the channels and is the kind of binding this channel exists
+    to record.
+    """
+    items = c.get("relates")
+    if not isinstance(items, list):
+        return 0
+    written = 0
+    for item in items[:RELATES_PER_CONCLUSION]:
+        if not isinstance(item, dict):
+            acct["relates_dropped"] += 1
+            continue
+        rel = item.get("rel")
+        try:
+            dst = int(item.get("to"))
+        except (TypeError, ValueError):
+            acct["relates_dropped"] += 1
+            continue
+        if rel not in BELIEF_RELATIONS:
+            acct["relates_dropped"] += 1
+            print(f"relation {rel!r} is not in the vocabulary — dropped"
+                  f" ([{src}] -> [{dst}])")
+            continue
+        row = conn.execute("SELECT status FROM beliefs WHERE id = ?", (dst,)).fetchone()
+        if row is None or row[0] != "active":
+            acct["relates_dropped"] += 1
+            print(f"relation {rel} named belief [{dst}]"
+                  f" ({'no such belief' if row is None else row[0]}) — dropped: an edge onto"
+                  f" a belief that is not active reads as structure it does not have")
+            continue
+        if edge_insert(conn, src, dst, rel, "derived", session_id,
+                       f"{rel} asserted with the conclusion that became [{src}]"):
+            written += 1
+            acct["relates"] += 1
+            print(f"relation [{src}] --{rel}--> [{dst}] recorded"
+                  f" ({BELIEF_RELATIONS[rel]})")
+    return written
 
 
 def derive_conclusions(data: dict, slug: str, session_id: str,
@@ -1407,7 +1500,7 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
     conn = db_connect()
     derived = 0
     acct = {"extracted": 0, "derived": 0, "cross_subject": 0, "folded": 0,
-            "retracted_cited": 0, "malformed": 0}
+            "retracted_cited": 0, "malformed": 0, "relates": 0, "relates_dropped": 0}
     folded_ids: list[int] = []
     conclusions = (data.get("conclusions") or [])[:10]
     acct["extracted"] = len(conclusions)
@@ -1524,15 +1617,21 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
             folded_ids.append(fold_id)
             print(f"conclusion folded into existing [{fold_id}] ({fold_note}, same subject) —"
                   f" evidence attached instead of a new row: {claim[:120]}")
+            # the relations still land, on the belief the fact actually lives
+            # in: a conclusion that restated an existing belief can still be
+            # the session that first noticed what that belief rests on.
+            relate_conclusion(conn, fold_id, c, session_id, acct)
             continue
-        belief_insert(
+        bid, _created = belief_insert(
             conn, subject, claim, confidence,
             session_id, target_slug, evidence or None, via="derived",
         )
         derived += 1
         acct["derived"] += 1
+        relate_conclusion(conn, bid, c, session_id, acct)
     conn.commit()
-    if acct["cross_subject"] or acct["folded"] or acct["retracted_cited"]:
+    if (acct["cross_subject"] or acct["folded"] or acct["retracted_cited"]
+            or acct["relates"] or acct["relates_dropped"]):
         parts = []
         if acct["folded"]:
             parts.append(f"folded {acct['folded']} into existing (ids "
@@ -1543,6 +1642,10 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
         if acct["retracted_cited"]:
             parts.append(f"{acct['retracted_cited']} cited a non-active belief and inserted"
                         f" fresh")
+        if acct["relates"]:
+            parts.append(f"bound {acct['relates']} relation(s) between beliefs")
+        if acct["relates_dropped"]:
+            parts.append(f"dropped {acct['relates_dropped']} unusable relation(s)")
         print(f"conclusions: derived {acct['derived']} of {acct['extracted']} extracted"
               f" — {'; '.join(parts)}")
     if stats is not None:

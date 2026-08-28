@@ -47,7 +47,7 @@ from .deriver import extract_json, find_claude, run_claude, stage_proposals
 # surface for stage-time coverage. Imported, never reimplemented -- a second
 # similarity function would let `lore crosscheck`'s report drift away from the
 # check that actually drops a conclusion.
-from .pending import token_containment
+from .pending import containment, overlap_tokens
 from .store import db_connect
 
 
@@ -77,6 +77,12 @@ other stands (optionally with an updated claim).
 Also: from the full active-belief list, propose at most 2 promotions — beliefs with strong \
 repeated evidence (3+) and lasting relevance that deserve a slot in the hard-capped core \
 memory. Promotion text <= 200 chars, dense, declarative.
+
+A promotion names the REPOSITORY, never a worktree, a branch or an issue key: a belief \
+about a linked checkout (`.claude-worktrees/fix-63`) describes a directory that disappears when \
+the branch merges -- promote the durable fact with the checkout's name removed, or not at all. \
+Two beliefs differing only in which worktree derived them are one belief, and the merged claim \
+names neither.
 
 Candidate pairs:
 {pairs}
@@ -293,16 +299,23 @@ def cross_subject_pairs(conn: sqlite3.Connection, threshold: float = DUP_CONTAIN
     a human resolves.
 
     Scored with the same containment measure and the same tokenizer the
-    stage-time check uses (pending.token_containment), so the number printed
+    stage-time check uses (pending.containment), so the number printed
     here is the number that decides.
     """
     rows = {s: conn.execute(
         f"SELECT {BELIEF_COLS} FROM beliefs WHERE subject = ? AND status = 'active'"
         " ORDER BY id", (s,)).fetchall() for s in ("user", "user-model")}
+    # tokenized once per BELIEF, not once per pair: the measure is
+    # pending.containment over these sets, which is what token_containment
+    # computes after tokenizing -- same number, |user| + |user-model| regex
+    # passes instead of 2x their product.
+    toks = {r[0]: overlap_tokens(r[2]) for side in rows.values() for r in side}
     pairs = []
     for u in rows["user"]:
+        tu = toks[u[0]]
         for m in rows["user-model"]:
-            score = max(token_containment(u[2], m[2]), token_containment(m[2], u[2]))
+            tm = toks[m[0]]
+            score = max(containment(tu, tm), containment(tm, tu))
             if score >= threshold:
                 pairs.append((score, u, m))
     pairs.sort(key=lambda p: (-p[0], p[1][0], p[2][0]))
@@ -364,12 +377,19 @@ def same_subject_pairs(conn: sqlite3.Connection, threshold: float = DUP_CONTAINM
     by_subject: dict[str, list] = {}
     for row in rows:
         by_subject.setdefault(row[1], []).append(row)
+    # tokenized once per belief, for the reason cross_subject_pairs above
+    # states: this loop is the store's largest, 30,320 pairs on a 504-belief
+    # store, and the string form re-tokenizes both claims on every one of them.
+    toks = {r[0]: overlap_tokens(r[2]) for r in rows}
     pairs = []
     for subject, group in by_subject.items():
         for i in range(len(group)):
+            a = group[i]
+            ta = toks[a[0]]
             for j in range(i + 1, len(group)):
-                a, b = group[i], group[j]
-                score = max(token_containment(a[2], b[2]), token_containment(b[2], a[2]))
+                b = group[j]
+                tb = toks[b[0]]
+                score = max(containment(ta, tb), containment(tb, ta))
                 if score >= threshold:
                     pairs.append((score, a, b, subject))
     pairs.sort(key=lambda p: (-p[0], p[1][0], p[2][0]))
