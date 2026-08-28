@@ -28,6 +28,7 @@ import re
 import sys
 import tempfile
 import unittest
+import pathlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -634,6 +635,58 @@ class SkillsTier(unittest.TestCase):
                         f"a coincidence of common words matched: {[r['name'] for r in got]}")
 
 
+class ClusterCap(unittest.TestCase):
+    """The knob that decides whether a fragmented view is readable."""
+
+    def setUp(self):
+        _reset()
+        # twelve disconnected pairs: many islands, few nodes each
+        self.pairs = []
+        for i in range(12):
+            a, b = _seed(i * 2), _seed(i * 2 + 1)
+            _edge(a, b, "depends_on", ["s1"])
+            self.pairs.append((a, b))
+
+    def _html(self, **kw):
+        out = io.StringIO()
+        opts = {"gcmd": "html", "belief": None, "depth": 2, "rel": None,
+                "history": False, "max_nodes": 200,
+                "max_clusters": GRAPH.HTML_MAX_CLUSTERS,
+                "out": os.path.join(TMP, "g.html"), "mermaid": False,
+                "no_open": True, "cwd": None}
+        opts.update(kw)
+        args = SimpleNamespace(**opts)
+        with contextlib.redirect_stdout(out):
+            GRAPH.cmd_graph(args)
+        return out.getvalue(), pathlib.Path(args.out).read_text()
+
+    def test_it_draws_only_the_capped_number_of_clusters(self):
+        text, html = self._html()
+        self.assertIn(f"{GRAPH.HTML_MAX_CLUSTERS} largest cluster(s) of 12", text)
+        drawn = len({m for m in re.findall(r"b(\d+)\[", html)})
+        self.assertEqual(drawn, GRAPH.HTML_MAX_CLUSTERS * 2)
+
+    def test_it_says_what_it_left_out_and_how_to_see_it(self):
+        text, _html = self._html()
+        self.assertIn("smaller cluster(s) not drawn", text)
+        self.assertIn("--max-clusters", text)
+        self.assertIn("--belief", text)
+
+    def test_raising_the_cap_draws_them_all(self):
+        text, html = self._html(max_clusters=50)
+        self.assertNotIn("not drawn. Mermaid", text)
+        drawn = len({m for m in re.findall(r"b(\d+)\[", html)})
+        self.assertEqual(drawn, 24)
+
+    def test_an_uncapped_view_reports_no_cluster_remainder(self):
+        _reset()
+        a, b = _seed(0), _seed(1)
+        _edge(a, b, "depends_on", ["s1"])
+        text, _html = self._html()
+        self.assertIn("1 largest cluster(s)", text)
+        self.assertNotIn("of 1", text)
+
+
 class DoctorReportsTheGraph(unittest.TestCase):
     """A fresh install has an empty graph and nothing else says so: neither the
     free structural pass nor the cheap asserted one runs on its own."""
@@ -767,6 +820,15 @@ class MermaidExport(unittest.TestCase):
         self.assertIn("setTimeout", html)
         self.assertIn("needs network", html)
         self.assertIn("cdn.jsdelivr.net", html)
+
+    def test_a_cluster_cap_exists_because_the_node_cap_is_the_wrong_knob(self):
+        """Mermaid stacks disconnected pieces vertically, so a view's shape is
+        set by how MANY islands it draws. Measured on a live store's
+        asserted-only graph: top 1/3/6 components render at aspect
+        2.87/0.83/0.48, all 44 at 0.09 -- a 1188x13814 ribbon. 60 nodes of
+        three-node islands is already 20 clusters."""
+        self.assertLessEqual(GRAPH.HTML_MAX_CLUSTERS, 12)
+        self.assertGreater(GRAPH.HTML_MAX_CLUSTERS, 1)
 
     def test_the_viewer_pans_and_zooms_by_mouse(self):
         """Verified live: drag moved translate by exactly the pointer delta,

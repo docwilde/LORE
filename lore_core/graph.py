@@ -76,6 +76,7 @@ __all__ = [
     'co_derived_pairs',
     'render_path',
     'HTML_MAX_NODES',
+    'HTML_MAX_CLUSTERS',
     'LABEL_CHARS',
     'mermaid_label',
     'mermaid_source',
@@ -354,6 +355,13 @@ def render_path(hops, claims: "dict[int, str]", conf: float) -> str:
 # hundreds of nodes and produce something nobody can read. 60 keeps the
 # default view to roughly the ten largest components of a live store.
 HTML_MAX_NODES = 60
+# A CLUSTER CAP, because the node cap is the wrong knob. Mermaid stacks
+# disconnected pieces vertically, so a view's shape is set by how MANY islands
+# it draws, not how many nodes: measured on a live store's asserted-only graph,
+# the top 1/3/6 components render at aspect 2.87/0.83/0.48 and are readable,
+# while all 44 render at 0.09 -- a 1188x13814 ribbon that fits at 5% and can be
+# read at no zoom level. 60 nodes of three-node islands is already 20 clusters.
+HTML_MAX_CLUSTERS = 8
 LABEL_CHARS = 90
 
 # ORDER MATTERS. Every replacement below introduces `&` or `#`, so those two
@@ -976,13 +984,15 @@ def cmd_graph(args) -> int:
         else:
             comps = [c for c in components(adj, set(claims)) if len(c) > 1]
             comps.sort(key=len, reverse=True)
-            chosen, dropped_comps = [], 0
+            chosen, dropped_comps, drawn = [], 0, 0
             for c in comps:
-                if len(chosen) + len(c) > args.max_nodes:
+                if drawn >= args.max_clusters or len(chosen) + len(c) > args.max_nodes:
                     dropped_comps += 1
                     continue
                 chosen.extend(c)
-            scope = "all related beliefs"
+                drawn += 1
+            scope = (f"{drawn} largest cluster(s)"
+                     + (f" of {len(comps)}" if dropped_comps else ""))
         singles = len(claims) - sum(1 for n in claims if adj.get(n))
         if not chosen:
             print("nothing to draw: no belief in this view carries a relation."
@@ -995,8 +1005,7 @@ def cmd_graph(args) -> int:
         rel_counts = Counter(r for a in chosen for d, r, _w in adj.get(a, ()) if d in set(chosen))
         note = (f"{len(chosen)} of {len(claims)} beliefs · "
                 f"{sum(rel_counts.values())} relation(s) · {scope}"
-                + (f" · {singles} unrelated belief(s) not drawn" if singles else "")
-                + (f" · capped at {args.max_nodes} nodes" if len(chosen) >= args.max_nodes else ""))
+                + (f" · {singles} unrelated belief(s) not drawn" if singles else ""))
         title = "LORE belief graph"
         out = Path(args.out) if args.out else Path(ROOT) / "graph.html"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1011,6 +1020,16 @@ def cmd_graph(args) -> int:
             print(f"note: {100 * n_co // n_edges}% of drawn relations are co_derived"
                   " (one session's beliefs, joined pairwise) — pass --rel depends_on"
                   " --rel explains … to see only what the deriver asserted")
+        # Say what was left out and how to see it, rather than silently drawing
+        # a fraction: a reader who cannot tell a capped view from a whole one
+        # will read absence as evidence.
+        if getattr(args, "dropped", None) is None and not args.belief:
+            more = len([c for c in components(adj, set(claims)) if len(c) > 1]) - drawn
+            if more > 0:
+                print(f"note: {more} smaller cluster(s) not drawn. Mermaid stacks"
+                      " disconnected clusters vertically, so drawing them all makes a"
+                      " ribbon nothing can read — raise --max-clusters, or centre on one"
+                      " belief with --belief <id>.")
         if args.mermaid:
             print("\n" + src)
         if not args.no_open:

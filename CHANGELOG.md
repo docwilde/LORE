@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.48.1 — 2026-08-28
+
+- New `--max-clusters` (default 8), and it is the knob that decides whether a view is readable. Mermaid stacks disconnected clusters vertically, so a view's shape follows how MANY islands it draws, not how many nodes: measured on a live store's asserted-only graph, the top 1/3/6 components render at aspect 2.87/0.83/0.48 and read fine, while all 44 render 1188x13814 — aspect 0.09, fitting at 5%, legible at no zoom level. A 60-node cap over three-node islands is already 20 clusters, so the node cap could not prevent it.
+- The note names the clusters left out and how to see them, rather than silently drawing a fraction: `8 largest cluster(s) of 44 · 438 unrelated belief(s) not drawn`.
+- `/lore:graph` states that `--rel` asserted-only will fragment, because the co-derived edges it removes are what hold the default view together. It is the right view for reading one relation and the wrong one for a first look.
+- The default view is unchanged — its mermaid source is byte-identical, verified against a file written before this release.
+- Tests: `tests/test_graph.py` (84; 5 new). Suite 385.
+
 ## 0.48.0 — 2026-08-28
 
 - The graph viewer **pans and zooms by mouse**: drag to pan, wheel to zoom, double-click or `f` to fit, `+`/`-` to step. The wrapper stopped being an `overflow:auto` box — a 3657x5661 diagram in a 1000px pane is not navigable by scrollbars, and moving around one is the whole point of the view.
