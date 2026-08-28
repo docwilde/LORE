@@ -1,0 +1,37 @@
+---
+description: Belief graph — backfill the edges the store implies, then inspect or draw it
+allowed-tools: Bash
+---
+
+`lore` = `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py"`.
+
+Read `$ARGUMENTS`. With no argument, run the **backfill** flow. Otherwise: `view` runs the viewer flow, an integer runs the viewer centred on that belief, anything else is a request to interpret against the subcommands below.
+
+## Backfill
+
+1. `lore graph backfill` — writes `supersedes` from the store's own `superseded_by` column. No model calls, idempotent, safe to re-run.
+2. `lore graph stats` — report nodes, relations, components, communities and the most connected beliefs.
+
+Then read the numbers and say which of these the store actually needs:
+
+- **Relations are only `co_derived` and `supersedes`.** Those are structural — derived from session co-occurrence and the store's own history. The five *asserted* verbs (`depends_on`, `specializes`, `explains`, `contradicts`, `applies_when`) come only from the deriver's `relates` channel, one session at a time going forward. There is no way to backfill them without re-deriving.
+- **To get asserted relations over past sessions**, offer `lore backfill --project` (or `/lore:backfill`). State the cost before running it: it re-derives whole transcripts through the deriver, one model call per window, and re-derivation folds into existing beliefs rather than duplicating them. Never launch it without the user agreeing to the spend.
+- **Most beliefs carry no relation at all.** Report that count plainly rather than implying the graph is denser than it is.
+
+## Viewer
+
+`lore graph html` renders the graph as mermaid and opens it in a browser. It writes `LORE_ROOT/graph.html` (override with `--out`) and prints the path, so a headless or SSH session still gets the file.
+
+- Whole graph: `lore graph html`. Singleton beliefs are excluded — a node with no edge says nothing a list would not. Capped at 60 nodes, largest components first; `--max-nodes N` to change it.
+- One belief's neighbourhood: `lore graph html --belief <id> --depth 2`.
+- Asserted relations only, once the store has some: `--rel depends_on --rel specializes --rel explains --rel contradicts --rel applies_when`.
+- Lineage: `--history --rel supersedes` includes superseded and retracted beliefs, which is the only view where a `supersedes` chain is traversable.
+- `--mermaid` also prints the source; `--no-open` writes without launching a browser.
+
+Mermaid loads from a CDN, so the page needs network the first time it is opened. It says so in place of the diagram when it cannot load.
+
+If the note reports co-derivation as most of the drawn relations, say so: a co-derived cluster is every belief from one session joined to every other, which draws as a hairball and means only "these were concluded together".
+
+## Other views
+
+`lore graph neighbours <id> [--depth N]`, `lore graph path <src> <dst>`, `lore graph communities`. All read-only.

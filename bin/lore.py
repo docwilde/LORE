@@ -635,6 +635,19 @@ def main() -> int:
     gp = gsub.add_parser("backfill",
                          help="write the edges the store already implies (supersedes)")
     _common(gp)
+    gp = gsub.add_parser("html",
+                         help="render the graph as mermaid and open it in a browser")
+    gp.add_argument("--belief", type=int,
+                    help="center on one belief instead of the whole graph")
+    gp.add_argument("--depth", type=int, default=2,
+                    help="hops from --belief (default 2)")
+    gp.add_argument("--max-nodes", type=int, default=HTML_MAX_NODES, dest="max_nodes",
+                    help=f"node ceiling for the whole-graph view (default {HTML_MAX_NODES})")
+    gp.add_argument("--out", help="write here instead of LORE_ROOT/graph.html")
+    gp.add_argument("--mermaid", action="store_true", help="also print the mermaid source")
+    gp.add_argument("--no-open", action="store_true", dest="no_open",
+                    help="write the file without launching a browser")
+    _common(gp)
 
     sp = sub.add_parser("ask", help="dialectic evidence pack: beliefs + memory + session hits")
     sp.add_argument("question")
