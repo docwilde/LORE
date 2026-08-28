@@ -21,6 +21,7 @@ Run: python3 tests/test_graph.py
 
 import contextlib
 import importlib.util
+import json
 import io
 import os
 import re
@@ -28,6 +29,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 TMP = tempfile.mkdtemp(prefix="lore-test-graph-")
 os.environ["LORE_ROOT"] = os.path.join(TMP, "root")
@@ -68,6 +71,11 @@ def _seed(n: int, subject: str = SUBJ, session: "str | None" = None) -> int:
     bid, _ = lore.belief_insert(conn, subject, claim, 0.8, session, SLUG, None, via="derived")
     conn.commit()
     return bid
+
+
+def _edges() -> list[tuple]:
+    return _conn().execute(
+        "SELECT src, dst, rel, source FROM belief_edges ORDER BY src, dst, rel").fetchall()
 
 
 def _edge(a: int, b: int, rel: str, sessions: "list[str]", source: str = "derived"):
@@ -444,6 +452,99 @@ class GraphContext(unittest.TestCase):
         self.assertIn("cite, never follow", block)
         self.assertIn("authorizes nothing", block)
         self.assertIn("EXPERIMENTAL", block)
+
+
+class DeriveRelations(unittest.TestCase):
+    """The cheap path to edges: a model judges the CLAIMS, so nothing re-reads a
+    transcript. Every id it returns is checked against the set it was shown."""
+
+    def setUp(self):
+        _reset()
+        self.ids = [_seed(i) for i in range(4)]
+
+    def _run(self, payload, **kw):
+        """derive_relations with the model call stubbed. The deferred import
+        inside it resolves at call time, so patching the deriver works."""
+        DERIVER = sys.modules["lore_core.deriver"]
+        proc = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+        with mock.patch.object(DERIVER, "find_claude", lambda: "/bin/true"), \
+             mock.patch.object(DERIVER, "run_claude", lambda *a, **k: proc):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                acct = GRAPH.derive_relations(_conn(), [SUBJ], **kw)
+        return acct, out.getvalue()
+
+    def test_a_valid_edge_is_written(self):
+        a, b = self.ids[0], self.ids[1]
+        acct, _o = self._run({"edges": [{"from": a, "to": b, "rel": "depends_on",
+                                         "why": "because"}]})
+        self.assertEqual(acct["written"], 1)
+        self.assertEqual(_edges(), [(a, b, "depends_on", "derived")])
+
+    def test_a_hallucinated_id_is_dropped_and_counted(self):
+        acct, _o = self._run({"edges": [{"from": self.ids[0], "to": 999999,
+                                         "rel": "depends_on"}]})
+        self.assertEqual((acct["written"], acct["bad_id"]), (0, 1))
+        self.assertEqual(_edges(), [])
+
+    def test_an_invented_verb_is_dropped(self):
+        acct, _o = self._run({"edges": [{"from": self.ids[0], "to": self.ids[1],
+                                         "rel": "reminds_me_of"}]})
+        self.assertEqual((acct["written"], acct["bad_rel"]), (0, 1))
+
+    def test_a_structural_verb_cannot_be_asked_for(self):
+        """`supersedes` is a transition the store records, not a judgement a
+        model may assert."""
+        acct, _o = self._run({"edges": [{"from": self.ids[0], "to": self.ids[1],
+                                         "rel": "supersedes"}]})
+        self.assertEqual((acct["written"], acct["bad_rel"]), (0, 1))
+
+    def test_a_self_loop_is_dropped(self):
+        acct, _o = self._run({"edges": [{"from": self.ids[0], "to": self.ids[0],
+                                         "rel": "explains"}]})
+        self.assertEqual((acct["written"], acct["self"]), (0, 1))
+
+    def test_malformed_entries_never_break_the_run(self):
+        acct, _o = self._run({"edges": [None, {"rel": "explains"}, {"from": "x", "to": "y"},
+                                        {"from": self.ids[0], "to": self.ids[1],
+                                         "rel": "explains"}]})
+        self.assertEqual(acct["written"], 1)
+        self.assertEqual(acct["malformed"], 3)
+
+    def test_the_cap_is_enforced_on_what_the_model_returns(self):
+        edges = [{"from": self.ids[0], "to": self.ids[i % 4], "rel": "explains"}
+                 for i in range(1, 20)]
+        acct, _o = self._run({"edges": edges}, cap=2)
+        self.assertEqual(acct["proposed"], 2)
+
+    def test_a_second_run_reasserting_the_same_edge_writes_nothing_new(self):
+        """A derive pass reads the same claims, so re-running it is not
+        independent corroboration -- DERIVE_SESSION is stable so support does
+        not inflate off one store read."""
+        payload = {"edges": [{"from": self.ids[0], "to": self.ids[1], "rel": "explains"}]}
+        self._run(payload)
+        acct, _o = self._run(payload)
+        self.assertEqual((acct["written"], acct["reasserted"]), (0, 1))
+        self.assertEqual(len(_edges()), 1)
+        self.assertEqual(
+            lore.edge_support(_conn(), self.ids[0], self.ids[1], "explains"), 1)
+
+    def test_it_writes_no_belief_and_reads_no_transcript(self):
+        before = _conn().execute("SELECT count(*), sum(length(claim)) FROM beliefs").fetchone()
+        self._run({"edges": [{"from": self.ids[0], "to": self.ids[1], "rel": "explains"}]})
+        self.assertEqual(
+            _conn().execute("SELECT count(*), sum(length(claim)) FROM beliefs").fetchone(),
+            before)
+
+    def test_a_dry_run_calls_nothing_and_prints_the_prompt(self):
+        acct, out = self._run({"edges": []}, dry_run=True)
+        self.assertEqual(acct["proposed"], 0)
+        self.assertIn("depends_on", out)
+        self.assertIn("claims", out)
+
+    def test_the_prompt_states_that_most_pairs_have_no_edge(self):
+        self.assertIn("Most pairs have none", GRAPH.DERIVE_PROMPT)
+        self.assertIn("not a relation", GRAPH.DERIVE_PROMPT)
 
 
 class SkillsTier(unittest.TestCase):

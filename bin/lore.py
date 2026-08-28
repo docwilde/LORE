@@ -638,6 +638,21 @@ def main() -> int:
     # EXPERIMENTAL: the block LORE_GRAPH_CONTEXT injects on UserPromptSubmit,
     # runnable here against any prompt so the selection and the budget can be
     # inspected without turning the stage on.
+    # THE CHEAP PATH TO EDGES: the five verbs are judgements about claims, not
+    # about the transcripts they came from, so this reads the store and not one
+    # session. Whole active store on a live machine: ~20k tokens, one call.
+    gp = gsub.add_parser("derive",
+                         help="ask a model for relations between existing beliefs")
+    gp.add_argument("--subject", action="append",
+                    help="limit to this subject (repeatable); default: user,"
+                         " user-model and this project")
+    gp.add_argument("--all", action="store_true", help="every subject in the store")
+    gp.add_argument("--max-edges", type=int, default=60, dest="max_edges")
+    gp.add_argument("--model", help=f"default {DREAMER_MODEL}")
+    gp.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="print the prompt and its token estimate, call nothing")
+    gp.add_argument("--cwd")
+    gp.set_defaults(fn=cmd_graph)
     gp = gsub.add_parser("context",
                          help="preview the experimental graph-context injection")
     gp.add_argument("--prompt", nargs="*", help="score against this prompt")

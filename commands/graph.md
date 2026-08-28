@@ -14,8 +14,9 @@ Read `$ARGUMENTS`. With no argument, run the **backfill** flow. Otherwise: `view
 
 Then read the numbers and say which of these the store actually needs:
 
-- **Relations are only `co_derived` and `supersedes`.** Those are structural — derived from session co-occurrence and the store's own history. The five *asserted* verbs (`depends_on`, `specializes`, `explains`, `contradicts`, `applies_when`) come only from the deriver's `relates` channel, one session at a time going forward. There is no way to backfill them without re-deriving.
-- **To get asserted relations over past sessions**, offer `lore backfill --project` (or `/lore:backfill`). State the cost before running it: it re-derives whole transcripts through the deriver, one model call per window, and re-derivation folds into existing beliefs rather than duplicating them. Never launch it without the user agreeing to the spend.
+- **Relations are only `co_derived` and `supersedes`.** Those are structural — session co-occurrence and the store's own history. The five asserted verbs come from the deriver's `relates` channel going forward, and from `lore graph derive` for what the store already holds.
+- **`lore graph derive` is the cheap way to get asserted edges.** The five verbs are judgements about *claims*, not about the transcripts claims came from, so it reads the belief store and no transcript at all: run `--dry-run` first, which prints the prompt and its token estimate. A whole 500-belief store is one call of roughly 22k tokens. Nothing it does writes or changes a belief.
+- **`lore backfill` is the expensive way, and it buys something different.** It re-reads whole transcripts at one model call per window — tens of millions of tokens across a few hundred sessions — and what it produces is new *beliefs*, with `relates` edges as a side effect. Reach for it when the store is missing facts, not when it is missing edges. Never launch it without the user agreeing to the spend.
 - **Most beliefs carry no relation at all.** Report that count plainly rather than implying the graph is denser than it is.
 
 ## Viewer
