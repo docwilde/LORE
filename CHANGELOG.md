@@ -7,103 +7,94 @@
 - Tests: `tests/test_belief_edges.py` +3 (26). Suite 326.
 
 ## 0.42.0 — 2026-08-28
-
-- New: **traversal over the belief graph** (`lore_core/graph.py`, `lore graph`). 0.41.0 gave the store typed relations and no way to walk them — an edge could be written and read one hop at a time, and nothing composed two. `adjacency` loads the graph (or one subject's slice) as a plain `dict[int, list[tuple[int, str, float]]]`; `khop`, `best_path`, `simple_paths`, `components`, `communities` and `degree` walk it. `lore graph stats | neighbours | path | communities | backfill`, read-only except the last.
-- **Path confidence is the product over hops**, the weakest-link rule: a chain is no better than its worst link, and a long chain of plausible steps is not a strong conclusion. Which makes the most-confident path exactly a shortest path under `-log(weight)`, so `best_path` is `heapq` Dijkstra and returns the optimum rather than an approximation — it prefers two strong hops to one weak one, and `tests/test_graph.py` asserts that identity rather than merely that a path came back.
-- **An edge's weight is its distinct-session support**, `1 - exp(-n/2)`: one session restating a relation is one source, a third adds less than the second. Capped at `MAX_ASSERTED_SUPPORT = 0.99` so a model-asserted relation never weighs as much as one the store observed — without the cap the curve reaches exactly 1.0 in float64 (`1 - exp(-500)` rounds up) and a much-repeated inference would be indistinguishable from `supersedes`. Structural edges weigh 1.0; there is nothing to discount about a transition the store recorded.
-- **The relation vocabulary is now declared in three tiers, and only two are writable.** `BELIEF_RELATIONS` is the deriver's menu (the five verbs from 0.41.0). `STRUCTURAL_RELATIONS` holds `supersedes`, which only `backfill_structural` writes — a model must not be able to claim that one belief supersedes another. `PROJECTED_RELATIONS` holds `co_derived`, which exists only in a loaded graph: `edge_insert` admits `ALL_RELATIONS` and so physically cannot store it. The three are asserted disjoint.
-- **Co-derivation is projected, never stored.** `belief_evidence` already holds the belief/session incidence, and projecting each session as a clique is where the size goes: 4,029 edges on the live store, 2,145 of them from one 66-belief session. Sessions above `CO_DERIVED_MAX_SESSION = 8` are dropped as context rather than corroboration, leaving 277; the remainder weigh `1/|session|`, so a pair from a two-belief session counts for more than one from an eight-belief session. The incidence table stays the single source of truth.
-- **Structural backfill** (`lore graph backfill`) writes the edges the store already implied and never recorded — `supersedes`, straight off `beliefs.superseded_by`, no model call, idempotent. On the live store: 38 edges, and with `--history` they compose into lineages. One runs six hops (`229 → 289 → 334 → 345 → 356 → 388 → 494`): seven generations of the dreamer re-merging a single claim about empirical verification, each pass reworded slightly. Nothing before this could see that.
-- **Structure is not evidence, and the read side enforces the split.** `/lore:ask` prints graph-reachable beliefs under their own heading, labelled as reached rather than matched; `lore consult` prints them below `CITE ONLY`, in a section that states it neither steers nor supports. Being related to a relevant belief is not a reason to act — the same rule the belief gate applies to claims, applied to the edges between them.
-- **Stdlib only, and that is a decision.** On a 504-belief store the whole adjacency builds in 1.5 ms, components run in 5 ms and label propagation in 3 ms; `networkx` costs 136 ms just to import, which `lore refresh` would pay on every prompt, and it is not installed for the interpreter the hooks actually run — a plugin install copies files and runs no pip. A consumer importing `lore_core` in its own venv can add it for algorithms nobody here hand-writes.
-- Perf: `token_containment` is split so the `O(n²)` loops tokenize once per belief instead of once per pair (carried over from 0.41.0's measurement — `same_subject_pairs` 465 ms → 48 ms).
-- Tests: `tests/test_graph.py` (26). Suite total 323.
-- README: the graph is documented as containment infrastructure rather than a recall feature — an edge records why a belief holds, not how much more the store can reach.
+- New **`lore_core/graph.py`**: `adjacency`, `khop`, `best_path`, `simple_paths`, `components`, `communities`, `degree`. Stdlib only.
+- New **`lore graph`**: `stats | neighbours | path | communities | backfill`. Read-only except `backfill`.
+- Path confidence is the product over hops. `best_path` is Dijkstra on `-log(weight)`, so it prefers two strong hops to one weak one.
+- Edge weight is distinct-session support, `1 - exp(-n/2)`, capped at `MAX_ASSERTED_SUPPORT = 0.99`. Structural edges weigh 1.0.
+- Relation vocabulary split into three declared tiers: `BELIEF_RELATIONS` (deriver), `STRUCTURAL_RELATIONS` (`supersedes`, backfill only), `PROJECTED_RELATIONS` (`co_derived`, never storable). Asserted disjoint.
+- `co_derived` is projected from `belief_evidence` at read time; sessions over `CO_DERIVED_MAX_SESSION = 8` dropped. 4,029 edges as cliques against 277 capped.
+- New **`backfill_structural`** (`lore graph backfill`): writes `supersedes` from `beliefs.superseded_by`, idempotent. 38 edges on a live store; one lineage runs 6 hops.
+- `/lore:ask` prints graph-reachable beliefs under their own heading; `lore consult` prints them below `CITE ONLY`.
+- Tests: `tests/test_graph.py` (26). Suite 323.
 
 ## 0.41.0 — 2026-08-28
-
-- New: **the binding layer** — typed relations *between* beliefs (`belief_edges`, `belief_edge_assertions`). Every pairwise measure the store already carried answers one question, "do these two claims say the same thing": containment (#48/#50/#51), `crosscheck`, `dedup-report`, `superseded_by`. So a claim that holds only while another holds, or gives the mechanism behind one, or cannot be true beside it, had nowhere to be recorded — the store could tell twins from strangers and nothing else.
-- Five declared verbs in `beliefs.BELIEF_RELATIONS`: `depends_on`, `specializes`, `explains`, `contradicts`, `applies_when`. Declared, never derived from a verb's name — the pairing a positional derivation produces is silently lossy the day a verb gains no counterpart. `contradicts` is symmetric and stored lower-id-first, so the two directions are one row rather than two rows asserting one fact. Small on purpose: a vocabulary the deriver can hold in mind is one it uses consistently, and a wide one earns a topical edge between every pair of beliefs that mention the same file, which carries nothing the FTS index does not.
-- Corroboration is a **count of distinct sessions**, derived from `belief_edge_assertions` (primary key includes `session_id`, so a same-session restatement is an `INSERT OR IGNORE` no-op), never a counter. One session asserting a relation twice is one source. The same rule makes `belief_evidence`'s distinct-session count the honest number and its raw row count not: a live store showed one belief with 12 evidence rows from 6 sessions.
-- Deriver channel: the conclusions schema gains `relates` (at most 2 per conclusion, ids from the `belief_neighbourhood` list the prompt already carries). `evidence_for` means *same fact*; `relates` means a *different* fact in a named relation to one. Edges anchor at the belief the conclusion actually became — the new row, or the existing one it folded into, since a session that restated a belief can still be the first to notice what it rests on. A relation naming a non-active belief is dropped and counted, the bar `evidence_for` already holds its citation to.
-- Cross-subject edges are **allowed**, where a cross-subject *fold* is not (#50/#51). Folding merges two claims into one row and so merges their authority — a stated preference wearing an inference's uncertainty, or the reverse. An edge merges nothing: "this project convention holds because of that user preference" is true across the channels and is the binding the channel exists to record.
-- `belief_supersede` re-points edges onto the survivor, the same reasoning it already applies to `belief_evidence`: an endpoint equal to the survivor is dropped rather than moved (a merge of two bound beliefs would otherwise leave the survivor depending on itself), and collisions with a relation the survivor already carries are absorbed.
-- New: `lore belief edges <id>` — what a belief rests on and what rests on it, both directions, with each edge's distinct-session support and its `source`. `lore belief show` prints the same block under the evidence trail. `source` is the calibration label: a model-asserted relation is exactly as uncalibrated as a model-asserted confidence.
-- Fix: **a git worktree is not a project.** `git rev-parse --show-toplevel` inside a linked worktree reports the *worktree's* root, so `project_slug` minted a separate project per checkout and every fact derived in one landed in a store that dies with the branch. A live store had 42 proposals — 21 memory, 21 filemap — staged under 8 throwaway worktree slugs of two repos, none of them visible to the repository they were about, and none flagged: the slug resolved perfectly well, just to the wrong thing.
-- `config.project_identity_root` resolves a linked worktree through `--git-common-dir`, which points at the main repository's `.git` from anywhere; both values come from one `git rev-parse`. A separate-git-dir or bare layout falls back to the toplevel — no guess. `project_root` keeps reporting the worktree, deliberately: it is what the file map relativizes against, and inside a worktree a path is only meaningful relative to that worktree.
-- `config.worktree_parent_repo` covers the case git cannot: a worktree is deleted when its branch merges, and the transcripts of sessions that ran in it outlive it, so a backfill hands `project_slug` a path git cannot resolve at all. A `<container>/<name>` tail whose container name ends in `worktree`/`worktrees` (matched by shape — each tool names its container after itself) is dropped, and the result is accepted only when what remains is itself a git repository. A container that is not beside its repo (`~/.doxa/worktrees/doxa-<sha>` leaves `~`) resolves to nothing rather than filing the fact under a home directory.
-- Deriver and dreamer prompts gain the half a model does choose: "a git worktree is not a project" on the optional `project` subject, a fourth way a conclusion goes stale (a claim about a throwaway checkout), and a promotion rule — a promotion names the repository, and two beliefs differing only in which worktree derived them are one belief.
-- Perf: `token_containment` re-tokenized both claims on every call, so the `O(n²)` pair loops ran the tokenizer over the same claims tens of thousands of times. Split into `pending.containment` (the measure, over pre-tokenized sets, beside `token_jaccard` in the same shape) and the two-string wrapper over it; the four loops that compare one claim against many now tokenize once per belief. On a 504-belief store, `same_subject_pairs` 465 ms → 48 ms and `cross_subject_pairs` 35 ms → 5 ms, with the arithmetic verified identical across all 30,320 pairs.
-- Tests: `tests/test_belief_edges.py` (22), `tests/test_worktree_identity.py` (17, against real `git worktree` checkouts in both layouts — container beside the repo and container away from it). The two "the containment function is shared, not reimplemented" tests now assert on `containment`, the function that decides. Suite total 296.
+- New **`belief_edges`**, **`belief_edge_assertions`** (`lore_core/store.py`): typed relations between beliefs. Support is a count of distinct sessions, so one session restating a relation is one source.
+- Five declared verbs in **`BELIEF_RELATIONS`**: `depends_on`, `specializes`, `explains`, `contradicts`, `applies_when`. `contradicts` is symmetric, stored lower-id-first.
+- Deriver conclusions schema gains **`relates`**: at most 2 per conclusion, ids from `belief_neighbourhood`. Edges anchor at the belief the conclusion became, new or folded.
+- Cross-subject edges allowed; cross-subject *folds* still refused (#50/#51).
+- **`belief_supersede`** re-points edges onto the survivor; self-loops dropped, primary-key collisions absorbed.
+- New **`lore belief edges <id>`**; `lore belief show` prints the same block.
+- Fix **`project_identity_root`** (`lore_core/config.py`): `git rev-parse --show-toplevel` reports a linked worktree's own root, so `project_slug` minted a project per checkout. Now resolves via `--git-common-dir`. 42 proposals had been staged under 8 worktree slugs of two repos.
+- New **`worktree_parent_repo`**: strips a `<container>/<name>` tail for a worktree already deleted, accepted only when what remains is a git repo. `project_root` still reports the worktree, which is what the file map relativizes against.
+- Deriver and dreamer prompts: a git worktree is not a project.
+- Perf **`pending.containment`**: split from `token_containment` so the `O(n²)` loops tokenize once per belief. `same_subject_pairs` 465ms → 48ms, arithmetic identical over 30,320 pairs.
+- Tests: `tests/test_belief_edges.py` (22), `tests/test_worktree_identity.py` (17).
 
 ## 0.40.0 — 2026-08-27
-
-- Fix (#51): one fact (a monkeypatch/lazy-import test pitfall) existed as four separate beliefs on a live store, near-identical wording, all `via derived`, each with exactly one evidence row — four sessions independently re-deriving the same conclusion, counted as noise instead of confirmation. Nothing caught it: #48's containment check guards memory proposals, not beliefs; #50's cross-subject check guards `user` vs `user-model`, not same-subject twins; the dreamer pairs same-subject beliefs but only reconciles *contradictions* — redundant agreement passed through. `belief_insert`'s own dedup is case-insensitive exact match only; the four twins scored 0.56–0.94 containment on each other, never 1.00.
-- Write-time containment fold: a new conclusion is measured against every ACTIVE belief in the SAME subject (`deriver.py`'s `same_subject_cover`, beside #50's `cross_subject_cover`), same tokenizer and `LORE_DUP_CONTAINMENT` threshold as #48/#50. Above threshold, the claim attaches as an evidence row on the existing belief instead of a new row (`belief_reinforce`, factored out of `belief_insert`'s own exact-match branch). Same subject only, active rows only — a claim naming a retracted belief inserts fresh and the accounting notes the citation.
-- Deriver prompt gains a belief-store neighbourhood: up to 5 digest themes, 6 FTS matches each, against the session's own subjects. Beliefs were already FTS5-indexed (`lore belief search` already used it) so no new index was needed. The conclusions schema gains an optional `evidence_for` field — cite an existing id instead of restating a claim already on the list; the write site treats a valid same-subject citation as an explicit fold, never trusted across subjects or onto a non-active belief. Measured cost: a realistic digest produced a 3,941-char (~985 token) neighbourhood, 1.6% of the digest budget, and it surfaced all four known twins as candidates.
-- Threshold set by replay, not inherited: copied `~/.claude/lore/state.db` read-only and replayed containment over all 52,210 same-subject active-belief pairs sharing a token. 116 pairs clear 0.60; the highest score reached by a genuinely distinct pair in ~250 pairs read by hand was 0.294 clean / 0.417 borderline — 0.60 clears that by a comparable margin to #48's 40% and #50's 50%, so the existing constant is reused rather than adding a fourth. Replayed chronologically (each belief checked against what was already active ahead of it, as the fix would actually see it): 37 of 814 active beliefs would have folded, 777 distinct beliefs instead of 814.
-- New: `lore belief dedup-report` — read-only report of same-subject containment pairs above threshold, for whatever a store already accumulated before this release (`same_subject_pairs`, walks every subject, not just the two `crosscheck` channels). Retracts and merges nothing, same reasoning as `crosscheck`. All four known twins appear in its output on the live store.
-- Tests: `tests/test_belief_dedup.py` (26; 23 of 26 verified failing against pre-change code, the remaining 3 are premise guards on unchanged tokenizer behavior). `tests/test_cross_subject.py`'s same-subject regression test updated: same-subject near-duplicates used to be left for the dreamer and now fold at write time, which is this fix's whole point.
+- Fix (#51) **same-subject belief duplication**: one fact existed as four beliefs, each with one evidence row. `belief_insert` deduped on exact match only; the twins scored 0.56–0.94 containment.
+- New **`same_subject_cover`** (`lore_core/deriver.py`): a conclusion over `LORE_DUP_CONTAINMENT` against an active same-subject belief attaches as evidence, not a new row. Active rows only.
+- New **`belief_reinforce`** (`lore_core/beliefs.py`): factored out of `belief_insert`'s exact-match branch; both fold paths share it.
+- New **`belief_neighbourhood`** (`lore_core/deriver.py`): 5 digest themes × 6 FTS matches into the deriver prompt. Conclusions schema gains `evidence_for` — cite an id instead of restating.
+- New **`lore belief dedup-report`**: read-only same-subject containment pairs above threshold. Retracts nothing.
+- Threshold held at 0.60, replayed over 52,210 live pairs.
+- Tests: `tests/test_belief_dedup.py` (26).
 
 ## 0.39.0 — 2026-08-26
-
-- Fix: `KV_SECRET` in `lore_core/scrub.py` redacted a *reference* to a secret the same as the secret itself — a real transcript showed an `op://…` 1Password pointer next to `GITLAB_TOKEN=` turned into `[REDACTED:value]`, leaving a command nobody could run. `REFERENCE_SHAPES` now exempts value shapes that are pointers, not material — `op://`, `vault:`/`vault://`, `keyring://`, `${VAR}`/`$VAR`, `<placeholder>` — each anchored against the *whole* captured value, so a real credential under the same key still redacts.
-- `aws-vault:`, `gopass:` and `pass:` were considered and left out: none has an established inline value-reference convention the way `op://`/`vault://`/`keyring://` do (they're exec-wrapper CLIs, not schemes a value gets set to), and the module's asymmetry — under-redaction leaks a credential, over-redaction only mangles a command — means a shape without a citable convention doesn't get allowlisted.
-- Audited `HEX_RUN`/`BASE64_RUN` for the same class of bug (reference mistaken for material). Found none beyond the already-documented, accepted trade-off (a git SHA or content hash gets redacted too; see `_base64_sub`'s path exemption and the module docstring) — left both alone.
-- Tests: `tests/test_hardening.py` (29; 13 new, each paired with a same-key real-material case that still redacts).
-- Relicensed from the LORE Noncommercial License 1.0 to **AGPL-3.0-only**, dual with a commercial option. The noncommercial terms were not open source by the OSI definition, which blocked distro packaging and deterred contributors; AGPL keeps a fork's source open, including when it is only offered over a network.
-- `LICENSE-COMMERCIAL.md` states the commercial option — an offer to negotiate, not a licence. `TRADEMARK.md` reserves the LORE name and mark, which the AGPL grant does not cover.
-- Source files carry `SPDX-License-Identifier: AGPL-3.0-only`; `pyproject.toml` and `.claude-plugin/plugin.json` declare it.
-- Contact address is now `docwilde@proton.me`, replacing a work address that had no business on a personal project being commercially licensed.
+- Fix **`KV_SECRET`** (`lore_core/scrub.py`): an `op://` reference next to `GITLAB_TOKEN=` was redacted as if it were the secret, leaving an unrunnable command. New `REFERENCE_SHAPES` exempts pointer shapes — `op://`, `vault:`/`vault://`, `keyring://`, `${VAR}`/`$VAR`, `<placeholder>` — anchored against the whole captured value.
+- `aws-vault:`, `gopass:`, `pass:` left out: no inline value-reference convention to anchor on.
+- `HEX_RUN`/`BASE64_RUN` audited for the same class; unchanged.
+- Relicensed to **AGPL-3.0-only**, dual with a commercial option. `LICENSE-COMMERCIAL.md` states the offer; `TRADEMARK.md` reserves the name. SPDX headers on every source file.
+- Contact address is `docwilde@proton.me`.
+- Tests: `tests/test_hardening.py` (29; 13 new).
 
 ## 0.38.0 — 2026-08-25
-- Fix (#50): the deriver could write the same claim to both `user` and `user-model`, blurring a stated fact with an uncalibrated inference. The deriver prompt now states the channel rule explicitly (stated → `user`, inferred → `user-model`); the two subjects stay separate. Rationale and the measurement behind it: `docs/user-model-channel-separation.md`.
-- Reuses #48's containment check (threshold 0.60, `LORE_DUP_CONTAINMENT`) at the belief write site: a `user-model` claim already carried by a `user` fact is dropped; the reverse is kept and reported. Validated by replay against 3528 live cross-subject pairs — zero false positives.
-- New: `lore crosscheck` — read-only report of cross-subject near-duplicate pairs above `--threshold` (default 0.60). Merges and retracts nothing.
-- Conclusions channel gains the same drop-accounting the memory channel got in #48.
+- Fix (#50) **cross-channel claim duplication**: the deriver wrote the same claim to both `user` and `user-model`. The prompt now states the channel rule — stated → `user`, inferred → `user-model`. Rationale: `docs/user-model-channel-separation.md`.
+- Belief write site reuses #48's containment check (0.60, `LORE_DUP_CONTAINMENT`): a `user-model` claim already carried by `user` is dropped; the reverse is kept and reported. Zero false positives over 3,528 live pairs.
+- New **`lore crosscheck`**: read-only cross-subject near-duplicate pairs above `--threshold`. Merges and retracts nothing.
+- Conclusions channel gains the memory channel's drop-accounting.
 - Tests: `tests/test_cross_subject.py` (29).
 
 ## 0.37.0 — 2026-08-25
-- Fix (#48): archive data showed the deriver over-generating, not duplicating — 1240 rejections against 25 approvals, but the rejections were only 2% near-duplicates of each other. The fix targets volume: a lower ceiling, a rewritten prompt, and a cheap deterministic filter. Full analysis: `docs/memory-proposal-quality.md`.
-- Proposal ceiling 5 → 3 (`LORE_MEMORY_PROPOSAL_CAP`), now a single source of truth for the prompt and for staging (previously two independent literals that could drift). Runs that hit the old cap approved at 0.83% vs 2.47% for runs emitting fewer. Prompt now states the number is a ceiling, not a quota.
-- Durability test replaced: work-in-flight markers (PR/issue/SHA) had no discriminative power between approved and rejected proposals; prescriptive/hazard wording does. New ACT-NOT-KNOW test keeps only what changes a future session's behavior.
-- Stage-time containment suppression drops a proposal already covered by an existing same-scope memory entry (containment, not Jaccard — a curated entry is usually a compound and a re-proposal is one clause of it). Threshold 0.60 (`LORE_DUP_CONTAINMENT`), set by replay against 1242 archived proposals: catches 0.81% of past rejections, zero false positives on approvals. `replace` proposals are exempt (a legitimate supersede scores as a near-duplicate of what it replaces).
-- Every dropped proposal is now counted and reported, not silently suppressed.
+- Fix (#48) **memory-proposal over-generation**: 1,240 rejections against 25 approvals, only 2% near-duplicates of each other. Analysis: `docs/memory-proposal-quality.md`.
+- Proposal ceiling 5 → 3 (`LORE_MEMORY_PROPOSAL_CAP`), now one source of truth for prompt and staging. Runs hitting the old cap approved at 0.83% against 2.47%.
+- Durability test replaced with ACT-NOT-KNOW: prescriptive/hazard wording discriminates approved from rejected, work-in-flight markers (PR/issue/SHA) do not.
+- Stage-time containment suppression drops a proposal already covered by a same-scope entry. Threshold 0.60, replayed over 1,242 archived proposals. `replace` proposals exempt.
+- Dropped proposals are counted and reported.
 - Tests: `tests/test_proposal_precision.py` (26).
 
 ## 0.36.0 — 2026-08-24
-- Fix (#43): CLI writes (`memory`/`belief`/`filemap` add, replace, remove, move) bypassed the approval gate that already governed the background reviewer — any hook, plugin, or script calling `bin/lore.py` could write directly to curated memory or beliefs.
-- Every CLI write is now classified by caller (`lore_core/gate.py`): interactive (agent tool call) and terminal (human shell) apply directly; hook and detached (cron/daemon/script) callers stage in `pending/` instead. Classification signals and the gate's limits: `docs/write-gate.md`.
-- The gate is advisory — forgeable via env var or the documented `LORE_WRITE_GATE=off` escape hatch. It stops callers that aren't actively trying to evade it, which covers what reaches curated memory in practice today.
-- Every memory/filemap/belief entry now records `writer`/`via` provenance; entries that predate this release read as `unknown` rather than being back-filled with a guess. New `lore provenance` command.
-- Deriver and dreamer writes are unaffected — in-process, not CLI.
-- Tests: `tests/test_write_gate.py` (31). Verified end to end against a real Claude Code SessionStart hook.
+- Fix (#43) **CLI writes bypassed the approval gate**: any hook, plugin or script calling `bin/lore.py` could write curated memory or beliefs directly.
+- New **`lore_core/gate.py`**: every CLI write is classified by caller. Interactive (agent tool call) and terminal (human shell) apply; hook and detached stage in `pending/`. Signals and limits: `docs/write-gate.md`.
+- The gate is advisory — forgeable by env var, with `LORE_WRITE_GATE=off` as the documented escape hatch.
+- Every memory/filemap/belief entry records `writer`/`via` provenance; pre-release entries read `unknown`, never back-filled. New **`lore provenance`**.
+- Deriver and dreamer writes unaffected: in-process, not CLI.
+- Tests: `tests/test_write_gate.py` (31), verified against a real SessionStart hook.
 
 ## 0.35.2 — 2026-08-25
-- User memory cap raised 2750 → 4500 chars (`LORE_USER_CAP`). A real store sat at 88% and forced consolidation every few writes; user memory holds durable cross-project facts about who the user is, unlike project memory, which rotates with the repo. The cap itself stays — this restores headroom, not the ceiling.
+- User memory cap 2750 → 4500 chars (`LORE_USER_CAP`). A live store sat at 88% and forced consolidation every few writes.
 
 ## 0.35.1 — 2026-08-25
-- `lore_core` is now installable (`pyproject.toml`, hatchling, distribution `lore-core`). Previously the only way to get it was the plugin's `sys.path` bootstrap, which broke a bare DOXA clone's test collection (41 of 52 modules failed to import). Plugin behavior (`/plugin install lore`, `bin/lore.py`) is unchanged.
-- Only `lore_core/` is packaged; `bin/`, `hooks/`, `commands/`, `skills/`, `assets/` stay plugin-path assets loaded by Claude Code, not library code. The sdist also carries `tests/` and `.claude-plugin/plugin.json`, which is the version source.
-- Still stdlib-only (`dependencies = []`, now asserted by a test); no `[project.scripts]` — `lore` stays the plugin's CLI, resolved by path.
-- Version and license both derive from `.claude-plugin/plugin.json` at build and run time. License declared as `LicenseRef-LORE-Noncommercial-1.0` (PolyForm-Noncommercial with an amendment, not an SPDX-listed identifier).
+- **`lore_core`** is installable: `pyproject.toml`, hatchling, distribution `lore-core`. A bare DOXA clone previously failed to import 41 of 52 test modules. Plugin behaviour unchanged.
+- Only `lore_core/` is packaged; `bin/`, `hooks/`, `commands/`, `skills/`, `assets/` stay plugin-path assets. The sdist carries `tests/` and `.claude-plugin/plugin.json`.
+- Still stdlib-only (`dependencies = []`, now asserted by a test). No `[project.scripts]`.
+- Version and license derive from `.claude-plugin/plugin.json` at build and run time.
 - Tests: `tests/test_packaging.py` (16).
 
 ## 0.35.0 — 2026-08-24
-- Fix (#40): project memory was attributed by cwd, not by subject — a fact learned about repo A while working in repo B was written into B's memory. The deriver schema gains an optional `project` field, filled only when a fact is unmistakably about a different, named project; `resolve_subject_slug` matches it against known project slugs (exact → unique suffix → unique substring) and never guesses between candidates. Behavior with no subject given is byte-identical to before.
-- New: `lore memory move --scope project --match "<substring>" --to <slug|repo-name|path>` — retroactive cleanup for entries mis-scoped before this fix.
-- Fix: `is_worker_transcript` only read the first 64KB of a transcript, so a large preamble ahead of the marker could push it past the window and misclassify LORE's own deriver/dreamer output as a real session. Detection now reads the first 50 JSONL records structurally instead of a fixed byte offset.
+- Fix (#40) **project memory attributed by cwd, not by subject**: a fact about repo A learned while in repo B was written to B. Deriver schema gains an optional `project` field; **`resolve_subject_slug`** matches it against known slugs (exact → unique suffix → unique substring) and never guesses between candidates. No-subject behaviour byte-identical.
+- New **`lore memory move --scope project --match <substring> --to <slug|repo|path>`**: retroactive cleanup.
+- Fix **`is_worker_transcript`**: read only the first 64KB, so a large preamble could misclassify LORE's own deriver output as a real session. Now reads the first 50 JSONL records structurally.
 - Tests: `tests/test_issue40_project_subject.py` (31), `tests/test_worker_transcript_window.py` (8).
 
 ## 0.34.1 — 2026-08-24
-- Fix: the dreamer held the WAL writer lock across its model call. `dormant_sweep` opens a write transaction on any DML, including a zero-row `UPDATE`, but `dream_run` only committed when the sweep moved something — so the common zero-sweep case held the lock for the length of a sonnet call, and every other writer on `state.db` (a backfill worker, a session hook, the DOXA daemon) failed with `database is locked` instead of waiting. Found when a 72-session backfill died mid-run. `dream_run` now commits after the sweep regardless of rowcount.
-- `busy_timeout` 5s → 30s. Writers here are whole agent runs sharing one store; five seconds sat inside the normal gap between a writer's statements.
+- Fix **`dream_run`** (`lore_core/dreamer.py`): held the WAL writer lock across its model call. `dormant_sweep` opens a write transaction on any DML including a zero-row `UPDATE`, and the commit was conditional on rowcount — so every other writer on `state.db` failed with `database is locked` for the length of a sonnet call. Found when a 72-session backfill died mid-run. Now commits regardless.
+- `busy_timeout` 5s → 30s.
 - Tests: `tests/test_write_lock.py`.
 
 ## 0.34.0 — 2026-08-23
-- **Project file map** (`lore filemap show|add|replace|remove`, `/lore:filemap`) — a per-project `path — purpose` map at `LORE_ROOT/filemap/<slug>.md`. Own hard cap (`LORE_FILEMAP_CAP`, 4400), scrubbed on every write, atomic writes. Paths repo-relative inside the project, absolute outside it, `host:` prefixed for cross-host artifacts.
-- The snapshot carries only a one-line pointer to the map, never the map body; the retrieval ladder gains the file map as step 2 (snapshot → file map → belief store → session index → re-derive).
-- Deriver gains a `filemap` proposal kind: paths a session repeatedly had to rediscover, with an inferred purpose, staged and deduped the same way memory proposals are.
+- New **project file map** (`lore filemap show|add|replace|remove`, `/lore:filemap`): a per-project `path — purpose` map at `LORE_ROOT/filemap/<slug>.md`. Own cap (`LORE_FILEMAP_CAP`, 4400), scrubbed on write, atomic. Paths repo-relative inside the project, absolute outside, `host:`-prefixed across hosts.
+- The snapshot carries a one-line pointer, never the map body. Retrieval ladder becomes snapshot → file map → belief store → session index → re-derive.
+- Deriver gains a `filemap` proposal kind: paths a session repeatedly rediscovered, staged and deduped like memory proposals.
 - Tests: `tests/test_filemap.py`.
 
 ## 0.33.2 — 2026-08-23
