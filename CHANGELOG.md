@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.47.1 — 2026-08-28
+
+- Fix **`lore graph html` showed raw mermaid source instead of a diagram**. `initialize({startOnLoad: true})` hooks `DOMContentLoaded`, which a dynamic `import()` always resolves after, so mermaid loaded cleanly, logged nothing, and never touched the `<pre>`. The page now calls `run({querySelector: "pre.mermaid"})` explicitly and then checks for an SVG, since a silent no-op is this surface's failure mode.
+- The stall message names the `file://` case: a local page is a null origin and a browser may refuse the module fetch, so serving the file over http is the fix rather than a missing network.
+- Verified in a real browser at 500 beliefs: 60 SVG nodes, real edge labels, no `flowchart LR` text left in the body.
+- Tests: `tests/test_graph.py` (74; 3 new). Suite 375.
+
 ## 0.47.0 — 2026-08-28
 
 - `lore doctor` reports the **belief graph**: stored edges, how many are asserted, superseded beliefs still missing a `supersedes` edge, and the exact command for each gap. A fresh install has an empty graph and nothing else said so — neither the free structural pass nor the cheap asserted one runs on its own, so a store could sit for weeks with a graph nobody knew was empty.
