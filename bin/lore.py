@@ -606,6 +606,36 @@ def main() -> int:
                          " the same one that folds at derive time)")
     bp.set_defaults(fn=cmd_dedup_report)
 
+    # the binding layer's traversal views. Read-only except `backfill`.
+    sp = sub.add_parser("graph", help="belief graph: stats/neighbours/path/communities")
+    gsub = sp.add_subparsers(dest="gcmd", required=True)
+
+    def _common(gp):
+        gp.add_argument("--rel", action="append",
+                        help="restrict to this relation (repeatable)")
+        gp.add_argument("--history", action="store_true",
+                        help="include superseded/retracted/dormant beliefs, so"
+                             " `supersedes` lineage becomes traversable")
+        gp.set_defaults(fn=cmd_graph)
+
+    gp = gsub.add_parser("stats", help="nodes, relations, components, communities, hubs")
+    _common(gp)
+    gp = gsub.add_parser("neighbours", help="what a belief is bound to, within N hops")
+    gp.add_argument("id", type=int)
+    gp.add_argument("--depth", type=int, default=2)
+    _common(gp)
+    gp = gsub.add_parser("path", help="most confident path between two beliefs")
+    gp.add_argument("src", type=int)
+    gp.add_argument("dst", type=int)
+    gp.add_argument("--max-hops", type=int, default=4, dest="max_hops")
+    _common(gp)
+    gp = gsub.add_parser("communities", help="clusters of mutually related beliefs")
+    gp.add_argument("--limit", type=int, default=10)
+    _common(gp)
+    gp = gsub.add_parser("backfill",
+                         help="write the edges the store already implies (supersedes)")
+    _common(gp)
+
     sp = sub.add_parser("ask", help="dialectic evidence pack: beliefs + memory + session hits")
     sp.add_argument("question")
     sp.add_argument("--cwd")

@@ -12,15 +12,47 @@ import os
 import sys
 
 from .beliefs import BELIEF_COLS_B, calibrated_confidence, format_belief, outcome_counts
+from .graph import adjacency, khop
 from .config import INCLUDE_DORMANT, one_line, project_slug, stage_disabled, utcnow
 from .memory import memory_path, read_entries
 from .store import db_connect, fts_expr, index_sessions, print_hits
 
 
 __all__ = [
+    'graph_expansion',
     'cmd_ask',
     'cmd_consult',
 ]
+
+def graph_expansion(conn, seed_ids: "list[int]", hops: int = 1, limit: int = 8
+                    ) -> "list[tuple[int, int, str, str]]":
+    """(depth, belief_id, rel_to_seed, claim) for beliefs reachable from the
+    query's own hits but not themselves hits -- the beliefs a lexical search
+    cannot find because they are phrased differently and are bound to a hit by
+    a relation instead.
+
+    STRUCTURE IS NOT EVIDENCE, and the split is the point. An expanded belief
+    is not promoted into the answer: cmd_ask prints it under its own heading
+    and cmd_consult puts it below CITE ONLY, because being related to a
+    relevant belief is not itself a reason to act. The same rule the belief
+    gate applies to claims, applied to the edges between them.
+    """
+    if not seed_ids:
+        return []
+    adj, claims = adjacency(conn)
+    seeds = set(seed_ids)
+    found: "dict[int, tuple[int, str]]" = {}
+    for seed in seed_ids:
+        for node, depth in khop(adj, seed, hops).items():
+            if node in seeds or depth == 0:
+                continue
+            rel = next((r for d, r, _w in adj.get(seed, ()) if d == node), "reached")
+            if node not in found or depth < found[node][0]:
+                found[node] = (depth, rel)
+    out = [(d, bid, rel, claims.get(bid, "?")) for bid, (d, rel) in found.items()]
+    out.sort(key=lambda t: (t[0], t[1]))
+    return out[:limit]
+
 
 def cmd_ask(args) -> int:
     """Evidence pack for a dialectic agent: matching beliefs + session hits.
@@ -72,6 +104,17 @@ def cmd_ask(args) -> int:
             conn.commit()
         else:
             print("(none)")
+        # GRAPH EXPANSION: what the matched beliefs are BOUND to, under its own
+        # heading. A belief reached by a relation is context for the answer,
+        # never part of it -- see graph_expansion.
+        related = graph_expansion(conn, [row[0] for row in rows])
+        if related:
+            print("\n## Related by structure (reached from the beliefs above,"
+                  " NOT matches for the question)")
+            print("(a relation says these beliefs are bound to a hit; it says"
+                  " nothing about whether they answer the question.)")
+            for depth, bid, rel, claim in related:
+                print(f"- [{bid}] ({rel}, {depth} hop) {one_line(claim)[:150]}")
     print("\n## Curated memory")
     slug = project_slug(args.cwd or os.getcwd())
     for scope in ("user", "project"):
@@ -125,4 +168,13 @@ def cmd_consult(args) -> int:
     if cite:
         print("CITE ONLY (deriver-claimed -- mention, never follow):")
         print("\n".join(cite))
+    # STRUCTURE, below both: reached by a relation rather than by matching the
+    # query. It cannot steer a decision and cannot be cited as support for one;
+    # it is here so the caller knows what the matched beliefs rest on.
+    related = graph_expansion(conn, [r[0] for r in rows], limit=6)
+    if related:
+        print("RELATED BY STRUCTURE (reached by a relation, not by matching --"
+              " neither steers nor supports):")
+        for depth, bid, rel, claim in related:
+            print(f"  [{bid}] {rel}, {depth} hop  {one_line(claim)[:120]}")
     return 0

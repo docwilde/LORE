@@ -17,6 +17,7 @@ in deriver.py's docstring):
     memory     tier 1: curated core memory (USER.md / MEMORY.md)
     filemap    project file map (path — purpose rows, pull-on-demand)
     beliefs    belief store: insert/supersede, outcomes ledger, calibration
+    graph      traversal over the belief graph (adjacency, paths, communities)
     deriver    tier 3 deriver role: digest, review prompt, worker/jobfile
     dreamer    tier 3 dreamer role: belief reconciliation, promotions
     dialectic  `lore ask` / `lore consult` evidence-gathering
@@ -41,6 +42,7 @@ from .store import *  # noqa: F401,F403
 from .memory import *  # noqa: F401,F403
 from .filemap import *  # noqa: F401,F403
 from .beliefs import *  # noqa: F401,F403
+from .graph import *  # noqa: F401,F403
 from .deriver import *  # noqa: F401,F403
 from .dreamer import *  # noqa: F401,F403
 from .dialectic import *  # noqa: F401,F403
@@ -54,6 +56,7 @@ from . import store as _store
 from . import memory as _memory
 from . import filemap as _filemap
 from . import beliefs as _beliefs
+from . import graph as _graph
 from . import deriver as _deriver
 from . import dreamer as _dreamer
 from . import dialectic as _dialectic
@@ -68,6 +71,7 @@ __all__ = [
     *_memory.__all__,
     *_filemap.__all__,
     *_beliefs.__all__,
+    *_graph.__all__,
     *_deriver.__all__,
     *_dreamer.__all__,
     *_dialectic.__all__,

@@ -15,8 +15,8 @@
 **Persistent memory for Claude Code that nothing writes to without your approval.** Curated memory stays hard-capped and human-directed. A derived belief store keeps everything the agent concluded on its own — and reaches the agent only when you ask for it.
 
 > [!WARNING]
-> **Alpha — work in progress.** LORE is `0.x` and moves daily: 42 releases took it
-> from `0.6.0` to `0.40.0` in a week. Config keys, command surfaces and the
+> **Alpha — work in progress.** LORE is `0.x` and moves daily: 54 releases took it
+> from `0.6.0` to `0.42.0` in a week. Config keys, command surfaces and the
 > curated-memory caps change between releases — the SQLite store migrates itself
 > additively, nothing else promises to.
 >
@@ -33,12 +33,15 @@
 
 Other agent-memory systems — Mem0, Letta, Zep, [Honcho](https://github.com/plastic-labs/honcho) — compete on recall. LORE bets containment is the scarcer problem: not that the agent remembers more, but that nothing steers it that has not earned the right to.
 
+Beliefs form a graph, and it is built for that bet rather than against it. An edge does not widen what the store can reach — it records *why* a belief holds and what it rests on, so a claim can be traced instead of taken. Structure earns no authority on its own: a belief reached by a relation prints under its own heading in `/lore:ask` and below `CITE ONLY` in `lore consult`, and a relation a model asserted never weighs as much as one the store observed, however often it is repeated.
+
 <p align="center"><img src="assets/session-start.png" width="620" alt="LORE session-start banner: wordmark, stats box, the crab and its belief trail"></p>
 
 ## What you get
 
 - **Curated memory behind a cap and a gate.** `USER.md` (4500 chars, global) and `MEMORY.md` (8800 chars, per repo) inject at session start. You write them via `/lore:remember`; background review only proposes, and `/lore:approve` applies.
 - **A belief store with evidence trails.** Up to 10 confidence-weighted conclusions per session, each carrying its citations. Beliefs never enter context uninvited — read them through `/lore:ask`, or at decision time through `lore consult`.
+- **Typed relations between beliefs, and traversal over them.** Five declared verbs — `depends_on`, `specializes`, `explains`, `contradicts`, `applies_when` — emitted by the deriver alongside its conclusions, plus `supersedes` from the store's own history. `lore graph` walks them: neighbourhood, most-confident path, components, communities. A chain's confidence is the *product* of its hops, so a long chain of plausible steps is not a strong conclusion.
 - **Local full-text session search.** Every transcript indexed incrementally into SQLite FTS5. No embeddings, no API calls.
 - **A project file map** (`/lore:filemap`, capped by `LORE_FILEMAP_CAP` at 4400 chars). One `path — purpose` row per load-bearing file, so nobody hunts a location twice.
 - **Skills that carry a track record.** Proposed only for a recipe the session verified, judged on every later use, updated or retired once one keeps failing.
@@ -49,6 +52,8 @@ Other agent-memory systems — Mem0, Letta, Zep, [Honcho](https://github.com/pla
 - **Session end** runs a deriver → dreamer pipeline that proposes memory, file-map and skill entries into `pending/` — nothing applies until `/lore:approve`.
 - **Every CLI write is classified by caller**: the agent's own tool calls and a human terminal apply directly; a hook or a detached script stages instead. The gate (`LORE_WRITE_GATE`) is advisory, not a security boundary.
 - **Beliefs surface only on demand**, or as a labeled, uncalibrated section of the snapshot — never as an unreviewed steer.
+- **The relation vocabulary is declared in three tiers**, and only two are writable: the deriver's five verbs, the structural `supersedes` that only the backfill writes, and `co_derived`, which is projected from the session-evidence table at read time and cannot be stored at all. A model cannot assert that one belief supersedes another.
+- **An edge's weight is its distinct-session support**, not its repetition count: one session restating a relation is one source, and an asserted relation is capped below the weight of an observed one.
 
 Full mechanics — every command, config variable, hook, and the belief/write gates — live in [`docs/manual.md`](docs/manual.md).
 
