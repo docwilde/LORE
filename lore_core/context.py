@@ -17,8 +17,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .beliefs import interaction_model_lines
+from .beliefs import belief_subject, interaction_model_lines
 from .config import (
+    GRAPH_CONTEXT,
     MEMORY_CAP,
     ROOT,
     USER_CAP,
@@ -31,6 +32,7 @@ from .config import (
 from .deriver import learned_skills, load_skill_usage
 from .filemap import filemap_entries
 from .gate import provenance_tag
+from .graph import context_candidates, render_context_block
 from .memory import memory_bucket, memory_path, read_entries, render_entries, usage_line
 from .pending import load_pending
 from .store import db_connect
@@ -491,12 +493,21 @@ def cmd_refresh(args) -> int:
     on_change = refresh_on_change()
     hook = read_hook_input()
     cwd = args.cwd or hook.get("cwd") or os.getcwd()
+    # GRAPH CONTEXT (experimental, off by default) is computed here and NOT
+    # folded into the snapshot: the snapshot is re-injected only when its bytes
+    # change, and a prompt-relative block changes on every prompt -- hashing it
+    # in would re-send the whole snapshot each turn, which is the opposite of
+    # what a context budget wants. It rides its own key and its own gate.
+    graph_block = _graph_context_block(hook, cwd)
     session = re.sub(r"[^A-Za-z0-9_.-]", "_", str(hook.get("session_id") or "nosession"))
     now = datetime.now(timezone.utc).timestamp()
     # Mid-session deriver (0.33.0): independent of the snapshot decision below
     # -- a review spawn changes memory/beliefs, the snapshot only reports them.
     _maybe_spawn_midsession_review(hook, cwd, session, now)
     if interval is None and not on_change:
+        # The snapshot side is off; the graph block still has its own switch.
+        if graph_block:
+            _emit_additional_context(graph_block, "lore graph context")
         return 0
     try:
         REFRESH_DIR.mkdir(parents=True, exist_ok=True)
@@ -514,6 +525,8 @@ def cmd_refresh(args) -> int:
     changed = on_change and snap_hash != last_hash
     periodic = interval is not None and (now - last) >= interval
     if not changed and not periodic:
+        if graph_block:
+            _emit_additional_context(graph_block, "lore graph context")
         return 0
     if not changed and periodic and snap_hash == last_hash:
         # Periodic floor met but content identical -- re-sending the same
@@ -533,11 +546,48 @@ def cmd_refresh(args) -> int:
                 # no --scope flag here, but LORE_SCOPE still applies: a refresh
                 # must not widen what inject narrowed.
                 + build_context(cwd, effective_scope(None))
+                + (("\n\n" + graph_block) if graph_block else "")
             ),
         },
     }))
     return 0
 
+
+def _emit_additional_context(text: str, message: str) -> None:
+    """One UserPromptSubmit additionalContext frame. Factored out because the
+    graph block has three exits: alone when the snapshot side is off, alone
+    when the snapshot has not changed, and appended when it has."""
+    print(json.dumps({
+        "suppressOutput": True,
+        "systemMessage": message,
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": text,
+        },
+    }))
+
+
+def _graph_context_block(hook: dict, cwd: str) -> str:
+    """The experimental graph-context block, or "" when the stage is off or
+    nothing qualifies. Every failure is swallowed: this rides the prompt loop,
+    where a stale or absent block costs less than a broken hook.
+
+    `prompt` comes from the hook payload. A payload that does not carry one is
+    not a failure -- context_candidates falls back to the best-supported
+    beliefs in scope and the block's own header says it is not prompt-scoped.
+    """
+    if not GRAPH_CONTEXT or stage_disabled("beliefs"):
+        return ""
+    try:
+        conn = db_connect()
+        slug = project_slug(cwd)
+        subjects = [belief_subject("user", slug), "user-model",
+                    belief_subject("project", slug)]
+        rows = context_candidates(conn, str(hook.get("prompt") or ""), subjects)
+        block, _chosen = render_context_block(rows)
+        return block
+    except Exception:                                       # noqa: BLE001
+        return ""
 
 def cmd_motd(args) -> int:
     """One-screen greeting: the DELTA view. `status` answers "what is the

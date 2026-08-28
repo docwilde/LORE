@@ -23,6 +23,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -337,6 +338,112 @@ class StructureIsNotEvidence(unittest.TestCase):
         self.assertIn("neither steers nor supports", text)
         if "CITE ONLY" in text:
             self.assertLess(text.index("CITE ONLY"), text.index("RELATED BY STRUCTURE"))
+
+
+class GraphContext(unittest.TestCase):
+    """The experimental block that puts beliefs into context without being
+    asked. Off by default; every guarantee here is what makes it defensible
+    when it is on."""
+
+    def setUp(self):
+        _reset()
+        self.subj = SUBJ
+        # a claimed-perfect belief with no outcomes, and a modest one with three
+        self.hi = _seed(0)
+        self.cal = _seed(1)
+        conn = _conn()
+        conn.execute("UPDATE beliefs SET confidence = 1.0 WHERE id = ?", (self.hi,))
+        conn.execute("UPDATE beliefs SET confidence = 0.6 WHERE id = ?", (self.cal,))
+        for _ in range(3):
+            lore.record_outcome(conn, self.cal, "confirmed", "audit")
+        conn.commit()
+
+    def _rows(self, prompt=""):
+        return GRAPH.context_candidates(_conn(), prompt, [self.subj])
+
+    def test_it_is_off_by_default(self):
+        self.assertFalse(lore.GRAPH_CONTEXT)
+
+    def test_a_calibrated_belief_outranks_a_claimed_certainty(self):
+        """The admission rule cmd_consult applies to claims, applied to
+        ranking: a deriver-claimed 1.00 has been checked against nothing."""
+        rows = self._rows()
+        self.assertEqual(rows[0]["id"], self.cal)
+        self.assertTrue(rows[0]["calibrated"])
+        self.assertEqual(rows[1]["id"], self.hi)
+
+    def _seed_word(self, bid: int) -> str:
+        """A token unique to one belief's claim, so a prompt can seed exactly
+        it and everything else has to arrive by relation."""
+        return _conn().execute(
+            "SELECT claim FROM beliefs WHERE id = ?", (bid,)).fetchone()[0].split()[0]
+
+    def test_a_belief_reachable_only_by_relation_is_pulled_in(self):
+        """The whole point: a belief phrased nothing like the prompt, bound to
+        one that matches, is what a lexical index cannot reach."""
+        far = _seed(9)
+        _edge(self.hi, far, "depends_on", ["s1"])
+        rows = self._rows(self._seed_word(self.hi))
+        rec = next((r for r in rows if r["id"] == far), None)
+        self.assertIsNotNone(rec, "the bound belief was never reached")
+        self.assertEqual(rec["hops"], 1)
+        self.assertLess(rec["score"], rec["conf"], "a hop must discount the score")
+
+    def test_expansion_never_follows_co_derivation(self):
+        """A co-derived cluster is one session's beliefs joined pairwise, so a
+        single hop along it would pull in everything concluded that sitting --
+        relatedness by coincidence, filling the budget with the least
+        informative edges the store holds."""
+        self.assertNotIn("co_derived", GRAPH.ASSERTED_RELS)
+        siblings = [_seed(i, session="s-together") for i in range(20, 24)]
+        anchor = _seed(24, session="s-together")
+        rows = self._rows(self._seed_word(anchor))
+        reached = {r["id"] for r in rows if r["hops"]}
+        self.assertFalse(reached & set(siblings),
+                         "a co-derived sibling was followed as a relation")
+
+    def test_the_block_never_exceeds_its_cap(self):
+        for cap in (120, 200, 400, 900, 2000):
+            block, _c = GRAPH.render_context_block(self._rows(), cap=cap)
+            self.assertLessEqual(len(block), cap, f"cap {cap} overflowed")
+
+    def test_a_cap_too_small_for_one_belief_injects_nothing(self):
+        block, chosen = GRAPH.render_context_block(self._rows(), cap=60)
+        self.assertEqual((block, chosen), ("", []))
+
+    def test_every_line_states_its_own_char_cost(self):
+        block, chosen = GRAPH.render_context_block(self._rows(), cap=1200)
+        for line in block.splitlines():
+            if line.startswith("- "):
+                self.assertRegex(line, r"\d+ch ")
+        self.assertIn("each line shows its own char cost", block)
+
+    def test_the_header_reports_the_whole_block_not_just_the_lines(self):
+        block, _c = GRAPH.render_context_block(self._rows(), cap=900)
+        m = re.search(r"(\d+) used", block)
+        self.assertIsNotNone(m)
+        self.assertAlmostEqual(int(m.group(1)), len(block), delta=3)
+
+    def test_it_never_claims_a_match_it_did_not_make(self):
+        """A prompt can be supplied and match nothing; the fallback ranks by
+        support alone and the header has to say so."""
+        block, _c = GRAPH.render_context_block(
+            self._rows("zzzz nonexistent vocabulary qqqq"), cap=900)
+        self.assertIn("NOT prompt-scoped", block)
+        self.assertNotIn("matched, ", block)
+
+    def test_it_says_so_when_it_did_match(self):
+        claim = _conn().execute("SELECT claim FROM beliefs WHERE id = ?",
+                                (self.cal,)).fetchone()[0]
+        block, _c = GRAPH.render_context_block(self._rows(claim.split()[0]), cap=900)
+        self.assertIn("matched", block)
+        self.assertNotIn("NOT prompt-scoped", block)
+
+    def test_the_block_disclaims_authority(self):
+        block, _c = GRAPH.render_context_block(self._rows(), cap=900)
+        self.assertIn("cite, never follow", block)
+        self.assertIn("authorizes nothing", block)
+        self.assertIn("EXPERIMENTAL", block)
 
 
 class MermaidExport(unittest.TestCase):
