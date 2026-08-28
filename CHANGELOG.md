@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.43.0 — 2026-08-28
+
+- New **`lore graph html`**: renders the graph as mermaid and opens it in a browser. Writes `LORE_ROOT/graph.html` (`--out` to move it) and prints the path, so a headless session still gets the file. `--belief <id> --depth N` centres on one belief, `--max-nodes` raises the 60-node ceiling, `--mermaid` prints the source, `--no-open` skips the browser.
+- Singleton beliefs are excluded from the whole-graph view and counted in the note: 346 of a live store's 498 active beliefs carry no relation, and a node with no edge says nothing a list would not. Selection is largest-component-first, so a capped view keeps whole clusters.
+- New **`mermaid_source`**: a symmetric relation draws undirected (`---`), a directional one draws an arrow, and each edge is emitted once. Nodes group by connected component and are filled by subject.
+- New **`mermaid_label`**: `#` and `&` are escaped before the entity codes that contain them, or `"` → `#quot;` becomes `#35;quot;`. `[`, `]`, `{`, `}` and `|` are entity-coded too — a live store carries claims with all of them.
+- The viewer states why when the diagram does not appear, on an 8s timer rather than a `try`/`catch` alone: a hanging CDN fetch throws nothing and would leave raw mermaid source on screen. Mermaid loads from `cdn.jsdelivr.net`, so the page needs network the first time it is opened.
+- `lore graph html` reports when co-derivation is over 80% of the drawn relations, with the flags to exclude it — a co-derived cluster is one session's beliefs joined pairwise, which draws as a hairball.
+- New `/lore:graph` command: the backfill flow, then the viewer. It states that the five asserted verbs cannot be backfilled without re-deriving, and never launches `lore backfill` without agreement on the spend.
+- Tests: `tests/test_graph.py` (34; 8 new). Suite 334.
+
 ## 0.42.1 — 2026-08-28
 
 - Fix **`format_edges`** (`lore_core/beliefs.py`): a structural edge rendered `n=0`, reading as uncorroborated. Now `observed`.

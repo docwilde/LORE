@@ -339,5 +339,64 @@ class StructureIsNotEvidence(unittest.TestCase):
             self.assertLess(text.index("CITE ONLY"), text.index("RELATED BY STRUCTURE"))
 
 
+class MermaidExport(unittest.TestCase):
+    def setUp(self):
+        _reset()
+
+    def test_the_escape_order_cannot_mangle_an_entity_it_just_wrote(self):
+        """`"` becomes `#quot;`, so `#` has to be escaped BEFORE it, or the
+        result is `#35;quot;`."""
+        got = GRAPH.mermaid_label(1, 'issue #43 says "no"')
+        self.assertIn("#35;43", got)
+        self.assertIn("#quot;no#quot;", got)
+        self.assertNotIn("#35;quot;", got)
+
+    def test_a_label_never_carries_a_character_that_closes_it(self):
+        got = GRAPH.mermaid_label(1, 'a [b] {c} d | e "f" & g')
+        for ch in '[]{}|"':
+            self.assertNotIn(ch, got, f"{ch!r} survived into the label")
+
+    def test_a_long_claim_is_truncated_on_a_word_boundary(self):
+        got = GRAPH.mermaid_label(1, "alpha " * 60)
+        self.assertTrue(got.endswith("…"))
+        self.assertLess(len(got), 200)
+
+    def test_a_symmetric_relation_draws_undirected_and_once(self):
+        a, b = _seed(0), _seed(1)
+        _edge(a, b, "contradicts", ["s1"])
+        adj, claims = GRAPH.adjacency(_conn(), include_co_derived=False)
+        src = GRAPH.mermaid_source(adj, claims, [a, b], group=False)
+        self.assertIn(f"b{a} ---|contradicts| b{b}", src)
+        self.assertEqual(src.count("contradicts|"), 1, "drawn from both ends")
+
+    def test_a_directional_relation_draws_an_arrow(self):
+        a, b = _seed(0), _seed(1)
+        _edge(a, b, "depends_on", ["s1"])
+        adj, claims = GRAPH.adjacency(_conn(), include_co_derived=False)
+        src = GRAPH.mermaid_source(adj, claims, [a, b], group=False)
+        self.assertIn(f"b{a} -->|depends_on| b{b}", src)
+
+    def test_an_edge_to_a_node_outside_the_view_is_not_drawn(self):
+        a, b, c = _seed(0), _seed(1), _seed(2)
+        _edge(a, b, "depends_on", ["s1"])
+        _edge(a, c, "depends_on", ["s1"])
+        adj, claims = GRAPH.adjacency(_conn(), include_co_derived=False)
+        src = GRAPH.mermaid_source(adj, claims, [a, b], group=False)
+        self.assertNotIn(f"b{c}", src)
+
+    def test_the_page_states_why_when_the_diagram_cannot_load(self):
+        """A hanging CDN fetch throws nothing, so a try/catch alone leaves raw
+        mermaid source on screen reading as a broken export."""
+        html = GRAPH.render_html("flowchart LR\n  a --> b", "T", "N")
+        self.assertIn("setTimeout", html)
+        self.assertIn("needs network", html)
+        self.assertIn("cdn.jsdelivr.net", html)
+
+    def test_the_page_carries_the_title_and_the_note(self):
+        html = GRAPH.render_html("flowchart LR", "My graph", "9 of 10 beliefs")
+        self.assertIn("<title>My graph</title>", html)
+        self.assertIn("9 of 10 beliefs", html)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
