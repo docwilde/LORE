@@ -467,17 +467,24 @@ _HTML = """<!doctype html>
    if (!d || d.querySelector("svg")) return;
    d.outerHTML = '<div class="err">The diagram did not render.\\n\\n' + why
      + '\\n\\nMermaid loads from cdn.jsdelivr.net, so this page needs network the'
-     + ' first time it is opened. The mermaid source is below — paste it into'
-     + ' any mermaid renderer.\\n\\n' + d.textContent + '</div>';
+     + ' first time it is opened. If the URL bar shows file://, a browser may also'
+     + ' refuse the module fetch from a null origin — serve the file over http'
+     + ' instead. The mermaid source is below; it is valid input for any mermaid'
+     + ' renderer.\\n\\n' + d.textContent + '</div>';
  }
  setTimeout(function () { stalled("Timed out after 8s waiting for mermaid."); }, 8000);
 </script>
 <script type="module">
  try {
    const m = await import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs");
-   m.default.initialize({ startOnLoad: true, securityLevel: "strict",
+   // startOnLoad is a NO-OP here and was the bug: it hooks DOMContentLoaded,
+   // which a dynamic import always resolves after, so mermaid loaded cleanly,
+   // logged nothing, and left the raw source on screen. run() renders now.
+   m.default.initialize({ startOnLoad: false, securityLevel: "strict",
      theme: window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default",
      flowchart: { useMaxWidth: false, htmlLabels: true } });
+   await m.default.run({ querySelector: "pre.mermaid" });
+   if (!document.querySelector("#d svg")) stalled("mermaid ran but produced no SVG.");
  } catch (e) {
    stalled(String(e));
  }

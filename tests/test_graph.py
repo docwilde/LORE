@@ -738,6 +738,28 @@ class MermaidExport(unittest.TestCase):
         src = GRAPH.mermaid_source(adj, claims, [a, b], group=False)
         self.assertNotIn(f"b{c}", src)
 
+    def test_the_page_renders_explicitly_and_never_relies_on_startonload(self):
+        """THE BUG THIS FILE EXISTS TO PIN. `startOnLoad` hooks
+        DOMContentLoaded, which a dynamic import always resolves after -- so
+        mermaid loaded cleanly, logged nothing, and left the raw source on
+        screen. Verified fixed in a real browser: 60 SVG nodes, no raw
+        `flowchart LR` left in the body."""
+        html = GRAPH.render_html("flowchart LR\n  a --> b", "T", "N")
+        self.assertIn("startOnLoad: false", html)
+        self.assertIn("run({ querySelector:", html)
+        self.assertNotIn("startOnLoad: true", html)
+
+    def test_it_checks_for_an_svg_after_running(self):
+        """A silent no-op is the failure mode here, so the page verifies its
+        own output rather than assuming run() drew something."""
+        html = GRAPH.render_html("flowchart LR", "T", "N")
+        self.assertIn('querySelector("#d svg")', html)
+
+    def test_the_fallback_names_the_file_protocol_case(self):
+        html = GRAPH.render_html("flowchart LR", "T", "N")
+        self.assertIn("file://", html)
+        self.assertIn("null origin", html)
+
     def test_the_page_states_why_when_the_diagram_cannot_load(self):
         """A hanging CDN fetch throws nothing, so a try/catch alone leaves raw
         mermaid source on screen reading as a broken export."""
