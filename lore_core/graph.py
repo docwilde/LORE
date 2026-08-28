@@ -445,17 +445,20 @@ _HTML = """<!doctype html>
  .note { opacity:.72; font-size:12px; }
  button { font:inherit; padding:2px 9px; border:1px solid #8886;
           border-radius:6px; background:transparent; color:inherit; cursor:pointer; }
- #wrap { overflow:auto; height:calc(100vh - 46px); }
- #d { transform-origin:0 0; padding:14px; }
+ #wrap { overflow:hidden; height:calc(100vh - 46px); cursor:grab;
+         touch-action:none; user-select:none; }
+ #wrap.drag { cursor:grabbing; }
+ #d { transform-origin:0 0; padding:14px; will-change:transform; }
  .err { padding:14px; white-space:pre-wrap; font-family:ui-monospace,monospace; }
 </style>
 <header>
   <h1>@TITLE@</h1>
   <span class="note">@NOTE@</span>
   <span style="flex:1"></span>
+  <span class="note">drag to pan · wheel to zoom · double-click to fit</span>
   <button onclick="z(1.25)">+</button>
   <button onclick="z(0.8)">−</button>
-  <button onclick="s=1,ap()">reset</button>
+  <button onclick="fit()">fit</button>
 </header>
 <div id="wrap"><pre id="d" class="mermaid">@GRAPH@</pre></div>
 <script>
@@ -485,14 +488,84 @@ _HTML = """<!doctype html>
      flowchart: { useMaxWidth: false, htmlLabels: true } });
    await m.default.run({ querySelector: "pre.mermaid" });
    if (!document.querySelector("#d svg")) stalled("mermaid ran but produced no SVG.");
+   else if (typeof fit === "function") fit();
  } catch (e) {
    stalled(String(e));
  }
 </script>
 <script>
- let s = 1;
- function ap() { document.getElementById("d").style.transform = "scale(" + s + ")"; }
- function z(f) { s = Math.min(4, Math.max(0.2, s * f)); ap(); }
+ // Pan and zoom by hand rather than by scrollbars: a 3657x5661 diagram in a
+ // 1000px pane is unreadable through an overflow:auto box, and the whole point
+ // of the view is moving around one.
+ let s = 1, tx = 0, ty = 0;
+ const D = () => document.getElementById("d");
+ const W = () => document.getElementById("wrap");
+ function ap() {
+   const d = D();
+   if (d) d.style.transform = "translate(" + tx + "px," + ty + "px) scale(" + s + ")";
+ }
+ function clamp(v) { return Math.min(8, Math.max(0.02, v)); }
+ function z(f, mx, my) {
+   // Zoom about a point: keep whatever is under it fixed, so the wheel
+   // magnifies what the cursor is on instead of the top-left corner.
+   const w = W();
+   if (mx === undefined) { const r = w.getBoundingClientRect(); mx = r.width / 2; my = r.height / 2; }
+   const ns = clamp(s * f);
+   tx = mx - (mx - tx) * (ns / s);
+   ty = my - (my - ty) * (ns / s);
+   s = ns;
+   ap();
+ }
+ function fit() {
+   const w = W(), svg = document.querySelector("#d svg");
+   if (!w || !svg) { s = 1; tx = 0; ty = 0; ap(); return; }
+   const b = svg.getBoundingClientRect(), r = w.getBoundingClientRect();
+   // measure at scale 1, then centre
+   const nat_w = b.width / s, nat_h = b.height / s;
+   s = clamp(Math.min(r.width / (nat_w + 28), r.height / (nat_h + 28)));
+   tx = (r.width - nat_w * s) / 2;
+   ty = (r.height - nat_h * s) / 2;
+   ap();
+ }
+ window.addEventListener("DOMContentLoaded", function () {
+   const w = W();
+   w.addEventListener("wheel", function (e) {
+     e.preventDefault();
+     const r = w.getBoundingClientRect();
+     // exp() so each notch is a constant ratio, and deltaMode 1 (line) reports
+     // a much smaller number per notch than deltaMode 0 (pixel)
+     const step = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+     z(Math.exp(-step * 0.0018), e.clientX - r.left, e.clientY - r.top);
+   }, { passive: false });
+   let last = null;
+   w.addEventListener("pointerdown", function (e) {
+     if (e.button !== 0) return;
+     last = [e.clientX, e.clientY];
+     w.classList.add("drag");
+     w.setPointerCapture(e.pointerId);
+   });
+   w.addEventListener("pointermove", function (e) {
+     if (!last) return;
+     tx += e.clientX - last[0];
+     ty += e.clientY - last[1];
+     last = [e.clientX, e.clientY];
+     ap();
+   });
+   function end(e) {
+     last = null;
+     w.classList.remove("drag");
+     if (e && e.pointerId !== undefined && w.hasPointerCapture(e.pointerId))
+       w.releasePointerCapture(e.pointerId);
+   }
+   w.addEventListener("pointerup", end);
+   w.addEventListener("pointercancel", end);
+   w.addEventListener("dblclick", fit);
+   window.addEventListener("keydown", function (e) {
+     if (e.key === "0" || e.key === "f") fit();
+     if (e.key === "+" || e.key === "=") z(1.25);
+     if (e.key === "-") z(0.8);
+   });
+ });
 </script>
 """
 

@@ -768,6 +768,38 @@ class MermaidExport(unittest.TestCase):
         self.assertIn("needs network", html)
         self.assertIn("cdn.jsdelivr.net", html)
 
+    def test_the_viewer_pans_and_zooms_by_mouse(self):
+        """Verified live: drag moved translate by exactly the pointer delta,
+        wheel zoomed 0.118 -> 0.203 keeping the graph point under the cursor
+        fixed, and the page auto-fitted a 3657x5661 diagram on load."""
+        html = GRAPH.render_html("flowchart LR\n  a --> b", "T", "N")
+        for hook in ("pointerdown", "pointermove", "pointerup", "wheel", "dblclick"):
+            self.assertIn(hook, html, f"{hook} is not wired")
+        self.assertIn("setPointerCapture", html)
+        self.assertIn("touch-action:none", html)
+        self.assertIn("overflow:hidden", html)
+
+    def test_zoom_is_anchored_on_the_cursor_not_the_corner(self):
+        """tx = mx - (mx - tx) * (ns / s) is what keeps the point under the
+        pointer fixed; scaling about the origin instead makes a wheel unusable
+        on a large diagram."""
+        html = GRAPH.render_html("flowchart LR", "T", "N")
+        self.assertIn("tx = mx - (mx - tx) * (ns / s)", html)
+        self.assertIn("ty = my - (my - ty) * (ns / s)", html)
+
+    def test_a_line_mode_wheel_is_scaled_before_use(self):
+        """deltaMode 1 reports lines, not pixels, and is a much smaller number
+        per notch -- unscaled, a wheel barely moves the zoom."""
+        self.assertIn("deltaMode === 1", GRAPH.render_html("flowchart LR", "T", "N"))
+
+    def test_the_page_fits_the_diagram_once_it_exists(self):
+        html = GRAPH.render_html("flowchart LR", "T", "N")
+        self.assertIn("function fit()", html)
+        self.assertIn('typeof fit === "function"', html)
+
+    def test_the_controls_are_discoverable(self):
+        self.assertIn("drag to pan", GRAPH.render_html("flowchart LR", "T", "N"))
+
     def test_the_page_carries_the_title_and_the_note(self):
         html = GRAPH.render_html("flowchart LR", "My graph", "9 of 10 beliefs")
         self.assertIn("<title>My graph</title>", html)

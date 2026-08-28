@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.48.0 — 2026-08-28
+
+- The graph viewer **pans and zooms by mouse**: drag to pan, wheel to zoom, double-click or `f` to fit, `+`/`-` to step. The wrapper stopped being an `overflow:auto` box — a 3657x5661 diagram in a 1000px pane is not navigable by scrollbars, and moving around one is the whole point of the view.
+- Zoom is **anchored on the cursor** (`tx = mx - (mx - tx) * (ns / s)`), so the wheel magnifies what the pointer is over instead of the top-left corner. Verified live: the graph point under the cursor was identical before and after a zoom from 0.118 to 0.203.
+- A `deltaMode === 1` wheel (lines, not pixels) is scaled before use; unscaled, a notch barely moves the zoom.
+- The page **fits the diagram on load**, so the first paint shows the whole graph rather than its top-left corner.
+- Drag uses pointer capture, so a gesture that leaves the window still ends cleanly.
+- `/lore:graph` and the auto-triggered skill document the controls, the `view` argument and `--rel` for hiding the co-derived hairball.
+- Tests: `tests/test_graph.py` (79; 5 new). Suite 380.
+
 ## 0.47.1 — 2026-08-28
 
 - Fix **`lore graph html` showed raw mermaid source instead of a diagram**. `initialize({startOnLoad: true})` hooks `DOMContentLoaded`, which a dynamic `import()` always resolves after, so mermaid loaded cleanly, logged nothing, and never touched the `<pre>`. The page now calls `run({querySelector: "pre.mermaid"})` explicitly and then checks for an SVG, since a silent no-op is this surface's failure mode.
