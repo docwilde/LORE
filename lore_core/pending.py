@@ -29,6 +29,7 @@ __all__ = [
     'cmd_reject',
     'overlap_tokens',
     'token_jaccard',
+    'containment',
     'token_containment',
     'CLUSTER_JACCARD',
 ]
@@ -60,6 +61,22 @@ def token_jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / max(1, len(a | b))
 
 
+def containment(a: "set[str]", b: "set[str]") -> float:
+    """ASYMMETRIC over PRE-TOKENIZED sets: how much of `a` is already carried
+    by `b`, |A n B| / |A|. The measure itself, sitting beside `token_jaccard`
+    in the same set-taking shape.
+
+    Callers that compare ONE claim against MANY tokenize each claim once and
+    come here; `token_containment` below is the two-string convenience over
+    the same arithmetic. A caller in a loop that goes through the string form
+    re-tokenizes both sides on every pair -- `same_subject_pairs` spent 875ms
+    of a 954ms report on 60,640 regex passes over the same 504 claims.
+    """
+    if not a:
+        return 0.0
+    return len(a & b) / len(a)
+
+
 def token_containment(text: str, other: str) -> float:
     """ASYMMETRIC: how much of `text` is already carried by `other`, |A n B| / |A|.
 
@@ -73,10 +90,7 @@ def token_containment(text: str, other: str) -> float:
     Containment asks the question that actually decides, and since
     |A u B| >= |A| it is never the less sensitive of the two.
     """
-    a = overlap_tokens(text)
-    if not a:
-        return 0.0
-    return len(a & overlap_tokens(other)) / len(a)
+    return containment(overlap_tokens(text), overlap_tokens(other))
 
 
 def cross_project_note(item: dict) -> "str | None":

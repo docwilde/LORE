@@ -106,6 +106,7 @@ class WriteTimeFold(unittest.TestCase):
     def test_the_containment_function_is_shared_not_reimplemented(self):
         """A second similarity measure would let `lore belief dedup-report`
         drift from the number that decides a fold."""
+        self.assertIs(DERIVER.containment, PENDING.containment)
         self.assertIs(DERIVER.token_containment, PENDING.token_containment)
 
     def test_the_construction_scores_above_threshold_in_the_write_direction(self):

@@ -191,8 +191,9 @@ class CrossSubjectCoverage(unittest.TestCase):
     def test_the_containment_function_is_49s_not_a_second_one(self):
         """A second similarity measure would let the number a human sees on
         `lore crosscheck` drift from the number that drops a conclusion."""
+        self.assertIs(DERIVER.containment, PENDING.containment)
         self.assertIs(DERIVER.token_containment, PENDING.token_containment)
-        self.assertIs(DREAMER.token_containment, PENDING.token_containment)
+        self.assertIs(DREAMER.containment, PENDING.containment)
 
     def test_the_twin_pair_is_why_the_measure_is_containment(self):
         """Premise guard: this pair scores UNDER the issue's own jaccard

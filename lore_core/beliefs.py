@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Belief store: Honcho-pattern queryable claims, distinct from curated core
-memory. belief_insert/supersede/subject own the beliefs table; the outcomes
+memory. belief_insert/supersede/subject own the beliefs table; the binding
+layer (BELIEF_RELATIONS, edge_insert, edge_support, edge_repoint,
+belief_edges) owns belief_edges -- typed relations between beliefs, the one
+thing every pairwise measure in this package cannot express, because all of
+them measure sameness; the outcomes
 ledger (record_outcome, outcome_counts, calibrated_confidence) is the ground
 truth the deriver's self-reported confidence gets calibrated against;
 dormant_sweep retires beliefs nobody has touched in a while; audit_check /
@@ -33,6 +37,13 @@ __all__ = [
     'belief_insert',
     'belief_reinforce',
     'belief_supersede',
+    'BELIEF_RELATIONS',
+    'SYMMETRIC_RELATIONS',
+    'edge_insert',
+    'edge_support',
+    'edge_repoint',
+    'belief_edges',
+    'format_edges',
     'format_belief',
     'BELIEF_COLS',
     'BELIEF_COLS_B',
@@ -132,6 +143,119 @@ def belief_insert(
     return bid, created
 
 
+# THE RELATION VOCABULARY. Five verbs, declared -- never derived from a
+# relation's name and never open-ended. Each states a dependency the store
+# could not express before: containment, the dedup reports and superseded_by
+# all measure whether two claims say the SAME thing, so a claim that holds
+# only while another holds had nowhere to say so.
+#
+# Small on purpose. A vocabulary the deriver can hold in mind is one it uses
+# consistently; a wide one earns a topical edge between every pair of beliefs
+# that mention the same file, which carries nothing the FTS index does not.
+BELIEF_RELATIONS = {
+    "depends_on": "holds only while the named belief holds",
+    "specializes": "is a narrower case of the named belief",
+    "explains": "gives the mechanism behind the named belief",
+    "contradicts": "cannot be true beside the named belief",
+    "applies_when": "applies under the condition the named belief states",
+}
+
+# `contradicts` is mutual: A cannot be true beside B exactly when B cannot be
+# true beside A. Stored with the lower id first so the two directions are ONE
+# row -- two rows asserting one fact is the same double-count the
+# distinct-session assertion table exists to prevent. The other four are
+# directional and mean something different reversed.
+SYMMETRIC_RELATIONS = frozenset({"contradicts"})
+
+
+def edge_insert(conn: sqlite3.Connection, src: int, dst: int, rel: str, source: str,
+                session_id: "str | None" = None, note: "str | None" = None) -> bool:
+    """Assert `src -rel-> dst`; returns True when the edge is NEW.
+
+    A repeat assertion adds a row to belief_edge_assertions instead of a
+    second edge, and one from a session that already asserted it adds nothing
+    at all -- a session restating its own conclusion is one source, not two.
+    An unknown `rel`, a self-loop, or a missing endpoint is refused: an edge
+    naming a belief that is not there is worse than no edge, because it reads
+    as structure.
+    """
+    if rel not in BELIEF_RELATIONS or src == dst:
+        return False
+    if rel in SYMMETRIC_RELATIONS and src > dst:
+        src, dst = dst, src
+    n = conn.execute("SELECT count(*) FROM beliefs WHERE id IN (?, ?)", (src, dst)).fetchone()[0]
+    if n != 2:
+        return False
+    now = utcnow()
+    created = conn.execute(
+        "INSERT OR IGNORE INTO belief_edges(src, dst, rel, source, session_id, note, created)"
+        " VALUES(?,?,?,?,?,?,?)",
+        (src, dst, rel, source, session_id, one_line(note or "")[:300] or None, now),
+    ).rowcount == 1
+    if session_id:
+        conn.execute(
+            "INSERT OR IGNORE INTO belief_edge_assertions(src, dst, rel, session_id, created)"
+            " VALUES(?,?,?,?,?)", (src, dst, rel, session_id, now))
+    return created
+
+
+def edge_support(conn: sqlite3.Connection, src: int, dst: int, rel: str) -> int:
+    """How many DISTINCT sessions have asserted this edge -- the corroboration
+    number, counted the way belief_evidence's distinct sessions are and not the
+    way its raw row count is."""
+    if rel in SYMMETRIC_RELATIONS and src > dst:
+        src, dst = dst, src
+    return conn.execute(
+        "SELECT count(DISTINCT session_id) FROM belief_edge_assertions"
+        " WHERE src = ? AND dst = ? AND rel = ?", (src, dst, rel)).fetchone()[0]
+
+
+def belief_edges(conn: sqlite3.Connection, bid: int) -> "list[tuple]":
+    """Every edge touching `bid` as (direction, other_id, rel, source, support,
+    other_claim, other_status), outgoing first. Both directions: a belief's
+    neighbourhood is what it rests on AND what rests on it."""
+    out = []
+    for direction, sql in (
+        ("out", "SELECT e.dst, e.rel, e.source, b.claim, b.status FROM belief_edges e"
+                " JOIN beliefs b ON b.id = e.dst WHERE e.src = ? ORDER BY e.rel, e.dst"),
+        ("in", "SELECT e.src, e.rel, e.source, b.claim, b.status FROM belief_edges e"
+               " JOIN beliefs b ON b.id = e.src WHERE e.dst = ? ORDER BY e.rel, e.src"),
+    ):
+        for other, rel, source, claim, status in conn.execute(sql, (bid,)):
+            a, b = (bid, other) if direction == "out" else (other, bid)
+            out.append((direction, other, rel, source, edge_support(conn, a, b, rel),
+                        claim, status))
+    return out
+
+
+def edge_repoint(conn: sqlite3.Connection, old: int, new: int) -> None:
+    """Move every edge off a superseded belief onto its survivor.
+
+    Same reasoning as belief_supersede's re-pointing of belief_evidence: the
+    fact survived under a new id, so what the retired id was bound to is what
+    the survivor is bound to. An endpoint equal to the survivor is dropped
+    rather than moved -- a merge of two bound beliefs would otherwise leave
+    the survivor depending on itself. INSERT OR IGNORE, not UPDATE: the
+    survivor may already carry the same relation to the same neighbour, and
+    that collides with the primary key.
+    """
+    for col, keep in (("src", "dst"), ("dst", "src")):
+        src_expr = "?" if col == "src" else "src"
+        dst_expr = "?" if col == "dst" else "dst"
+        conn.execute(
+            f"INSERT OR IGNORE INTO belief_edges(src, dst, rel, source, session_id, note,"
+            f" created) SELECT {src_expr}, {dst_expr}, rel, source, session_id, note, created"
+            f" FROM belief_edges WHERE {col} = ? AND {keep} != ?",
+            (new, old, new))
+        conn.execute(
+            f"INSERT OR IGNORE INTO belief_edge_assertions(src, dst, rel, session_id, created)"
+            f" SELECT {src_expr}, {dst_expr}, rel, session_id, created"
+            f" FROM belief_edge_assertions WHERE {col} = ? AND {keep} != ?",
+            (new, old, new))
+    conn.execute("DELETE FROM belief_edges WHERE src = ? OR dst = ?", (old, old))
+    conn.execute("DELETE FROM belief_edge_assertions WHERE src = ? OR dst = ?", (old, old))
+
+
 def belief_supersede(conn: sqlite3.Connection, bid: int, by: int | None, reason: str) -> None:
     # never let a belief supersede itself, and only transition an ACTIVE one:
     # a late/second dreamer racing the same DB (dream_run holds a lock now, but
@@ -146,6 +270,7 @@ def belief_supersede(conn: sqlite3.Connection, bid: int, by: int | None, reason:
     ).rowcount
     if by and n:
         conn.execute("UPDATE belief_evidence SET belief_id = ? WHERE belief_id = ?", (by, bid))
+        edge_repoint(conn, bid, by)
 
 
 def format_belief(conn: sqlite3.Connection, row, with_evidence: bool = False) -> str:
@@ -167,6 +292,22 @@ def format_belief(conn: sqlite3.Connection, row, with_evidence: bool = False) ->
         ):
             out += f"\n    {created or '?'} session {sid or '?'}" + (f": {note}" if note else "")
     return out
+
+
+def format_edges(conn: sqlite3.Connection, bid: int) -> str:
+    """The edge block for one belief, or "" when it has none. `support` is the
+    distinct-session count; `source` says who asserted it, and "derived" means
+    a model did -- as uncalibrated as a deriver-claimed confidence, and to be
+    weighed the same way."""
+    rows = belief_edges(conn, bid)
+    if not rows:
+        return ""
+    out = ["  relations:"]
+    for direction, other, rel, source, support, claim, status in rows:
+        arrow = f"--{rel}-->" if direction == "out" else f"<--{rel}--"
+        tag = f"{source}, n={support}" + (f", {status}" if status != "active" else "")
+        out.append(f"    {arrow} [{other}] ({tag}) {one_line(claim)[:120]}")
+    return "\n".join(out)
 
 
 BELIEF_COLS = "id, subject, claim, confidence, status"
@@ -212,6 +353,19 @@ def cmd_belief(args) -> int:
             print("no such belief.", file=sys.stderr)
             return 1
         print(format_belief(conn, row, with_evidence=True))
+        edges = format_edges(conn, args.id)
+        if edges:
+            print(edges)
+        return 0
+    if args.bcmd == "edges":
+        row = conn.execute(f"SELECT {BELIEF_COLS} FROM beliefs WHERE id = ?",
+                           (args.id,)).fetchone()
+        if not row:
+            print("no such belief.", file=sys.stderr)
+            return 1
+        print(format_belief(conn, row))
+        edges = format_edges(conn, args.id)
+        print(edges if edges else "  (no relations recorded)")
         return 0
     if args.bcmd == "search":
         rows = []

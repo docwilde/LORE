@@ -122,6 +122,41 @@ def db_connect() -> sqlite3.Connection:
         "belief_id UNINDEXED, claim, tokenize='porter unicode61')"
     )
     conn.execute("CREATE TABLE IF NOT EXISTS dream_reviewed(a INTEGER, b INTEGER, PRIMARY KEY(a, b))")
+    # BINDING LAYER: typed relations BETWEEN beliefs, the half the store had
+    # no shape for. Every pairwise measure it already carries -- containment,
+    # the cross-subject and same-subject reports, superseded_by -- answers
+    # "do these two say the same thing". An edge here answers a different
+    # question: this claim is a narrower case of that one, holds only while
+    # that one holds, gives the mechanism behind it, or cannot be true beside
+    # it. The relation vocabulary is beliefs.BELIEF_RELATIONS.
+    #
+    # `source` is how the edge got in ("derived" from the deriver's relates
+    # channel), and it is the calibration label: a model-asserted relation is
+    # exactly as uncalibrated as a model-asserted confidence, so a consumer
+    # can hold it to the same CITE-ONLY bar cmd_consult already applies to
+    # beliefs. The row carries the FIRST assertion's session and note.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS belief_edges("
+        "src INTEGER NOT NULL, dst INTEGER NOT NULL, rel TEXT NOT NULL,"
+        " source TEXT NOT NULL, session_id TEXT, note TEXT, created TEXT,"
+        " PRIMARY KEY(src, dst, rel))"
+    )
+    # dst-first index: an edge is read in both directions ("what does this
+    # belief rest on" and "what rests on it"), and the PRIMARY KEY only
+    # serves the src side.
+    conn.execute("CREATE INDEX IF NOT EXISTS belief_edges_dst ON belief_edges(dst, rel)")
+    # One row per (edge, session) -- so an edge's corroboration is a COUNT OF
+    # DISTINCT SESSIONS, never a counter that a single session restating
+    # itself can inflate. The PRIMARY KEY makes a same-session re-assertion an
+    # INSERT OR IGNORE no-op rather than arithmetic, which is the same reason
+    # belief_evidence's distinct-session count is the honest one and its raw
+    # row count is not.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS belief_edge_assertions("
+        "src INTEGER NOT NULL, dst INTEGER NOT NULL, rel TEXT NOT NULL,"
+        " session_id TEXT NOT NULL, created TEXT,"
+        " PRIMARY KEY(src, dst, rel, session_id))"
+    )
     # OUTCOMES LEDGER (2026-08-22): what happened to a belief AFTER it was
     # derived — confirmed in use, contradicted by the user/dreamer, found
     # stale by an audit. The deriver's `confidence` is a self-report
