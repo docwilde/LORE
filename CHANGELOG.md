@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.42.1 — 2026-08-28
+
+- Fix **`format_edges`** (`lore_core/beliefs.py`): a structural edge rendered `n=0`, reading as uncorroborated. Now `observed`.
+- Fix **`format_belief`** (`lore_core/beliefs.py`): renders `N evidence / M sessions` when the two differ. 8 of 582 beliefs on a live store had more rows than sessions.
+- Tests: `tests/test_belief_edges.py` +3 (26). Suite 326.
+
 ## 0.42.0 — 2026-08-28
 
 - New: **traversal over the belief graph** (`lore_core/graph.py`, `lore graph`). 0.41.0 gave the store typed relations and no way to walk them — an edge could be written and read one hop at a time, and nothing composed two. `adjacency` loads the graph (or one subject's slice) as a plain `dict[int, list[tuple[int, str, float]]]`; `khop`, `best_path`, `simple_paths`, `components`, `communities` and `degree` walk it. `lore graph stats | neighbours | path | communities | backfill`, read-only except the last.

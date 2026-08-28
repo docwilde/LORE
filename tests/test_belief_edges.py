@@ -336,6 +336,43 @@ class Reader(unittest.TestCase):
         self.assertIn("n=2", block)
         self.assertIn(f"--depends_on--> [{b}]", lore.format_edges(conn, a))
 
+    def test_a_structural_edge_reads_as_observed_not_as_unsupported(self):
+        """It came from the store's own state, so it has no session count and
+        needs none -- "n=0" would read as "nobody corroborated this" about an
+        edge that is certain."""
+        a, b = _seed(CLAIM_A), _seed(CLAIM_B)
+        conn = _conn()
+        lore.edge_insert(conn, a, b, "depends_on", "structural")
+        conn.commit()
+        block = lore.format_edges(conn, a)
+        self.assertIn("structural, observed", block)
+        self.assertNotIn("n=0", block)
+
+    def test_evidence_shows_distinct_sessions_when_they_differ_from_rows(self):
+        """Rows are not independent derivations: three rows from one session is
+        one confirmation, and the row count alone reads as three."""
+        bid = _seed(CLAIM_A)
+        conn = _conn()
+        for _ in range(2):
+            lore.belief_reinforce(conn, bid, 0.8, "sess-seed", SLUG, "again")
+        conn.commit()
+        row = conn.execute(f"SELECT {lore.BELIEF_COLS} FROM beliefs WHERE id = ?",
+                           (bid,)).fetchone()
+        line = lore.format_belief(conn, row)
+        self.assertIn("3 evidence / 1 session", line)
+        self.assertNotIn("1 sessions", line)
+
+    def test_equal_counts_render_the_plain_form(self):
+        bid = _seed(CLAIM_A)
+        conn = _conn()
+        lore.belief_reinforce(conn, bid, 0.8, "other-session", SLUG, "again")
+        conn.commit()
+        row = conn.execute(f"SELECT {lore.BELIEF_COLS} FROM beliefs WHERE id = ?",
+                           (bid,)).fetchone()
+        line = lore.format_belief(conn, row)
+        self.assertIn("2 evidence", line)
+        self.assertNotIn("session", line)   # no clause when the counts agree
+
     def test_a_belief_with_no_relations_renders_nothing(self):
         a = _seed(CLAIM_A)
         self.assertEqual(lore.format_edges(_conn(), a), "")
