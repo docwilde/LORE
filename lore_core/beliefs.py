@@ -13,6 +13,7 @@ interaction_model_lines renders the user-model subset for the context
 snapshot. `lore belief`, `lore outcome`, `lore audit`, `lore stats`.
 """
 
+import math
 import os
 import re
 import sqlite3
@@ -43,6 +44,14 @@ __all__ = [
     'edge_support',
     'edge_repoint',
     'belief_edges',
+    'STRUCTURAL_RELATIONS',
+    'PROJECTED_RELATIONS',
+    'KNOWN_RELATIONS',
+    'ALL_RELATIONS',
+    'support_factor',
+    'edge_weight',
+    'SUPPORT_SCALE',
+    'MAX_ASSERTED_SUPPORT',
     'format_edges',
     'format_belief',
     'BELIEF_COLS',
@@ -165,7 +174,7 @@ BELIEF_RELATIONS = {
 # row -- two rows asserting one fact is the same double-count the
 # distinct-session assertion table exists to prevent. The other four are
 # directional and mean something different reversed.
-SYMMETRIC_RELATIONS = frozenset({"contradicts"})
+SYMMETRIC_RELATIONS = frozenset({"contradicts", "co_derived"})
 
 
 def edge_insert(conn: sqlite3.Connection, src: int, dst: int, rel: str, source: str,
@@ -179,7 +188,7 @@ def edge_insert(conn: sqlite3.Connection, src: int, dst: int, rel: str, source: 
     naming a belief that is not there is worse than no edge, because it reads
     as structure.
     """
-    if rel not in BELIEF_RELATIONS or src == dst:
+    if rel not in ALL_RELATIONS or src == dst:
         return False
     if rel in SYMMETRIC_RELATIONS and src > dst:
         src, dst = dst, src
@@ -254,6 +263,71 @@ def edge_repoint(conn: sqlite3.Connection, old: int, new: int) -> None:
             (new, old, new))
     conn.execute("DELETE FROM belief_edges WHERE src = ? OR dst = ?", (old, old))
     conn.execute("DELETE FROM belief_edge_assertions WHERE src = ? OR dst = ?", (old, old))
+
+
+# STRUCTURAL relations: facts about the store itself, not claims a model made.
+# Kept OUT of BELIEF_RELATIONS deliberately -- that dict is the deriver's menu
+# (relate_conclusion validates against it), and a model must not be able to
+# assert that one belief supersedes another. Only this module's own backfill
+# writes these.
+STRUCTURAL_RELATIONS = {
+    "supersedes": "was replaced by the named belief (from beliefs.superseded_by)",
+}
+
+# PROJECTED relations exist only in a loaded graph, never in a row. They are
+# computed from a table that already holds the same information in a smaller
+# shape -- co_derivation from belief_evidence's belief/session incidence -- so
+# storing them would be a second copy that can disagree with the first, and a
+# large one: projecting every session as a clique is 4,029 edges on a store
+# where the capped projection is 277. Named here so the vocabulary is fully
+# declared in three tiers and the symmetry invariant is checkable, and kept out
+# of ALL_RELATIONS so edge_insert physically cannot write one.
+PROJECTED_RELATIONS = {
+    "co_derived": "was derived in the same session as the named belief",
+}
+
+# The full vocabulary edge_insert admits. The deriver's half is the smaller
+# one; the projected tier is deliberately absent.
+ALL_RELATIONS = {**BELIEF_RELATIONS, **STRUCTURAL_RELATIONS}
+
+# Every relation name that can appear in a loaded graph, stored or not.
+KNOWN_RELATIONS = {**ALL_RELATIONS, **PROJECTED_RELATIONS}
+
+# Distinct-session support turned into a [0,1) weight, with diminishing
+# returns and never reaching 1: one session asserting an edge is weak evidence
+# for it, a third adds less than the second. SCALE 2.0 puts n=1 at 0.39, n=2
+# at 0.63, n=3 at 0.78 -- a single-session relation cannot carry a path on its
+# own, which is the honest reading of one model saying so once.
+SUPPORT_SCALE = 2.0
+
+# A model-asserted relation never weighs as much as a recorded one, however
+# many sessions assert it. Without this the curve reaches exactly 1.0 in
+# float64 (1 - exp(-500) rounds to 1), which would make a much-repeated
+# inference indistinguishable from `supersedes` -- a transition the store
+# observed. The gap is the same one cmd_consult keeps between a calibrated
+# belief and an asserted one, held open here in the arithmetic.
+MAX_ASSERTED_SUPPORT = 0.99
+
+
+def support_factor(n: int) -> float:
+    """1 - exp(-n / SUPPORT_SCALE) over a DISTINCT-SESSION count, capped below
+    certainty at MAX_ASSERTED_SUPPORT."""
+    return min(1.0 - math.exp(-n / SUPPORT_SCALE), MAX_ASSERTED_SUPPORT)
+
+
+def edge_weight(conn: sqlite3.Connection, src: int, dst: int, rel: str,
+                source: str) -> float:
+    """The per-hop weight a path multiplies through.
+
+    A structural edge is 1.0: `supersedes` is a transition the store recorded,
+    not a claim anyone made, so there is nothing to discount. Everything else
+    is model-asserted and weighs its distinct-session support -- the same
+    reason cmd_consult admits only outcome-calibrated beliefs to STEER, applied
+    to relations instead of claims.
+    """
+    if source == "structural" or rel in STRUCTURAL_RELATIONS:
+        return 1.0
+    return support_factor(edge_support(conn, src, dst, rel))
 
 
 def belief_supersede(conn: sqlite3.Connection, bid: int, by: int | None, reason: str) -> None:

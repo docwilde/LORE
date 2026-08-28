@@ -99,7 +99,18 @@ class Vocabulary(unittest.TestCase):
             self.assertTrue(meaning.strip(), f"{rel} has no stated meaning")
 
     def test_symmetric_relations_are_a_subset_of_the_vocabulary(self):
-        self.assertTrue(set(BELIEFS.SYMMETRIC_RELATIONS) <= set(BELIEFS.BELIEF_RELATIONS))
+        self.assertTrue(set(BELIEFS.SYMMETRIC_RELATIONS) <= set(BELIEFS.KNOWN_RELATIONS))
+
+    def test_the_three_tiers_are_disjoint_and_only_two_are_writable(self):
+        """A projected relation must not be storable, and the deriver must not
+        reach the structural tier."""
+        b, st, pr = (set(BELIEFS.BELIEF_RELATIONS), set(BELIEFS.STRUCTURAL_RELATIONS),
+                     set(BELIEFS.PROJECTED_RELATIONS))
+        self.assertEqual(b & st, set())
+        self.assertEqual(b & pr, set())
+        self.assertEqual(st & pr, set())
+        self.assertEqual(set(BELIEFS.ALL_RELATIONS), b | st)
+        self.assertEqual(set(BELIEFS.KNOWN_RELATIONS), b | st | pr)
 
 
 class EdgeWrites(unittest.TestCase):
