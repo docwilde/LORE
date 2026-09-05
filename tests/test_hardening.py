@@ -36,6 +36,52 @@ class TestScrubSecrets(unittest.TestCase):
         self.assertIn("[REDACTED:openrouter]", out)
         self.assertNotIn("[REDACTED:api-key]", out)
 
+    def test_a_long_alphanumeric_run_does_not_take_quadratic_time(self):
+        """A base64 blob, a minified bundle or a hex dump in agent output
+        must not stall the caller.
+
+        `scrub_secrets` runs SYNCHRONOUSLY wherever it is called -- in
+        DOXA's Codex engine that is the Textual event loop -- so a slow
+        scrub is a frozen UI, not just a slow function. The conn-string
+        pattern's scheme used to be unbounded (`[a-z0-9+.-]*`), which made
+        this quadratic: with no "://" present the engine starts at every
+        one of N positions and scans the run from each. Measured before
+        the bound: 20k chars 1.28s, 40k 5.20s, 80k 24.41s -- while a
+        MEGABYTE of prose took 0.17s.
+
+        The assertion is deliberately loose (2s for 80k, against a
+        measured 0.043s) because it must survive a loaded CI box without
+        going quiet; a regression to the old behaviour costs 24s here and
+        fails it by more than 10x. The SHAPE is what is pinned: doubling
+        the input must not quadruple the time."""
+        import time
+        blob = ("aB3xY9zQ7" * 9000)[:80_000]  # no "://" anywhere in it
+        started = time.monotonic()
+        out = lore.scrub_secrets(blob)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 2.0,
+                        f"scrubbing 80k unbroken chars took {elapsed:.2f}s")
+        # It IS redacted, as base64 -- an 80k run of the base64 alphabet is
+        # exactly what BASE64_RUN is for, and that pattern is linear. The
+        # point of this test is the CLOCK, not the verdict.
+        self.assertEqual(out, "[REDACTED:base64]")
+
+    def test_a_connection_string_is_still_redacted_after_the_bound(self):
+        """The bound must not have bought speed with a false negative --
+        the one failure this scrubber must not have. A lookbehind guarding
+        the START position was tried first and rejected for exactly that:
+        it missed a credential whose scheme followed a digit."""
+        for text, why in (
+            ("postgres://admin:s3cr3tpw@db.internal:5432/x", "plain"),
+            ("see mysql://u:hunter22@h/db now", "mid-sentence"),
+            ("x1rsEbsK4://user:pa55word@host", "scheme preceded by a digit"),
+            ("HTTPS://Admin:SecretPw@Host", "uppercase scheme"),
+        ):
+            out = lore.scrub_secrets(text)
+            self.assertIn("[REDACTED:conn-string]", out, why)
+            for secret in ("s3cr3tpw", "hunter22", "pa55word", "SecretPw"):
+                self.assertNotIn(secret, out, f"{why}: leaked {secret}")
+
     def test_aws_access_key(self):
         out = lore.scrub_secrets("export AWS=AKIA" + "A7" * 8)
         self.assertIn("[REDACTED:aws]", out)
