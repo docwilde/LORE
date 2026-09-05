@@ -32,7 +32,31 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
     # JWT before the generic base64/hex rules: three base64url segments dotted.
     ("jwt", re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
     # credentials embedded in a connection string: scheme://user:pass@host
-    ("conn-string", re.compile(r"([a-z][a-z0-9+.\-]*://[^\s:/@]+:)([^\s/@]{3,})(@)", re.IGNORECASE)),
+    # The scheme is BOUNDED ({0,63}, not *), and that bound is the whole
+    # point: unbounded, this pattern is QUADRATIC on any long unbroken run
+    # of scheme-legal characters. With no "://" in the text the engine
+    # starts at every one of N positions and scans the run forward from
+    # each, so cost grows as N^2 -- measured on one alphanumeric blob:
+    # 20k chars 1.28s, 40k 5.20s, 80k 24.41s, while a MEGABYTE of ordinary
+    # prose scrubs in 0.17s. `scrub_secrets` runs synchronously wherever it
+    # is called (DOXA's `codex.py` map_event is on the Textual event loop),
+    # so a base64 blob, a minified bundle or a hex dump in agent output
+    # froze the whole UI for as long as that took.
+    #
+    # Bounding the scheme makes the per-position scan constant, so the pass
+    # is linear: the same blobs now take 0.011s / 0.021s / 0.043s (570x at
+    # 80k), doubling with N exactly as they should.
+    #
+    # 63 is far above every scheme that exists (the longest IANA-registered
+    # one is ~20 characters), so the only behaviour this can change is a
+    # URI whose scheme runs past 64 characters -- which is not a URI. It is
+    # NOT a lookbehind guarding the start position: that form was tried,
+    # ran 14796x faster still, and MISSED a credential whose scheme was
+    # preceded by a digit (`...1rsEbsK4://user:pw@host`). A false negative
+    # is the one failure this scrubber must not have -- see the module
+    # docstring, which accepts false positives by design. Verified
+    # equivalent to the unbounded form over 20,000 random strings.
+    ("conn-string", re.compile(r"([a-z][a-z0-9+.\-]{0,63}://[^\s:/@]+:)([^\s/@]{3,})(@)", re.IGNORECASE)),
     ("openrouter", re.compile(r"sk-or-v1-[a-f0-9]+")),
     # stripe/openai-style live/test secret + restricted keys (underscore form)
     ("provider-secret", re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}")),
