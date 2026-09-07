@@ -2,11 +2,10 @@
 
 ## 0.48.3 — 2026-09-05
 
-- `scrub_secrets` was QUADRATIC on any long unbroken run of scheme-legal characters — a base64 blob, a minified bundle, a hex dump. `SECRET_PATTERNS["conn-string"]` matched its URI scheme with an unbounded `[a-z0-9+.\-]*`, so with no `://` present the engine started at every one of N positions and scanned the run from each. Measured: 20k chars 1.28s, 40k 5.20s, 80k **24.41s** — while a MEGABYTE of ordinary prose took 0.17s. The shape of the input, not its size, was the cost.
-- Bounding the scheme to `{0,63}` makes the per-position scan constant: the same blobs now take 0.011s / 0.021s / 0.043s, doubling with N as they should. 63 is far above every scheme that exists (the longest IANA-registered one is ~20 characters).
-- This froze callers, not just slowed them. `scrub_secrets` runs synchronously wherever it is called — DOXA's `codex.py` calls it from the Textual event loop — so agent output carrying a base64 blob locked the whole TUI for as long as the scrub took, and an `asyncio.wait_for` cannot fire through a blocked loop.
-- NOT a lookbehind on the start position: that form was faster still and MISSED a credential whose scheme followed a digit (`...1rsEbsK4://user:pw@host`). A false negative is the one failure this scrubber must not have; false positives are accepted by design.
-- Tests: `tests/test_hardening.py` (2 new — one pins the clock, one pins that the bound bought no false negative). Reverting the bound with them in place takes the file from 0.02s to 18.85s and fails. Suite 393.
+- `scrub_secrets` was quadratic on long unbroken alphanumeric runs: `SECRET_PATTERNS["conn-string"]`'s scheme was `[a-z0-9+.\-]*`, now `{0,63}`. 80k chars: **24.41s → 0.043s**, linear.
+- It runs synchronously on the caller — DOXA's `codex.py` calls it on the Textual event loop — so a base64 blob in agent output froze the TUI.
+- Equivalent to the unbounded form over 20,000 random strings; a lookbehind variant was rejected for missing a credential after a digit.
+- Tests: `tests/test_hardening.py` (2 new: the clock, and no false negative). Suite 393.
 
 ## 0.48.2 — 2026-08-28
 
