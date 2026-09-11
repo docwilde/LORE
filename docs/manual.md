@@ -34,7 +34,7 @@ Everything runs as a plain CLI too — `python3 <plugin>/bin/lore.py --help`, st
 
 | Store | Location | Cap | Gate |
 |---|---|---|---|
-| User memory | `USER.md` | 4500 chars | write-time |
+| User memory | `USER.md` | 9000 chars | write-time |
 | Project memory | `MEMORY.md`, one per repo | 8800 chars | write-time |
 | File map | `filemap/<slug>.md`, one per repo | 4400 chars | write-time |
 | Belief store | `state.db` | none | read-time |
@@ -172,7 +172,7 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 |---|---|---|
 | `LORE_ROOT` | `~/.claude/lore` | all state: memory files, `state.db`, pending, logs |
 | `LORE_PROJECTS_DIR` | `~/.claude/projects` | where the indexer looks for transcripts |
-| `LORE_USER_CAP` / `LORE_MEMORY_CAP` | 4500 / 8800 | curated memory caps, in chars |
+| `LORE_USER_CAP` / `LORE_MEMORY_CAP` | 9000 / 8800 | curated memory caps, in chars |
 | `LORE_FILEMAP_CAP` | 4400 | file-map cap, in chars (~55 rows) |
 | `LORE_REVIEW_MODEL` | unset | umbrella override for both headless roles |
 | `LORE_DERIVER_MODEL` | `haiku` | extraction — the easy role |

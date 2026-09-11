@@ -13,6 +13,7 @@ import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 import importlib.util
 from pathlib import Path
 
@@ -209,6 +210,30 @@ class TestStageRows(StageEnvMixin, unittest.TestCase):
         states = {stage: state for stage, _var, state in lore.stage_rows()}
         self.assertEqual(states["inject"], "off")
         self.assertEqual(states["streaming"], "on")
+
+
+class TestMemoryCaps(unittest.TestCase):
+    """The caps are the one setting a user feels every session: too low and
+    consolidation deletes signal, too high and every prompt carries dead
+    weight. A silent drift in the default is worth a test."""
+
+    def test_user_cap_default(self):
+        self.assertEqual(lore.USER_CAP, 9000)
+
+    def test_caps_read_the_environment(self):
+        """Each cap is env-overridable, so a store that outgrows the default
+        does not need a fork. The caps are read at import, so this reloads the
+        module under a patched environment rather than reading os.environ —
+        a sibling test that sets a cap would otherwise decide the outcome."""
+        import importlib
+        import lore_core.config as cfg
+        for var, attr in (("LORE_USER_CAP", "USER_CAP"),
+                          ("LORE_MEMORY_CAP", "MEMORY_CAP"),
+                          ("LORE_FILEMAP_CAP", "FILEMAP_CAP")):
+            with self.subTest(var=var):
+                with unittest.mock.patch.dict(os.environ, {var: "1234"}):
+                    self.assertEqual(getattr(importlib.reload(cfg), attr), 1234)
+        importlib.reload(cfg)
 
 
 if __name__ == "__main__":

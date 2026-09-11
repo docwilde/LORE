@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.48.4 — 2026-09-11
+
+- User memory cap 4500 → 9000 chars (`LORE_USER_CAP`). User memory holds who the user is across every project, so it fills with facts that never stop being true while project memory rotates with the repo — a live store sat at 99% and met every new fact with consolidation pressure that deletes signal rather than drift. 9000 chars costs ~2250 tokens per session.
+- Tests: `tests/test_config.py` (17; 2 new, pinning the default and the env override for all three caps). Suite 407.
+
 ## 0.48.2 — 2026-08-28
 
 - The co-derived hint pointed at the whole asserted view, which is exactly what the cluster note warns produces an unreadable ribbon — the tool argued with itself. It now points at `--belief <id> --depth 2`, and says why filtering the whole graph fragments it: co-derivation is what holds the drawn clusters together.

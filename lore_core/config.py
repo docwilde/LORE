@@ -70,11 +70,10 @@ BUILD_FINGERPRINT = "lore-bf-623047b2a8e895a5"
 ROOT = Path(os.environ.get("LORE_ROOT", str(Path.home() / ".claude" / "lore")))
 # User memory is the one cap that binds in practice: it holds who the user
 # is across every project, so it fills with durable facts that never stop
-# being true, while project memory rotates with the repo. At 2750 it sat
-# at 88% on a real store and forced consolidation every few writes --
-# pressure that deletes signal rather than drift. 4500 restores headroom
-# (~440 extra tokens per session) without abandoning the cap discipline.
-USER_CAP = int(os.environ.get("LORE_USER_CAP", "4500"))
+# being true, while project memory rotates with the repo. 9000 chars costs
+# ~2250 tokens per session and holds a mature store below the ceiling, where
+# consolidation pressure deletes signal rather than drift.
+USER_CAP = int(os.environ.get("LORE_USER_CAP", "9000"))
 MEMORY_CAP = int(os.environ.get("LORE_MEMORY_CAP", "8800"))
 # File map cap (0.34.0): deliberately smaller than project memory. The map is
 # one line per load-bearing path; at 4400 chars (~55 rows) a map that no
