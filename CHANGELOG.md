@@ -3,7 +3,13 @@
 ## 0.48.4 — 2026-09-11
 
 - User memory cap 4500 → 9000 chars (`LORE_USER_CAP`). User memory holds who the user is across every project, so it fills with facts that never stop being true while project memory rotates with the repo — a live store sat at 99% and met every new fact with consolidation pressure that deletes signal rather than drift. 9000 chars costs ~2250 tokens per session.
-- Tests: `tests/test_config.py` (17; 2 new, pinning the default and the env override for all three caps). Suite 407.
+- `pending --cluster` groups a backfill pile by **meaning, not word overlap**. On a 752-row store, true duplicates scored jaccard 0.11-0.54 while the old single threshold sat at 0.42 inside that range: it split the very themes it existed to merge, leaving 231 of 242 clusters at n=1. Lexical similarity is now the recall filter and a model is the judge.
+- Blocking keys on `(project, scope)` and takes the max of jaccard and either containment, so a terse line restating a verbose one still pairs. At 0.30 it keeps every known duplicate while discarding 99% of the 282,376 pairs, and one batched `haiku` call splits what survives into same-fact groups. `LORE_CLUSTER_MODEL=off`, no claude on PATH, a refused call or unparseable output all leave the lexical grouping standing.
+- Grouping is single-link over members rather than against a group's union of tokens. A union grows with every member it absorbs, so the Jaccard denominator grew too and a cluster got harder to join the more it held.
+- A split that would drop a row is discarded whole: a row lost between blocking and display is a staged proposal nobody sees.
+- Each cluster line carries its scope and project, so a pile spanning several repos reads as lanes instead of one list.
+- Clustering uses its own tokenizer and threshold. `overlap_tokens` and `containment` are untouched, because they decide what never gets staged and their callers are calibrated to them.
+- Tests: `tests/test_clustering.py` (12, new), `tests/test_config.py` (17; 2 new, pinning the cap default and the env override). Suite 419.
 
 ## 0.48.2 — 2026-08-28
 

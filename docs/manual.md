@@ -173,6 +173,8 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_ROOT` | `~/.claude/lore` | all state: memory files, `state.db`, pending, logs |
 | `LORE_PROJECTS_DIR` | `~/.claude/projects` | where the indexer looks for transcripts |
 | `LORE_USER_CAP` / `LORE_MEMORY_CAP` | 9000 / 8800 | curated memory caps, in chars |
+| `LORE_CLUSTER_BLOCK` | 0.30 | `pending --cluster` blocking threshold; lower keeps more candidate pairs |
+| `LORE_CLUSTER_MODEL` | `haiku` | model that splits blocked clusters into same-fact groups; `off` keeps the lexical grouping |
 | `LORE_FILEMAP_CAP` | 4400 | file-map cap, in chars (~55 rows) |
 | `LORE_REVIEW_MODEL` | unset | umbrella override for both headless roles |
 | `LORE_DERIVER_MODEL` | `haiku` | extraction — the easy role |
