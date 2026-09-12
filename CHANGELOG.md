@@ -2,10 +2,10 @@
 
 ## 0.49.0 — 2026-09-12
 
-- New **`lore project move <old> <new> [--dry-run]`** re-files a whole project identity: beliefs, evidence, the session index, staged proposals, `MEMORY.md` and the file map. A slug is a flattened path, so a checkout that moves on disk is a new project and its store stays under a dead slug.
+- New **`lore project move <old> <new> [--dry-run]`** re-files a project identity: beliefs, evidence, session index, staged proposals, `MEMORY.md`, file map. A slug is a flattened path; a moved checkout leaves its store under a dead slug.
 - Measured on the 2026-09-12 laptop reorganisation: 1,022 of 1,131 active beliefs, 1,358 evidence rows, 911 sessions and all 582 staged proposals sat under dead slugs; `approve` would have written into emptied `MEMORY.md` files.
 - `<old>` may be a bare belief subject (`finch-releases`, `infra`, `doxa-ci`): free-form peer subjects are accepted by `belief add`, read by nothing that queries by project. 12 such beliefs folded into their projects.
-- A claim `<new>` already holds verbatim is superseded by its row via **`belief_supersede`**, evidence and edges carried. Memory and file-map rows go through `memory_move` / `filemap_add`, cap and provenance unchanged; empty sources are removed.
+- A claim `<new>` already holds verbatim is superseded by its row via **`belief_supersede`**, evidence and edges carried. Memory and file-map rows go through `memory_move` / `filemap_add`, cap and provenance unchanged.
 - A slug's leading `-` reads as `-h` to argparse: the dash-less spelling is accepted, `--` before the positionals is the other form, a path that exists is the recommended `<new>`.
 - Not covered: `lore index --force` re-reads transcripts from their original directories and re-files those sessions under the old slug. Manual says so.
 - Tests: `tests/test_project_move.py` (10, new). Suite 418.
