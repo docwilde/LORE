@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.48.5 — 2026-09-12
+
+- Fix **`pending --cluster` labelled clusters with path fragments**: the label was the slug's last dash token, so `…-meeting-ai` read `ai`, `…-re-ab-harness` read `harness`, a worktree read `menu` — lanes that are not memory stores.
+- **`cluster_label`** shows the lane approve writes into: `(user)`, or `(project/<slug minus the home prefix>)`, so `Schreibtisch-doxa` and `repo-docwilde-doxa` stay distinct instead of both reading `doxa`.
+- **`cluster_key`** blocks user rows as one pile. User memory is one store; keying it per session project spread 21 user rows over four repo-named lanes. Live pile: 13 user clusters → 11. Project rows still key on their slug.
+- The Haiku adjudicator is unchanged — it only splits blocked groups; blocking and labelling were wrong.
+- `/lore:pending` gains a lane column; a lane naming a checkout that no longer exists routes with `lore memory move`, not approve.
+- Tests: `tests/test_clustering.py` (20; 8 new). Suite 408.
+
 ## 0.48.4 — 2026-09-11
 
 - User memory cap 4500 → 9000 chars (`LORE_USER_CAP`). User memory holds who the user is across every project, so it fills with facts that never stop being true while project memory rotates with the repo — a live store sat at 99% and met every new fact with consolidation pressure that deletes signal rather than drift. 9000 chars costs ~2250 tokens per session.
