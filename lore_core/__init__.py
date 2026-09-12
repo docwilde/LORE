@@ -47,6 +47,7 @@ from .deriver import *  # noqa: F401,F403
 from .dreamer import *  # noqa: F401,F403
 from .dialectic import *  # noqa: F401,F403
 from .pending import *  # noqa: F401,F403
+from .relocate import *  # noqa: F401,F403
 from .context import *  # noqa: F401,F403
 
 from . import config as _config
@@ -61,6 +62,7 @@ from . import deriver as _deriver
 from . import dreamer as _dreamer
 from . import dialectic as _dialectic
 from . import pending as _pending
+from . import relocate as _relocate
 from . import context as _context
 
 __all__ = [
@@ -76,6 +78,7 @@ __all__ = [
     *_dreamer.__all__,
     *_dialectic.__all__,
     *_pending.__all__,
+    *_relocate.__all__,
     *_context.__all__,
 ]
 
