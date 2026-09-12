@@ -92,6 +92,60 @@ class TestCandidateGroups(unittest.TestCase):
         self.assertEqual(sorted(flat), sorted(pid for pid, _ in items))
 
 
+class TestClusterKey(unittest.TestCase):
+    def test_user_rows_share_one_pile_across_projects(self):
+        """User memory is one store: the same user fact staged from two repos
+        is one duplicate, not two lanes named after the repos."""
+        text = "caveman ultra mode standing preference survives context resets"
+        items = [item("a", text, project="one", scope="user"),
+                 item("b", text, project="two", scope="user")]
+        groups = lore.candidate_groups(items)
+        self.assertEqual(len(groups), 1, groups)
+        self.assertEqual(sorted(groups[0]), ["a", "b"])
+
+    def test_project_rows_stay_keyed_on_their_project(self):
+        text = "alembic heads diverge after rebase onto main"
+        items = [item("a", text, project="one"), item("b", text, project="two")]
+        self.assertEqual(len(lore.candidate_groups(items)), 2)
+
+
+class TestClusterLabel(unittest.TestCase):
+    HOME = "-home-docwilde"
+
+    def label(self, project, scope="project"):
+        return lore.cluster_label({"scope": scope, "project": project}, self.HOME)
+
+    def test_a_user_row_carries_no_project(self):
+        """User memory has no project; a project on the label named a store
+        that does not exist."""
+        self.assertEqual(self.label("-home-docwilde-Schreibtisch-doxa", "user"), "user")
+
+    def test_a_project_label_is_the_slug_minus_the_home_prefix(self):
+        """The last dash token of a slug is a path fragment, not a name:
+        `...-meeting-ai` read as `ai`, `...-re-ab-harness` as `harness`."""
+        self.assertEqual(self.label("-home-docwilde-Schreibtisch-meeting-ai"),
+                         "project/Schreibtisch-meeting-ai")
+        self.assertEqual(self.label("-home-docwilde-Schreibtisch-Ampiric-repo-re-ab-harness"),
+                         "project/Schreibtisch-Ampiric-repo-re-ab-harness")
+
+    def test_a_moved_checkout_is_told_apart_from_its_stale_slug(self):
+        self.assertNotEqual(self.label("-home-docwilde-Schreibtisch-doxa"),
+                            self.label("-home-docwilde-repo-docwilde-doxa"))
+
+    def test_a_slug_outside_home_is_shown_whole(self):
+        self.assertEqual(self.label("-srv-repo-x"), "project/-srv-repo-x")
+
+    def test_a_row_without_a_project_says_so(self):
+        self.assertEqual(self.label(None), "project/?")
+
+    def test_the_default_home_is_this_machine(self):
+        from pathlib import Path
+        import re
+        home = re.sub(r"[^A-Za-z0-9]", "-", str(Path.home()))
+        self.assertEqual(lore.cluster_label({"scope": "project", "project": home + "-x"}),
+                         "project/x")
+
+
 class TestAdjudicate(unittest.TestCase):
     def test_model_off_returns_the_lexical_grouping(self):
         groups = [["a", "b"], ["c"]]

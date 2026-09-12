@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 from .beliefs import belief_insert, belief_subject, belief_supersede
 from .config import ROOT, SKILLS_DIR, project_slug, utcnow
@@ -37,6 +38,8 @@ __all__ = [
     'CLUSTER_STOPWORDS',
     'cluster_tokens',
     'cluster_similarity',
+    'cluster_key',
+    'cluster_label',
     'candidate_groups',
 ]
 
@@ -143,9 +146,50 @@ def cluster_similarity(a: set[str], b: set[str]) -> float:
     return max(token_jaccard(a, b), containment(a, b), containment(b, a))
 
 
+def cluster_key(item: dict) -> tuple:
+    """The pile a proposal is blocked within.
+
+    User memory is ONE store, not one per repo: the same user fact staged from
+    a doxa session and from a FINCH session is one duplicate. Keying user rows
+    on the project the session happened to run in spread a live pile's 21
+    user rows over four lanes labelled by repo, none of which is where they
+    would be written. Project rows key on the slug approve writes into.
+    """
+    if item.get("scope") == "user":
+        return ("user", None)
+    return (item.get("scope"), item.get("project"))
+
+
+def _home_slug() -> str:
+    return re.sub(r"[^A-Za-z0-9]", "-", str(Path.home()))
+
+
+def cluster_label(item: dict, home_slug: "str | None" = None) -> str:
+    """Where a cluster's rows would be written, as a human reads it.
+
+    The label used to be the slug's last dash-separated token, which is a
+    path fragment, not a name: `-home-docwilde-Schreibtisch-meeting-ai` read
+    as `ai`, `...-Ampiric-repo-re-ab-harness` as `harness`, the worktree
+    `...-doxa-worktrees-peers-menu` as `menu`, and a user row wore the
+    project of whichever session staged it -- so a pile read as a set of
+    memory stores that do not exist. A user row now says `user`; a project
+    row shows the slug approve writes into, minus the home-directory prefix
+    every slug on a machine shares, which is also the one form that tells a
+    moved checkout (`repo-docwilde-doxa`) from its stale predecessor
+    (`Schreibtisch-doxa`) instead of collapsing both to `doxa`.
+    """
+    if item.get("scope") == "user":
+        return "user"
+    slug = item.get("project") or ""
+    home = (_home_slug() if home_slug is None else home_slug).rstrip("-") + "-"
+    if slug.startswith(home):
+        slug = slug[len(home):]
+    return f"{item.get('scope') or '?'}/{slug or '?'}"
+
+
 def candidate_groups(items, threshold: float = None) -> list[list[str]]:
-    """Block into candidate groups: same (project, scope), lexical similarity
-    at or above `threshold`, transitively closed.
+    """Block into candidate groups: same cluster_key, lexical similarity at
+    or above `threshold`, transitively closed.
 
     Grouping is single-link over MEMBERS, never against the group's union of
     tokens. A union grows with every member it absorbs, so the Jaccard
@@ -169,7 +213,7 @@ def candidate_groups(items, threshold: float = None) -> list[list[str]]:
 
     by_key: dict = {}
     for pid, it in items:
-        by_key.setdefault((it.get("project"), it.get("scope")), []).append(pid)
+        by_key.setdefault(cluster_key(it), []).append(pid)
     for members in by_key.values():
         for i, a in enumerate(members):
             for b in members[i + 1:]:
@@ -309,9 +353,8 @@ def _cluster_pending(items) -> int:
           f"{len(skills)} skill proposal(s) listed separately below.")
     for i, g in enumerate(groups):
         it = meta[g[0]]
-        proj = (it.get("project") or "").rsplit("-", 1)[-1]
         rep = texts[g[0]][:120]
-        print(f"[C{i:02d}] n={len(g):3d} ({it.get('scope', '?')}/{proj}) {rep}")
+        print(f"[C{i:02d}] n={len(g):3d} ({cluster_label(it)}) {rep}")
         if len(g) > 1:
             print(f"       ids: {' '.join(g)}")
     for pid, it in skills:
