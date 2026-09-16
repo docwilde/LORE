@@ -1,0 +1,27 @@
+{
+  "description": "transcript/chunk (opt-in class), payload carries an array field.",
+  "op": {
+    "op_id": "adadefff-aaaa-4eae-8eae-aeaeaeaeaeae",
+    "machine_id": "1b1e1fbf-9c1e-4f0f-9c1e-9c1e9c1e9c1e",
+    "machine_seq": 8,
+    "lamport": 108,
+    "class": "transcript",
+    "op": "chunk",
+    "project_key": "github.com/docwilde/lore",
+    "payload": {
+      "session_id": "c0ffee00-0000-4000-8000-000000000001",
+      "from_line": 1,
+      "to_line": 3,
+      "lines": [
+        "{\"role\":\"user\"}",
+        "{\"role\":\"assistant\"}",
+        "{\"role\":\"user\"}"
+      ]
+    },
+    "mac": "b97cd05874fd0f970a4758f25d0a7d9f7945ec343d1790efebea107ddb0d2b97",
+    "created": "2026-09-16T09:46:00Z"
+  },
+  "canonical_bytes_hex": "5b2261646164656666662d616161612d346561652d386561652d616561656165616561656165222c2231623165316662662d396331652d346630662d396331652d396331653963316539633165222c382c3130382c227472616e736372697074222c226368756e6b222c226769746875622e636f6d2f646f6377696c64652f6c6f7265222c7b2266726f6d5f6c696e65223a312c226c696e6573223a5b227b5c22726f6c655c223a5c22757365725c227d222c227b5c22726f6c655c223a5c22617373697374616e745c227d222c227b5c22726f6c655c223a5c22757365725c227d225d2c2273657373696f6e5f6964223a2263306666656530302d303030302d343030302d383030302d303030303030303030303031222c22746f5f6c696e65223a337d5d",
+  "expected_mac_hex": "b97cd05874fd0f970a4758f25d0a7d9f7945ec343d1790efebea107ddb0d2b97",
+  "mac_should_verify": true
+}

@@ -1,0 +1,22 @@
+{
+  "description": "memory/add, user scope (project_key null).",
+  "op": {
+    "op_id": "8f14e45f-ceea-467e-9a9e-4b0b8b4f1a10",
+    "machine_id": "1b1e1fbf-9c1e-4f0f-9c1e-9c1e9c1e9c1e",
+    "machine_seq": 1,
+    "lamport": 101,
+    "class": "memory",
+    "op": "add",
+    "project_key": null,
+    "payload": {
+      "text": "Prefers concise commit messages.",
+      "via": "interactive",
+      "writer": "approved"
+    },
+    "mac": "52611e5972dd512c787b0fd61b6c463daf1c6589d4d38d5e1e587c14e600f0a8",
+    "created": "2026-09-14T17:30:09Z"
+  },
+  "canonical_bytes_hex": "5b2238663134653435662d636565612d343637652d396139652d346230623862346631613130222c2231623165316662662d396331652d346630662d396331652d396331653963316539633165222c312c3130312c226d656d6f7279222c22616464222c6e756c6c2c7b2274657874223a225072656665727320636f6e6369736520636f6d6d6974206d657373616765732e222c22766961223a22696e746572616374697665222c22777269746572223a22617070726f766564227d5d",
+  "expected_mac_hex": "52611e5972dd512c787b0fd61b6c463daf1c6589d4d38d5e1e587c14e600f0a8",
+  "mac_should_verify": true
+}

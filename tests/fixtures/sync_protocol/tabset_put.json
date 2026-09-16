@@ -1,0 +1,28 @@
+{
+  "description": "tabset/put (opt-in class), DOXA record keyed by (project_key, machine_id).",
+  "op": {
+    "op_id": "bebeffff-bbbb-4fbf-8fbf-bfbfbfbfbfbf",
+    "machine_id": "1b1e1fbf-9c1e-4f0f-9c1e-9c1e9c1e9c1e",
+    "machine_seq": 9,
+    "lamport": 109,
+    "class": "tabset",
+    "op": "put",
+    "project_key": "github.com/docwilde/lore",
+    "payload": {
+      "project_key": "github.com/docwilde/lore",
+      "machine_id": "1b1e1fbf-9c1e-4f0f-9c1e-9c1e9c1e9c1e",
+      "record": {
+        "scope_key": "a1b2c3d4e5f6a1b2c3d4e5f6",
+        "tabs": [
+          "src/main.py",
+          "docs/sync-protocol.md"
+        ]
+      }
+    },
+    "mac": "7fe690aa23b3e6370e832697dce58af10006d910cf0de0dc7b28ffa88cd0691b",
+    "created": "2026-09-16T09:47:00Z"
+  },
+  "canonical_bytes_hex": "5b2262656265666666662d626262622d346662662d386662662d626662666266626662666266222c2231623165316662662d396331652d346630662d396331652d396331653963316539633165222c392c3130392c22746162736574222c22707574222c226769746875622e636f6d2f646f6377696c64652f6c6f7265222c7b226d616368696e655f6964223a2231623165316662662d396331652d346630662d396331652d396331653963316539633165222c2270726f6a6563745f6b6579223a226769746875622e636f6d2f646f6377696c64652f6c6f7265222c227265636f7264223a7b2273636f70655f6b6579223a22613162326333643465356636613162326333643465356636222c2274616273223a5b227372632f6d61696e2e7079222c22646f63732f73796e632d70726f746f636f6c2e6d64225d7d7d5d",
+  "expected_mac_hex": "7fe690aa23b3e6370e832697dce58af10006d910cf0de0dc7b28ffa88cd0691b",
+  "mac_should_verify": true
+}

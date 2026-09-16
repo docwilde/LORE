@@ -1,0 +1,21 @@
+{
+  "description": "skill/put, user scope (skills are machine-wide, not project-scoped).",
+  "op": {
+    "op_id": "8b8bcfef-8888-4c8c-8c8c-8c8c8c8c8c8c",
+    "machine_id": "1b1e1fbf-9c1e-4f0f-9c1e-9c1e9c1e9c1e",
+    "machine_seq": 6,
+    "lamport": 106,
+    "class": "skill",
+    "op": "put",
+    "project_key": null,
+    "payload": {
+      "name": "doxa-lore-release",
+      "body": "Ship a release through the protected PR flow.\n"
+    },
+    "mac": "6dd38340fd4c8e24af1ab6786500f7b45b121508df63383afa8901f1c7ff9257",
+    "created": "2026-09-14T17:35:00Z"
+  },
+  "canonical_bytes_hex": "5b2238623862636665662d383838382d346338632d386338632d386338633863386338633863222c2231623165316662662d396331652d346630662d396331652d396331653963316539633165222c362c3130362c22736b696c6c222c22707574222c6e756c6c2c7b22626f6479223a225368697020612072656c65617365207468726f756768207468652070726f74656374656420505220666c6f772e5c6e222c226e616d65223a22646f78612d6c6f72652d72656c65617365227d5d",
+  "expected_mac_hex": "6dd38340fd4c8e24af1ab6786500f7b45b121508df63383afa8901f1c7ff9257",
+  "mac_should_verify": true
+}
