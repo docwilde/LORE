@@ -25,6 +25,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1755,6 +1756,10 @@ def stage_proposals(data: dict, slug: str, session_id: str,
         # slug=cwd's-project below -- ISSUE #40, the whole point of the fix.
         item = {"created": utcnow(), "project": slug, "session_id": session_id,
                 "derived_by": derived_by or agent_id()} | item
+        # sync spec PR 2: minted last, after the merge, so nothing an item
+        # carries can collide with or override the staging-time uid -- same
+        # rule gate.stage_write() follows for CLI-staged proposals.
+        item["uid"] = str(uuid.uuid4())
         n = staged
         while True:
             try:

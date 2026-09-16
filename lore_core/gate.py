@@ -60,6 +60,7 @@ import hashlib
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 
 from .config import ROOT, agent_id, one_line, utcnow
@@ -211,6 +212,13 @@ def stage_write(item: dict) -> str:
     pdir.mkdir(parents=True, exist_ok=True)
     stamp = utcnow().replace("-", "").replace(":", "").replace("T", "").rstrip("Z")
     payload = {"created": utcnow(), "derived_by": agent_id()} | dict(item)
+    # sync spec PR 2 ("ids that cannot collide"): a staged proposal travels
+    # on the wire like everything else, so it gets a uid in the payload at
+    # staging time. Minted AFTER the merge so `item` can never supply its
+    # own and collide with a later re-stage. The FILENAME stays the local
+    # stamp-sort id -- resolve_ids() depends on it and it never leaves this
+    # machine.
+    payload["uid"] = str(uuid.uuid4())
     n = 0
     while True:
         try:
