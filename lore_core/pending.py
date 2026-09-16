@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from .beliefs import belief_insert, belief_retract, belief_subject
-from .config import ROOT, SKILLS_DIR, project_slug, utcnow
+from .config import ROOT, SKILLS_DIR, SKILL_NAME_RE, project_slug, utcnow, valid_skill_name
 from .filemap import filemap_add, filemap_remove, filemap_replace
 from .gate import pending_op_project_key
 from .memory import memory_add, memory_move, memory_remove, memory_replace
@@ -497,39 +497,76 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
         else:
             err = memory_add(item["scope"], slug, item["text"], via="approved")
         return err
-    target = SKILLS_DIR / item["name"] / "SKILL.md"
+    # Everything else is a skill proposal. Its "name" is AUTHORED BY A MODEL
+    # (deriver.stage_proposals) or by whatever else staged it, and approval
+    # is one keystroke -- exactly what the write gate exists to distrust.
+    # stage_write / stage_proposals already refuse an unsafe name before it
+    # is written to pending/ (defence in depth's OUTER layer); this is the
+    # INNER layer, so an item that reached pending/ some other way -- an
+    # older pile, a hand-edited file, a future staging path that forgets the
+    # check -- still cannot make apply touch anything outside SKILLS_DIR.
+    name = item.get("name")
+    if not valid_skill_name(name):
+        return (f"skill proposal has an unsafe name ({name!r}) -- must match"
+                f" {SKILL_NAME_RE.pattern!r}; refusing to touch the filesystem for it"
+                f" (the proposal stays pending)")
+    try:
+        target = _resolve_contained(SKILLS_DIR, SKILLS_DIR / name / "SKILL.md")
+    except ValueError:
+        return (f"skill {name!r} resolves outside SKILLS_DIR -- refusing to apply"
+                f" (the proposal stays pending)")
     if item.get("action") == "retire":
         if not target.exists():
-            return f"skill {item['name']} is not installed — nothing to retire"
+            return f"skill {name} is not installed — nothing to retire"
         if "lore-learned" not in target.read_text(encoding="utf-8")[:600] and not force:
-            return f"skill {item['name']} was not installed by lore (use --force to retire anyway)"
-        graveyard = ROOT / "skills-retired" / f"{item['name']}-{utcnow().replace(':', '')}"
+            return f"skill {name} was not installed by lore (use --force to retire anyway)"
+        graveyard_dir = ROOT / "skills-retired"
+        try:
+            graveyard = _resolve_contained(
+                graveyard_dir, graveyard_dir / f"{name}-{utcnow().replace(':', '')}")
+        except ValueError:
+            return (f"skill {name!r} retire target resolves outside skills-retired --"
+                    f" refusing to apply (the proposal stays pending)")
         graveyard.parent.mkdir(parents=True, exist_ok=True)
         target.parent.rename(graveyard)
-        print(f"retired {item['name']} -> {graveyard}")
-        _append_skill_op("remove", item["name"], None)
+        print(f"retired {name} -> {graveyard}")
+        _append_skill_op("remove", name, None)
         return None
     old = None
     if target.exists():
         old = target.read_text(encoding="utf-8")
         overwritable = item.get("action") == "update" and "lore-learned" in old[:600]
         if not (overwritable or force):
-            return f"skill {item['name']} already exists at {target} (use --force to overwrite)"
+            return f"skill {name} already exists at {target} (use --force to overwrite)"
     target.parent.mkdir(parents=True, exist_ok=True)
-    desc = (item.get("description") or item["name"]).replace('"', "'")
+    desc = (item.get("description") or name).replace('"', "'")
     new = (
-        f'---\nname: {item["name"]}\ndescription: "{desc} (lore-learned)"\n---\n\n'
+        f'---\nname: {name}\ndescription: "{desc} (lore-learned)"\n---\n\n'
         f'{item["body"]}\n'
     )
     if old is not None:
         diff = list(difflib.unified_diff(
             old.splitlines(), new.splitlines(),
-            fromfile=f"{item['name']} (installed)", tofile=f"{item['name']} (update)", lineterm="",
+            fromfile=f"{name} (installed)", tofile=f"{name} (update)", lineterm="",
         ))[:60]
         print("\n".join(diff))
     target.write_text(new, encoding="utf-8")
-    _append_skill_op("put", item["name"], item["body"])
+    _append_skill_op("put", name, item["body"])
     return None
+
+
+def _resolve_contained(base: Path, target: Path) -> Path:
+    """Resolve `target` and assert it sits inside `base` -- Path.resolve()
+    plus relative_to(), never a string-prefix compare (which would let
+    "/skills-evil" pass a base of "/skills"). The SECOND, independent layer
+    against a skill-name path traversal: valid_skill_name (config.py)
+    already rejects any name that could produce "/" or ".." -- this instead
+    catches what a name pattern cannot, such as a symlink planted inside
+    `base` itself. Raises ValueError when `target` resolves outside `base`.
+    """
+    resolved = target.resolve()
+    resolved.relative_to(base.resolve())
+    return resolved
 
 
 def _append_skill_op(op: str, name: str, body: "str | None") -> None:
