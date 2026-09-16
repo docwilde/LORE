@@ -1,8 +1,12 @@
 # One memory on every machine: sync through an op log and a hub — specification
 
-Status: **draft for review**. Nothing implemented. Stacked on PR #64
-(`feat/project-move`, the 0.49.0 release), because the identity work in that
-PR is the first half of the identity problem this document finishes.
+Status: **accepted 2026-09-16, in implementation**. The identity work this
+document stacked on shipped as 0.49.0 (`lore project move`). Owner's decisions
+on the open questions at the end: all ten recommendations adopted, with three
+amendments. Transport B (Tailscale peer-to-peer) is IN scope rather than
+deferred -- sync offers both a credentials hub and a peer-to-peer path, not one
+or the other. `docwilde/lore-hub` is PRIVATE for now. The hub is verified
+against a locally deployed instance; the Hetzner deployment waits.
 
 ## The problem
 
@@ -508,12 +512,12 @@ must be told which peer to trust as its starting point, and that peer must
 be up. Every one of those is solved by an always-on node holding the full
 log — which is a hub with tailscale auth and no Postgres.
 
-**Decision: build A, keep the seam for B.** The client's transport is one
+**Decision (amended 2026-09-16): build A first, then B on the same seam.** The client's transport is one
 class with `push(ops)`, `pull(cursor)`, `whoami()`; the hub client is the
 first implementation and a peer client would be the second. Nothing in
 the op log, the merge rules or the CLI knows which one it is talking to.
-B is deferred, not rejected, and its cost when wanted is one transport
-class plus `sync serve`.
+B follows A rather than waiting for a reason to exist, and its cost is one
+transport class plus `sync serve`.
 
 ## The client
 
@@ -701,9 +705,9 @@ PRs stack on #64 until it merges, then rebase.
 | 4 | LORE | `feat/sync-apply` | apply engine, canonical order, all merge rules, HMAC, `sync conflicts` in status | every unit test above green |
 | 5 | LORE | `feat/sync-hub-client` | transport class, push/pull/bootstrap/login, detached pull at inject, push after `worker_run`; `docs/sync-protocol.md`; manual + CHANGELOG | integration suite green against a local hub; hook timings unchanged (measure inject before/after) |
 | 6 | lore-hub | `main` (new repo) | API, Postgres schema, compose, token admin, tailscale mode, CI with the contract suite | contract suite green; security assertions green against the broken build |
-| 7 | lore-hub | `ops/hetzner` | compose under `/opt/stacks/lore-hub`, `tailscale serve`, `pg_dump` cron, runbook | laptop ↔ workstation converge through the deployed hub; a sandbox session pulls with a token |
+| 7 | lore-hub | `ops/local` | compose brought up locally, `pg_dump` cron, runbook | two `LORE_ROOT`s on this machine converge through the local hub; the Hetzner deployment is a later, separate PR |
 | 8 | DOXA | `feat/lore-sync` | pin bump, tabset `project_key`/`machine_id`, worktree `machine_id`, status bar | `test_tabsets.py`/`test_worktrees.py` green; restore unchanged with sync off |
-| — | LORE | `feat/sync-peer` | Transport B: `sync serve`, peer client | deferred |
+| 9 | LORE | `feat/sync-peer` | Transport B: `sync serve`, peer client | same wire contract as A; two machines converge with no hub |
 
 ## Open decisions
 
@@ -715,7 +719,7 @@ PRs stack on #64 until it merges, then rebase.
    into curated memory; shipping it without the containment that the
    existing write path has would be the first LORE release where
    something steers the agent that nobody approved.
-3. **Server repo name.** Recommend `docwilde/lore-hub`, AGPL like LORE,
+3. **Server repo name.** DECIDED: `docwilde/lore-hub`, **private** for now, AGPL like LORE,
    Python 3.12, FastAPI + psycopg 3 + uvicorn, `postgres:17` in compose.
    A stdlib `http.server` hub was considered for symmetry with
    `lore_core` and rejected: the hub is not a library, and a real ASGI
