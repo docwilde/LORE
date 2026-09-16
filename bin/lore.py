@@ -504,6 +504,20 @@ def main() -> int:
     mp.add_argument("--to", required=True, help="destination: slug, repo name, or path")
     mp.set_defaults(fn=cmd_memory, mcmd="move")
 
+    sp = sub.add_parser("project",
+                        help="project identity: move everything filed under one slug to another")
+    psub = sp.add_subparsers(dest="pcmd", required=True)
+    pp = psub.add_parser(
+        "move", help="re-file beliefs, evidence, the session index, staged proposals,"
+                     " MEMORY.md and the file map from OLD into NEW -- a moved checkout's"
+                     " old slug, or a bare belief subject, into the project it is about")
+    pp.add_argument("old", help="source: a project slug (or name), or a bare belief subject."
+                                " A slug's leading '-' reads as a flag: drop it"
+                                " (home-x-doxa) or put -- before the positionals")
+    pp.add_argument("new", help="destination: a path that exists, a known slug, or a name")
+    pp.add_argument("--dry-run", action="store_true", help="count what would move; write nothing")
+    pp.set_defaults(fn=cmd_project, pcmd="move")
+
     sp = sub.add_parser("filemap",
                         help="project file map (path — purpose): show/add/replace/remove")
     fsub = sp.add_subparsers(dest="fcmd", required=True)
