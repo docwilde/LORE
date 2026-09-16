@@ -27,6 +27,7 @@ Run: python3 tests/test_sync_protocol.py
 import hashlib
 import hmac
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -159,12 +160,22 @@ class TestCanonicalBytesMatchTheDocument(unittest.TestCase):
                 )
 
     def test_canonical_bytes_contain_no_insignificant_whitespace(self):
+        """S2.2: no whitespace between tokens. Checked structurally, not by
+        a raw substring search -- a payload string is free to contain its
+        own ", " or ": " (several fixtures' text fields do), which a naive
+        substring check would misreport as a serializer-inserted space."""
         for name, fx in FIXTURES.items():
             with self.subTest(fixture=name):
                 text = canonical_bytes(fx["op"]).decode("utf-8")
-                self.assertNotIn(", ", text, f"{name}: space after a comma")
-                self.assertNotIn(": ", text, f"{name}: space after a colon")
                 self.assertNotIn("\n", text, f"{name}: newline in canonical bytes")
+                self.assertNotIn("\t", text, f"{name}: tab in canonical bytes")
+                # Strip string literals (JSON strings, respecting \" and \\
+                # escapes) so only structural characters remain, then check
+                # those for the separators a non-compact encoder inserts.
+                structure = re.sub(r'"(?:[^"\\]|\\.)*"', '""', text)
+                self.assertNotIn(", ", structure, f"{name}: space after a structural comma")
+                self.assertNotIn(": ", structure, f"{name}: space after a structural colon")
+                self.assertNotIn("  ", structure, f"{name}: repeated space outside strings")
 
     def test_canonical_bytes_is_a_flat_8_element_array(self):
         for name, fx in FIXTURES.items():
