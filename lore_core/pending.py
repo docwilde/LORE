@@ -391,6 +391,15 @@ def cmd_pending(args) -> int:
         elif item.get("kind") == "belief":
             print(f"{pid}  belief/{item.get('subject', '?')}  {item.get('action', 'add')}")
             print(f"    {item.get('claim') or 'id ' + str(item.get('id'))}")
+        elif item.get("kind") == "sync":
+            # docs/sync-protocol.md S5.2: an op that did not verify is visible
+            # here or it is nowhere. Say plainly that it was NOT applied and
+            # why -- an unverified op is the one thing in this pile that could
+            # be an attacker's, and the tag is the whole containment.
+            op = item.get("op") or {}
+            print(f"{pid}  sync/UNVERIFIED  {op.get('class', '?')}/{op.get('op', '?')}")
+            print(f"    !! not applied: {item.get('reason', 'mac did not verify')}")
+            print(f"    from machine {op.get('machine_id', '?')}")
         else:
             print(f"{pid}  skill/{item.get('action', 'add')}  {item.get('name')}")
             print(f"    {item.get('description')}")
@@ -504,6 +513,18 @@ def _quarantine_corrupt(pid: str, src: Path, raw: str, exc: json.JSONDecodeError
 
 
 def apply_item(pid: str, item: dict, force: bool) -> str | None:
+    if item.get("kind") == "sync":
+        # An op whose MAC was missing or wrong (docs/sync-protocol.md S5.2):
+        # staged, never applied, until a human says so -- and this is the
+        # human saying so. Local import: sync_apply sits ABOVE this module in
+        # the dependency graph (it drives apply_item's own write paths), so
+        # importing it at module level would close a cycle. Same pattern
+        # gate.append_pending_stage_op already uses for its store import.
+        from .sync_apply import apply_op_after_approval
+        op = item.get("op")
+        if not isinstance(op, dict):
+            return "this sync proposal carries no op to apply"
+        return apply_op_after_approval(op)
     if item.get("kind") == "filemap":
         # same gate as memory: cap-enforced write into the project's map;
         # filemap_add updates the row in place when the path is already
