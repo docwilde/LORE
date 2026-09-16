@@ -606,10 +606,17 @@ CONTRADICTIONS_TO_DORMANT = 2
 
 def record_outcome(conn: sqlite3.Connection, belief_id: int, event: str, source: str,
                    session_id: "str | None" = None, agent: "str | None" = None,
-                   note: "str | None" = None) -> None:
+                   note: "str | None" = None, *, uid: "str | None" = None) -> None:
     """One ledger row; the single write path for every source (dream/user/audit),
-    so the dormancy trigger below cannot be bypassed by one of them."""
-    outcome_uid = str(uuid.uuid4())
+    so the dormancy trigger below cannot be bypassed by one of them.
+
+    uid (sync spec PR 4): mint a fresh uuid4 when None (every ordinary
+    caller). A caller replaying a remote `outcome` op passes the op's own uid,
+    so the ledger row this machine writes carries the SAME wire identity the
+    authoring machine minted -- the same rule belief_insert's `uid` parameter
+    already applies to a replayed `insert`, and for the same reason: a row
+    whose uid differs per machine is a row the log cannot reproduce."""
+    outcome_uid = uid or str(uuid.uuid4())
     note_text = one_line(note or "")[:300] or None
     agent_val = agent or agent_id()
     conn.execute(

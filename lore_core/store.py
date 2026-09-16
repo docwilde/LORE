@@ -267,6 +267,31 @@ def db_connect() -> sqlite3.Connection:
         "CREATE TABLE IF NOT EXISTS sync_belief_aliases("
         "uid TEXT PRIMARY KEY, belief_id INTEGER NOT NULL)"
     )
+    # CONFLICT REGISTER (sync spec PR 4): sync.md's memory/filemap rule 1 --
+    # "the file now has two entries, and `lore sync status` lists the pair
+    # under conflicts until one is removed by hand". A model is never asked to
+    # pick, so the pair has to be recorded somewhere a human is shown it.
+    # Keyed by the LOSING op_id so re-applying a page cannot double-report one
+    # conflict, and read back through sync_apply.conflict_rows, which drops a
+    # pair whose two texts are no longer both present -- resolution is the
+    # user editing the file, not a command that has to be remembered.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_conflicts("
+        "kind TEXT NOT NULL, bucket TEXT NOT NULL, old_key TEXT NOT NULL,"
+        " a_text TEXT NOT NULL, b_text TEXT NOT NULL, op_id TEXT NOT NULL,"
+        " created TEXT NOT NULL, PRIMARY KEY(kind, bucket, old_key, op_id))"
+    )
+    # REMOTE RECORDS (sync spec PR 4): the opt-in `tabset`/`worktree` classes,
+    # whose rule is "there is nothing to merge, only to show" -- keyed by
+    # (project_key, machine_id), a machine only ever restores its own. LORE
+    # stores the record verbatim and never interprets it; DOXA owns both
+    # formats and is what reads this back (sync.md's PR 8).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_remote_records("
+        "class TEXT NOT NULL, project_key TEXT, machine_id TEXT NOT NULL,"
+        " record TEXT NOT NULL, updated TEXT NOT NULL,"
+        " PRIMARY KEY(class, project_key, machine_id))"
+    )
     return conn
 
 

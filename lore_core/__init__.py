@@ -25,6 +25,8 @@ in deriver.py's docstring):
     dreamer    tier 3 dreamer role: belief reconciliation, promotions
     dialectic  `lore ask` / `lore consult` evidence-gathering
     pending    staged proposals: list/approve/reject/archive
+    sync_apply sync spec PR 4: the apply engine -- canonical order, the
+               per-class merge rules, MAC verification on receipt
     context    memory snapshot rendering + SessionStart/refresh/MOTD
 
 Off that graph, importing nothing from the package and imported by
@@ -51,6 +53,7 @@ from .deriver import *  # noqa: F401,F403
 from .dreamer import *  # noqa: F401,F403
 from .dialectic import *  # noqa: F401,F403
 from .pending import *  # noqa: F401,F403
+from .sync_apply import *  # noqa: F401,F403
 from .relocate import *  # noqa: F401,F403
 from .context import *  # noqa: F401,F403
 
@@ -67,6 +70,7 @@ from . import deriver as _deriver
 from . import dreamer as _dreamer
 from . import dialectic as _dialectic
 from . import pending as _pending
+from . import sync_apply as _sync_apply
 from . import relocate as _relocate
 from . import context as _context
 
@@ -84,6 +88,7 @@ __all__ = [
     *_dreamer.__all__,
     *_dialectic.__all__,
     *_pending.__all__,
+    *_sync_apply.__all__,
     *_relocate.__all__,
     *_context.__all__,
 ]

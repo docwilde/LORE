@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.54.0 — 2026-09-16
+
+- New **`lore_core/sync_apply.py`**: applying a pulled op is a pure function of `(local state, op)`. Canonical order is `(lamport, machine_id, machine_seq)` and never a wall clock, so every node converges alike.
+- **An op whose `mac` is missing or wrong is staged `unverified`, never applied** — as is every op on a receiver holding no key. Checked against a build with the check removed, where the same forged entry reaches `USER.md`.
+- Every merge rule in the design: memory and file map add/remove/replace with all three conflict cases, belief insert/fold/supersede/edge/outcome, pending stage/resolve, skill put. An edge whose endpoint is unknown waits and retries.
+- **`suppress_append()`**: applying a remote op authors no op of its own. Without it each machine re-authored what it received, amplifying without bound and poisoning its own push cursor.
+- **`lore sync status`** gains `waiting:`, `unverified:` and `conflicts:` sections, backed by new `sync_conflicts` and `sync_remote_records` tables.
+- Nothing syncs yet: no transport exists, so this only applies ops handed to it. Tests: `tests/test_sync_merge.py` (19, new). Suite 535.
+
 ## 0.53.0 — 2026-09-16
 
 - **`lore approve`** refuses a skill proposal whose name is not one lowercase, hyphen-separated path component (**`SKILL_NAME_RE`**). A model-authored name such as `../x` could write outside the skills directory on approval.

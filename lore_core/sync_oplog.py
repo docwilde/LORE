@@ -32,6 +32,7 @@ against them (see tests/test_sync_oplog.py) rather than re-deriving its own
 answer.
 """
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -56,6 +57,8 @@ __all__ = [
     'get_or_create_machine',
     'resolve_project_key_for_slug',
     'append_op',
+    'suppress_append',
+    'observe_lamport',
     'unpushed_op_count',
     'peer_rows',
 ]
@@ -192,6 +195,30 @@ def _bump_lamport(conn: sqlite3.Connection, machine_id: str) -> int:
     return new
 
 
+def observe_lamport(conn: sqlite3.Connection, machine_id: str, seen: int) -> int:
+    """RECEIVER side of the clock (sync spec PR 4): raise this machine's own
+    Lamport to `max(own, seen)` and return it.
+
+    sync.md "Ordering": `lamport = max(own, highest seen) + 1` on write, and
+    "the receiver bumps its own clock past every op it applies". The `+ 1`
+    belongs to the WRITE (_bump_lamport, own + 1), so what a receiver stores
+    is the highest value it has SEEN -- which makes the next locally authored
+    op sort after every op this machine has ever ingested, on every route the
+    ops took. Never lowers the clock: a peer that is behind must not drag this
+    machine's history backwards.
+    """
+    row = conn.execute(
+        "SELECT lamport FROM sync_machine WHERE machine_id = ?", (machine_id,)
+    ).fetchone()
+    current = row[0] if row else 0
+    if seen > current:
+        conn.execute(
+            "UPDATE sync_machine SET lamport = ? WHERE machine_id = ?", (seen, machine_id)
+        )
+        return seen
+    return current
+
+
 def _next_machine_seq(conn: sqlite3.Connection, machine_id: str) -> int:
     """Gap-free per machine_id, starting at 1 (docs/sync-protocol.md S3)."""
     row = conn.execute(
@@ -238,6 +265,31 @@ def _scrub_payload(value):
     return value
 
 
+# Re-entrant append suppression, for the one caller that must NOT grow the
+# log: the apply engine (sync_apply.py, PR 4). Every production write path
+# appends on its way out, so applying a pulled op would author a SECOND op --
+# this machine's own -- describing the same mutation. The peer would then
+# apply that, author a third, and so on: an amplification loop that also
+# poisons the push cursor, since a re-authored op is indistinguishable from
+# this machine's real work. A depth counter rather than a flag so nested
+# applies (an approved proposal that itself applies an op) unwind correctly.
+# Not thread-safe by design: lore_core is single-threaded per process, and a
+# lock here would imply a concurrency this package does not have.
+_suppress_depth = 0
+
+
+@contextlib.contextmanager
+def suppress_append():
+    """Within this block `append_op` writes nothing and returns None. See the
+    comment above for why the apply path must run inside it."""
+    global _suppress_depth
+    _suppress_depth += 1
+    try:
+        yield
+    finally:
+        _suppress_depth -= 1
+
+
 def append_op(
     conn: sqlite3.Connection, class_: str, op: str,
     project_key: "str | None", payload: dict,
@@ -270,7 +322,7 @@ def append_op(
     item 3, not inside the same transaction, because there is no shared
     transaction to be inside: the file write already happened.
     """
-    if not class_enabled(class_):
+    if _suppress_depth or not class_enabled(class_):
         return None
     machine_id, _label = get_or_create_machine(conn)
     lamport = _bump_lamport(conn, machine_id)
