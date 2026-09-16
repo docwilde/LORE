@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.50.0 — 2026-09-16
+
+- Every belief and every outcome row carries a **`uid`** (uuid4) beside its integer id. The integer stays the local join key; the uid is the name a row can travel under. Two ALTER-inside-except migrations, each with a `CREATE UNIQUE INDEX`.
+- Existing rows **backfill once**, at the next `db_connect()`. Measured on a synthetic store of 8,000 beliefs and 20,000 outcomes: 0.098s for the migration, 0.0006s for the second open, which does nothing.
+- The backfill `UPDATE` commits explicitly. DDL auto-commits, the update does not, so a connection closed without another write would have rolled the backfill back while the ALTER stayed done.
+- Staged proposals carry a `uid` in their payload (**`stage_write`**, **`stage_proposals`**). The `<stamp>-<nn>.json` filename is unchanged, because `resolve_ids` sorts on it.
+- **`belief_edges`** and **`belief_edge_assertions`** get no uid: on the wire they are addressed as `(src_uid, dst_uid, rel)`, which their composite key already means.
+- Nothing syncs yet, and nothing changes for a reader: `lore belief show` and `lore belief list` print the integer id exactly as before. This is groundwork for the op log.
+- Tests: `tests/test_belief_uid.py` (15, new). Suite 433.
+
 ## 0.49.0 — 2026-09-12
 
 - New **`lore project move <old> <new> [--dry-run]`** re-files a project identity: beliefs, evidence, session index, staged proposals, `MEMORY.md`, file map. A slug is a flattened path; a moved checkout leaves its store under a dead slug.
