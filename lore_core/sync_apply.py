@@ -81,6 +81,15 @@ from .memory import (
     memory_replace,
     read_entries,
 )
+# Top level, not deferred to the call site: `pending` does NOT import this
+# module at module level (its one reference, in apply_item, is a deliberate
+# call-time import precisely because the cycle runs the other way), so there
+# is nothing here to break. A deferred import would resolve through
+# sys.modules at CALL time, which in a harness holding two lore_core
+# instances -- exactly what tests/test_sync_merge.py builds to play two
+# machines -- can resolve to the WRONG instance and archive a proposal in
+# another machine's ROOT.
+from .pending import archive
 from .store import db_connect, resolve_or_create_synthetic_slug
 from .sync_oplog import (
     compute_mac,
@@ -666,7 +675,6 @@ def _apply_pending(conn: sqlite3.Connection, op: dict) -> bool:
         return True
 
     if verb == "resolve":
-        from .pending import archive
         pdir = ROOT / "pending"
         if not pdir.exists():
             return True
