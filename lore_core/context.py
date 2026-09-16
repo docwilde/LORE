@@ -358,6 +358,23 @@ def render_banner(stats: list[str]) -> str:
     return "\n".join(lines + [o(l) for l in BANNER_MASCOT])
 
 
+def _spawn_relocate(synthetic: str, cwd: str) -> None:
+    """Fire-and-forget `lore project move <synthetic> <cwd>`, detached the
+    same way _maybe_spawn_midsession_review spawns background work -- output
+    discarded, this process does not wait. A dedicated function (rather than
+    calling subprocess.Popen inline) so tests can intercept the spawn
+    without touching the subprocess module's Popen globally: subprocess.run
+    -- which project_key's own git calls use -- is implemented ON TOP OF
+    Popen, so patching it module-wide would break the git calls this same
+    reconciliation makes moments earlier."""
+    import subprocess
+    cli = str(Path(__file__).resolve().parents[1] / "bin" / "lore.py")
+    subprocess.Popen(
+        [sys.executable, cli, "project", "move", synthetic, cwd],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, start_new_session=True, env=dict(os.environ))
+
+
 def _reconcile_project_identity(cwd: str) -> None:
     """PR1 of docs/plans/sync.md's sync spec ('A project identity that
     survives the machine'), the part `lore inject` owns: this checkout's
@@ -389,18 +406,13 @@ def _reconcile_project_identity(cwd: str) -> None:
         synthetic = row[0]
         if synthetic == slug or not synthetic.startswith("sync-"):
             return
-        import subprocess
-        cli = str(Path(__file__).resolve().parents[1] / "bin" / "lore.py")
         # The destination is CWD, not the already-computed slug: `lore project
         # move`'s target resolves a bare slug only when it is already KNOWN
         # (a memory dir or a transcript dir exists for it, per
         # resolve_subject_slug) — exactly what a brand-new checkout, filing
         # its very first session, does not yet have. A path that exists on
         # disk resolves unconditionally.
-        subprocess.Popen(
-            [sys.executable, cli, "project", "move", synthetic, cwd],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL, start_new_session=True, env=dict(os.environ))
+        _spawn_relocate(synthetic, cwd)
     except (OSError, sqlite3.Error):
         pass
 

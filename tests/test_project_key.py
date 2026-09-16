@@ -229,12 +229,9 @@ class SyntheticProjectRelocatesOnInject(unittest.TestCase):
         checkout = _make_repo(Path(TMP) / "real-checkout", origin=self.ORIGIN)
         real_slug = CONFIG.project_slug(str(checkout))
 
-        with mock.patch("subprocess.Popen") as popen:
+        with mock.patch.object(CONTEXT, "_spawn_relocate") as spawn:
             CONTEXT._reconcile_project_identity(str(checkout))
-        popen.assert_called_once()
-        argv = popen.call_args.args[0]
-        cli = str(Path(CONTEXT.__file__).resolve().parents[1] / "bin" / "lore.py")
-        self.assertEqual(argv, [sys.executable, cli, "project", "move", synthetic, str(checkout)])
+        spawn.assert_called_once_with(synthetic, str(checkout))
 
         # run what the detached subprocess would have run, in-process, so the
         # test is deterministic
@@ -254,9 +251,9 @@ class SyntheticProjectRelocatesOnInject(unittest.TestCase):
         )
 
         # second inject: the mapping already points at the real slug
-        with mock.patch("subprocess.Popen") as popen2:
+        with mock.patch.object(CONTEXT, "_spawn_relocate") as spawn2:
             CONTEXT._reconcile_project_identity(str(checkout))
-        popen2.assert_not_called()
+        spawn2.assert_not_called()
 
     def test_cmd_inject_itself_triggers_the_move_without_blocking(self):
         """The public entry point (SessionStart hook), not just the helper."""
@@ -264,12 +261,12 @@ class SyntheticProjectRelocatesOnInject(unittest.TestCase):
         checkout = _make_repo(Path(TMP) / "real-checkout-2", origin=self.ORIGIN)
         out = io.StringIO()
         args = SimpleNamespace(cwd=str(checkout), scope=None)
-        with mock.patch("subprocess.Popen") as popen, \
+        with mock.patch.object(CONTEXT, "_spawn_relocate") as spawn, \
                 mock.patch.object(CONTEXT, "read_hook_input", return_value={}), \
                 contextlib.redirect_stdout(out):
             rc = lore.cmd_inject(args)
         self.assertEqual(rc, 0)
-        popen.assert_called_once()
+        spawn.assert_called_once_with(synthetic, str(checkout))
         # cmd_inject still produced its hook JSON -- the move never blocked it
         self.assertIn("additionalContext", out.getvalue())
 
@@ -278,9 +275,9 @@ class SyntheticProjectRelocatesOnInject(unittest.TestCase):
         author and never calls out to relocate."""
         checkout = _make_repo(Path(TMP) / "plain-checkout",
                               origin="git@github.com:docwilde/plain-project.git")
-        with mock.patch("subprocess.Popen") as popen:
+        with mock.patch.object(CONTEXT, "_spawn_relocate") as spawn:
             CONTEXT._reconcile_project_identity(str(checkout))
-        popen.assert_not_called()
+        spawn.assert_not_called()
         conn = lore.db_connect()
         row = conn.execute(
             "SELECT slug FROM sync_projects WHERE project_key = ?",
@@ -289,9 +286,9 @@ class SyntheticProjectRelocatesOnInject(unittest.TestCase):
 
         # running it again is still a no-op -- the author's own record does
         # not get re-triggered as a move
-        with mock.patch("subprocess.Popen") as popen2:
+        with mock.patch.object(CONTEXT, "_spawn_relocate") as spawn2:
             CONTEXT._reconcile_project_identity(str(checkout))
-        popen2.assert_not_called()
+        spawn2.assert_not_called()
 
 
 if __name__ == "__main__":
