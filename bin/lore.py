@@ -230,6 +230,10 @@ def cmd_config(args) -> int:
 
 def cmd_doctor(args) -> int:
     ok = True
+    cwd = args.cwd or os.getcwd()
+    slug = project_slug(cwd)
+    key = project_key(cwd)
+    print(f"ok    project: {slug}  [key: {key}]")
     try:
         sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(x)")
         print("ok    sqlite FTS5")
@@ -800,6 +804,7 @@ def main() -> int:
     sp.set_defaults(fn=cmd_provenance)
 
     sp = sub.add_parser("doctor", help="environment checks")
+    sp.add_argument("--cwd")
     sp.set_defaults(fn=cmd_doctor)
 
     sp = sub.add_parser(
