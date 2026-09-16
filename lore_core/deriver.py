@@ -58,6 +58,7 @@ from .config import (
     utcnow,
 )
 from .filemap import filemap_entries
+from .gate import append_pending_stage_op
 from .memory import match_entries, memory_path, read_entries, render_entries
 from .pending import containment, load_pending, overlap_tokens, token_containment
 from .scrub import scrub_secrets
@@ -1769,6 +1770,9 @@ def stage_proposals(data: dict, slug: str, session_id: str,
             except FileExistsError:
                 n += 1
         staged += 1
+        # sync spec PR 3: same op gate.stage_write's own proposals append,
+        # for the deriver's staging path.
+        append_pending_stage_op(item)
 
     mem_items = data.get("memory") or []
     acct["extracted"] = len(mem_items)

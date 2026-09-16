@@ -31,7 +31,14 @@ import sqlite3
 import subprocess
 import sys
 
-from .beliefs import BELIEF_COLS, belief_insert, belief_supersede, dormant_sweep, record_outcome
+from .beliefs import (
+    BELIEF_COLS,
+    belief_insert,
+    belief_supersede,
+    dormant_sweep,
+    record_dream_reviewed,
+    record_outcome,
+)
 from .config import (
     BELIEF_DORMANT_DAYS,
     DREAMER_MODEL,
@@ -264,7 +271,7 @@ def dream_run(conn: sqlite3.Connection, slug: str, dry_run: bool = False) -> int
             changed += 1
             print(f"superseded [{loser}] by [{winner}]: {reason}")
         else:
-            conn.execute("INSERT OR IGNORE INTO dream_reviewed VALUES(?,?)", (min(a, b), max(a, b)))
+            record_dream_reviewed(conn, a, b)
     promoted = stage_proposals(
         {"memory": [
             {"scope": p.get("scope"), "action": "add", "text": p.get("text")}

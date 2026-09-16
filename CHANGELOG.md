@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.52.0 — 2026-09-16
+
+- New **`lore_core/sync_oplog.py`**: every mutation to a synced class appends one op row, in the same SQLite transaction as the mutation. A store becomes a function of its log, which is what the sync design rests on.
+- Four tables: **`sync_ops`**, `sync_machine`, `sync_peers`, `sync_belief_aliases`. Machine identity is a persisted uuid4; the hostname is a label, never the id.
+- Order is Lamport, then machine id, then `machine_seq`, so it never reads a wall clock. `created` is for a human to read and for nothing else.
+- Canonical bytes and the MAC match the wire contract's golden fixtures exactly, so a receiver built against the contract verifies what this writes. With no key configured an op carries a null mac rather than refusing.
+- Payloads pass through **`scrub_secrets`** before they reach the log, and `LORE_SYNC_CLASSES` and `LORE_DISABLE_SYNC` decide what is written at all.
+- **`lore sync status`** reports the machine, the unpushed count, the classes and the peer cursors. No network code yet: push and pull are the next PR.
+- Measured: 3,000 belief-insert ops replay in 1.54s, 0.512ms each. Tests: `tests/test_sync_oplog.py` (39, new). Suite 501.
+
 ## 0.51.0 — 2026-09-16
 
 - New **`project_key(cwd)`**: a project's identity on the wire, from its `origin` remote with scheme, `.git` and case normalised, so two checkouts of one repository agree. No remote, or a git failure, falls back to the slug.

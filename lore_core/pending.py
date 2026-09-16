@@ -12,11 +12,13 @@ import re
 import sys
 from pathlib import Path
 
-from .beliefs import belief_insert, belief_subject, belief_supersede
+from .beliefs import belief_insert, belief_retract, belief_subject
 from .config import ROOT, SKILLS_DIR, project_slug, utcnow
 from .filemap import filemap_add, filemap_remove, filemap_replace
+from .gate import pending_op_project_key
 from .memory import memory_add, memory_move, memory_remove, memory_replace
 from .store import db_connect
+from .sync_oplog import append_op
 
 
 __all__ = [
@@ -411,6 +413,7 @@ def archive(pid: str, status: str) -> None:
     src = ROOT / "pending" / f"{pid}.json"
     dst_dir = ROOT / "pending" / "archive"
     dst_dir.mkdir(parents=True, exist_ok=True)
+    item = None
     try:
         item = json.loads(src.read_text(encoding="utf-8"))
         item["status"] = status
@@ -419,6 +422,19 @@ def archive(pid: str, status: str) -> None:
     except (json.JSONDecodeError, OSError):
         pass
     src.unlink(missing_ok=True)
+    # sync spec PR 3 ("pending" verb `resolve {uid, status}"): the archive
+    # IS the resolution, whether approved or rejected -- appended right
+    # after it, same "immediately after the file write" rule as stage_write.
+    uid = item.get("uid") if isinstance(item, dict) else None
+    if uid:
+        try:
+            conn = db_connect()
+            pk = pending_op_project_key(conn, item)
+            append_op(conn, "pending", "resolve", pk, {"uid": uid, "status": status})
+            conn.commit()
+            conn.close()
+        except Exception:                                   # noqa: BLE001
+            pass
 
 
 def apply_item(pid: str, item: dict, force: bool) -> str | None:
@@ -449,8 +465,7 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
                 return f"belief retraction has no usable id ({bid!r})"
             if not conn.execute("SELECT 1 FROM beliefs WHERE id = ?", (bid,)).fetchone():
                 return f"no belief {bid} — nothing to retract"
-            belief_supersede(conn, bid, None, str(item.get("reason") or "manually retracted"))
-            conn.execute("UPDATE beliefs SET status = 'retracted' WHERE id = ?", (bid,))
+            belief_retract(conn, bid, str(item.get("reason") or "manually retracted"))
             conn.commit()
             return None
         claim = str(item.get("claim") or "")
@@ -492,6 +507,7 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
         graveyard.parent.mkdir(parents=True, exist_ok=True)
         target.parent.rename(graveyard)
         print(f"retired {item['name']} -> {graveyard}")
+        _append_skill_op("remove", item["name"], None)
         return None
     old = None
     if target.exists():
@@ -512,7 +528,22 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
         ))[:60]
         print("\n".join(diff))
     target.write_text(new, encoding="utf-8")
+    _append_skill_op("put", item["name"], item["body"])
     return None
+
+
+def _append_skill_op(op: str, name: str, body: "str | None") -> None:
+    """`skill` `put`/`remove` (sync spec PR 3) -- skills are user-global
+    (SKILLS_DIR, no project dimension), so project_key is always None.
+    Never raises, same house rule as append_pending_stage_op."""
+    try:
+        conn = db_connect()
+        payload = {"name": name} if op == "remove" else {"name": name, "body": body or ""}
+        append_op(conn, "skill", op, None, payload)
+        conn.commit()
+        conn.close()
+    except Exception:                                       # noqa: BLE001
+        pass
 
 
 def resolve_ids(spec: list[str]) -> list[str]:

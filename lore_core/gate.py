@@ -64,6 +64,7 @@ import uuid
 from pathlib import Path
 
 from .config import ROOT, agent_id, one_line, utcnow
+from .sync_oplog import append_op, resolve_project_key_for_slug
 
 
 __all__ = [
@@ -78,6 +79,8 @@ __all__ = [
     'gate_enabled',
     'write_allowed',
     'stage_write',
+    'pending_op_project_key',
+    'append_pending_stage_op',
     'gate_write',
     'PROVENANCE_PATH',
     'entry_key',
@@ -224,9 +227,47 @@ def stage_write(item: dict) -> str:
         try:
             with open(pdir / f"{stamp}-{n:02d}.json", "x", encoding="utf-8") as fh:
                 json.dump(payload, fh, indent=2)
-            return f"{stamp}-{n:02d}"
+            pid = f"{stamp}-{n:02d}"
+            break
         except FileExistsError:
             n += 1
+    # sync spec PR 3: the file write happened; the op row follows
+    # immediately, in its own small transaction (module docstring of
+    # sync_oplog.append_op).
+    append_pending_stage_op(payload)
+    return pid
+
+
+def pending_op_project_key(conn, item: dict) -> "str | None":
+    """The wire `project_key` for a staged/resolved proposal (sync spec
+    PR 3): `None` for a user-scoped memory proposal (nothing to resolve --
+    user memory has no project dimension), the resolved key of
+    `item["project"]` for everything else (filemap/belief/skill proposals,
+    and project-scoped memory, all carry a "project" slug already)."""
+    if item.get("kind") == "memory" and item.get("scope") == "user":
+        return None
+    slug = item.get("project")
+    return resolve_project_key_for_slug(conn, slug) if slug else None
+
+
+def append_pending_stage_op(item: dict) -> None:
+    """`pending`/`stage` op for a proposal that just landed in pending/ --
+    called by this module's own stage_write() AND by the deriver's staging
+    (deriver.stage_proposals' put()), the two places a proposal file is
+    created. Never raises: staging a proposal must not fail because logging
+    it did (same house rule as record_entry)."""
+    try:
+        from .store import db_connect  # local: store imports THIS module's
+        # siblings (sync_oplog) but not gate, so this is safe at module
+        # level too -- kept local anyway to mirror cmd_provenance's existing
+        # pattern of deferring a store import to the call site.
+        conn = db_connect()
+        pk = pending_op_project_key(conn, item)
+        append_op(conn, "pending", "stage", pk, {"uid": item["uid"], "item": item})
+        conn.commit()
+        conn.close()
+    except Exception:                                       # noqa: BLE001
+        pass
 
 
 def _describe(item: dict) -> str:

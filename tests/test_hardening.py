@@ -8,7 +8,6 @@ Run: python3 tests/test_hardening.py
 import argparse
 import importlib.util
 import os
-import sqlite3
 import sys
 import tempfile
 import unittest
@@ -175,20 +174,24 @@ class TestResetRefusal(unittest.TestCase):
 
 class TestDormantSweep(unittest.TestCase):
     def _conn(self):
-        conn = sqlite3.connect(":memory:")
-        conn.execute(
-            "CREATE TABLE beliefs("
-            "id INTEGER PRIMARY KEY, subject TEXT, claim TEXT, confidence REAL,"
-            "status TEXT DEFAULT 'active', superseded_by INTEGER, resolution TEXT,"
-            "created TEXT, updated TEXT, last_referenced TEXT)")
+        # sync spec PR 3: dormant_sweep now reads beliefs.uid (to log a
+        # `status` op per row it sweeps) and appends through the sync_ops/
+        # sync_machine tables db_connect() creates -- a bare hand-rolled
+        # `beliefs` table no longer has enough schema for it to run. Using
+        # the real db_connect() against this test's own LORE_ROOT (set once
+        # at module import, before this class' beliefs table has ever been
+        # touched) keeps the test isolated without re-deriving the schema
+        # by hand.
+        conn = lore.db_connect()
+        conn.execute("DELETE FROM beliefs")
         return conn
 
     def _add(self, conn, bid, conf, updated, last_referenced, status="active"):
         conn.execute(
             "INSERT INTO beliefs(id, subject, claim, confidence, status,"
-            " created, updated, last_referenced) VALUES(?,?,?,?,?,?,?,?)",
+            " created, updated, last_referenced, uid) VALUES(?,?,?,?,?,?,?,?,?)",
             (bid, "user", f"claim {bid}", conf, status,
-             updated, updated, last_referenced))
+             updated, updated, last_referenced, f"00000000-0000-4000-8000-00000000000{bid}"))
 
     def test_transitions(self):
         conn = self._conn()
