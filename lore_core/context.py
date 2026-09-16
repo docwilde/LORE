@@ -25,6 +25,8 @@ from .config import (
     USER_CAP,
     effective_scope,
     one_line,
+    project_key,
+    project_origin,
     project_slug,
     read_hook_input,
     stage_disabled,
@@ -35,7 +37,7 @@ from .gate import provenance_tag
 from .graph import context_candidates, render_context_block
 from .memory import memory_bucket, memory_path, read_entries, render_entries, usage_line
 from .pending import load_pending
-from .store import db_connect
+from .store import db_connect, record_project_identity
 
 
 __all__ = [
@@ -356,16 +358,76 @@ def render_banner(stats: list[str]) -> str:
     return "\n".join(lines + [o(l) for l in BANNER_MASCOT])
 
 
+def _spawn_relocate(synthetic: str, cwd: str) -> None:
+    """Fire-and-forget `lore project move <synthetic> <cwd>`, detached the
+    same way _maybe_spawn_midsession_review spawns background work -- output
+    discarded, this process does not wait. A dedicated function (rather than
+    calling subprocess.Popen inline) so tests can intercept the spawn
+    without touching the subprocess module's Popen globally: subprocess.run
+    -- which project_key's own git calls use -- is implemented ON TOP OF
+    Popen, so patching it module-wide would break the git calls this same
+    reconciliation makes moments earlier."""
+    import subprocess
+    cli = str(Path(__file__).resolve().parents[1] / "bin" / "lore.py")
+    subprocess.Popen(
+        [sys.executable, cli, "project", "move", synthetic, cwd],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, start_new_session=True, env=dict(os.environ))
+
+
+def _reconcile_project_identity(cwd: str) -> None:
+    """PR1 of docs/plans/sync.md's sync spec ('A project identity that
+    survives the machine'), the part `lore inject` owns: this checkout's
+    project_key either records itself here for the first time (the AUTHOR
+    case -- record_project_identity is a no-op if it is already mapped), or
+    it was already mapped to a SYNTHETIC slug (`sync-<key flattened>`) --
+    filed by a sync receiver before any real checkout of this remote existed
+    on this machine. The second case re-files that store into this
+    checkout's own real slug, once, via the 0.49.0 `lore project move`
+    mechanism (relocate.py), run the same DETACHED way
+    _maybe_spawn_midsession_review already runs background work: inject
+    must never block on a move that touches every table relocate.py
+    rewrites, and it must stay safe if two sessions in the same checkout hit
+    this at once -- relocate.project_move re-points the sync_projects row to
+    the real slug as part of its own commit, so a second, concurrent move of
+    the same (by-then-already-moved) synthetic slug finds nothing left to
+    carry and every step is a no-op. Every failure here is swallowed: a
+    reconciliation that cannot happen right now is not a reason to fail a
+    session start."""
+    try:
+        key = project_key(cwd)
+        slug = project_slug(cwd)
+        conn = db_connect()
+        row = conn.execute(
+            "SELECT slug FROM sync_projects WHERE project_key = ?", (key,)).fetchone()
+        if row is None:
+            record_project_identity(conn, key, slug, origin=project_origin(cwd))
+            return
+        synthetic = row[0]
+        if synthetic == slug or not synthetic.startswith("sync-"):
+            return
+        # The destination is CWD, not the already-computed slug: `lore project
+        # move`'s target resolves a bare slug only when it is already KNOWN
+        # (a memory dir or a transcript dir exists for it, per
+        # resolve_subject_slug) — exactly what a brand-new checkout, filing
+        # its very first session, does not yet have. A path that exists on
+        # disk resolves unconditionally.
+        _spawn_relocate(synthetic, cwd)
+    except (OSError, sqlite3.Error):
+        pass
+
+
 def cmd_inject(args) -> int:
     if os.environ.get("LORE_SKIP"):
         return 0
     hook = read_hook_input()
+    cwd = args.cwd or hook.get("cwd") or os.getcwd()
+    _reconcile_project_identity(cwd)
     # inject kill switch (2026-08-22): a hook fire (payload on stdin) exits 0
     # silently; a manual `lore inject`/`lore snapshot` still renders — the
     # switch turns off the automatic injection, not the CLI.
     if stage_disabled("inject") and hook:
         return 0
-    cwd = args.cwd or hook.get("cwd") or os.getcwd()
     out = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",

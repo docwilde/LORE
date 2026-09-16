@@ -20,12 +20,15 @@ from .config import (
     project_slug,
     read_hook_input,
     stage_disabled,
+    utcnow,
 )
 from .scrub import scrub_secrets
 
 
 __all__ = [
     'db_connect',
+    'record_project_identity',
+    'resolve_or_create_synthetic_slug',
     'BOILERPLATE',
     'extract_text',
     'tool_line',
@@ -75,6 +78,19 @@ def db_connect() -> sqlite3.Connection:
         "CREATE TABLE IF NOT EXISTS sessions("
         "session_id TEXT PRIMARY KEY, project TEXT, cwd TEXT, title TEXT,"
         "first_ts TEXT, last_ts TEXT, messages INTEGER)"
+    )
+    # PROJECT IDENTITY (docs/plans/sync.md, prerequisite (a) -- "a project
+    # identity that survives the machine"): project_slug is a checkout's own
+    # path flattened, so the same repository cloned to two paths is two
+    # projects. project_key (config.py) is the same string for any checkout
+    # of the same remote; this table is the mapping between the two, one row
+    # per key. A plain CREATE, not an ALTER-inside-except migration, because
+    # the table is new outright rather than a column added to an existing
+    # one -- nothing to migrate FROM.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_projects("
+        "project_key TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE,"
+        " origin TEXT, created TEXT NOT NULL)"
     )
     conn.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS msg USING fts5("
@@ -215,6 +231,45 @@ def db_connect() -> sqlite3.Connection:
         conn.commit()  # see the beliefs.uid migration above for why
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS belief_outcomes_uid ON belief_outcomes(uid)")
     return conn
+
+
+def record_project_identity(conn: sqlite3.Connection, key: str, slug: str,
+                            origin: "str | None" = None) -> None:
+    """AUTHOR side of project identity resolution (docs/plans/sync.md,
+    prerequisite (a)): a checkout that knows both its own project_key and
+    its own slug records the mapping once, on first sight. A key already
+    mapped is left untouched here — including a SYNTHETIC slug a sync
+    receiver filed before this machine ever saw the project for real; that
+    mapping is only ever updated by a completed `lore project move` (see
+    relocate.project_move), never overwritten by a routine record."""
+    conn.execute(
+        "INSERT OR IGNORE INTO sync_projects(project_key, slug, origin, created)"
+        " VALUES(?,?,?,?)",
+        (key, slug, origin, utcnow()),
+    )
+    conn.commit()
+
+
+def resolve_or_create_synthetic_slug(conn: sqlite3.Connection, key: str,
+                                     origin: "str | None" = None) -> str:
+    """RECEIVER side of project identity resolution: a project_key this
+    store has never mapped (an op arriving from elsewhere, before any real
+    checkout of that remote exists here) is filed under a SYNTHETIC slug --
+    `sync-<key flattened>`, the same flattening project_slug applies to a
+    path -- so the receiving store has somewhere to write. A real checkout
+    of that remote re-files it later, once, through `lore project move`
+    (relocate.py), driven from `lore inject` (context.py)."""
+    row = conn.execute(
+        "SELECT slug FROM sync_projects WHERE project_key = ?", (key,)).fetchone()
+    if row:
+        return row[0]
+    slug = f"sync-{re.sub(r'[^A-Za-z0-9]', '-', key)}"
+    conn.execute(
+        "INSERT INTO sync_projects(project_key, slug, origin, created) VALUES(?,?,?,?)",
+        (key, slug, origin, utcnow()),
+    )
+    conn.commit()
+    return slug
 
 
 BOILERPLATE = re.compile(

@@ -255,6 +255,16 @@ def project_move(old: str, new: str, *, dry_run: bool = False, out=None) -> int:
     messages = _refile_column(conn, "msg", src, target, dry_run)
     print(f"  sessions   {sessions} ({messages} messages)", file=out)
     print(f"  reviewed   {_refile_column(conn, 'reviewed', src, target, dry_run)}", file=out)
+    # SYNC IDENTITY (docs/plans/sync.md, prerequisite (a)): a project_key
+    # mapped to this slug -- most often a SYNTHETIC one a sync receiver
+    # filed before any real checkout of that remote existed here -- now
+    # means the destination instead, so `lore inject` sees a settled
+    # mapping and never re-triggers this move for the same key.
+    n_key = conn.execute(
+        "SELECT count(*) FROM sync_projects WHERE slug = ?", (src,)).fetchone()[0]
+    if not dry_run and n_key:
+        conn.execute("UPDATE sync_projects SET slug = ? WHERE slug = ?", (target, src))
+    print(f"  sync key   {n_key} mapping(s) re-pointed to {target}", file=out)
     if not dry_run:
         conn.commit()
     print(f"  pending    {_refile_pending(src, target, dry_run)} proposals", file=out)

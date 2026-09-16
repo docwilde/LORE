@@ -51,6 +51,8 @@ __all__ = [
     'project_identity_root',
     'worktree_parent_repo',
     'project_slug',
+    'project_origin',
+    'project_key',
     'known_project_slugs',
     'resolve_subject_slug',
     'agent_id',
@@ -180,7 +182,12 @@ def project_root(cwd: str) -> str:
                            capture_output=True, text=True, timeout=5)
         if r.returncode == 0 and r.stdout.strip():
             root = r.stdout.strip()
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
+        # TimeoutExpired alongside OSError (not a subclass of it) — same pair
+        # project_identity_root already guards its own git call with, a few
+        # lines below. project_key falls back through here when there is no
+        # origin to report, and its own "never raise" contract only holds if
+        # every git call on that fallback path degrades the same way.
         pass
     return root
 
@@ -279,6 +286,66 @@ def project_slug(cwd: str) -> str:
     project_identity_root, not the linked worktree someone happened to branch
     into either. Non-repo cwds keep the old behavior byte-identically."""
     return re.sub(r"[^A-Za-z0-9]", "-", project_identity_root(cwd))
+
+
+def project_origin(cwd: str) -> "str | None":
+    """Raw `git remote get-url origin` for the project cwd belongs to, or
+    None when git is missing, the command fails, there is no `origin`
+    remote, or the directory is not a repository at all. Read against
+    project_identity_root, not cwd itself, so a linked worktree reports the
+    SAME origin as its main checkout — the same reasoning project_slug
+    already applies to the path. Never raises: every failure here is a
+    caller asking "what remote is this" from a place that plainly has none,
+    and that is data (None), not an error."""
+    root = project_identity_root(cwd)
+    try:
+        r = subprocess.run(["git", "-C", root, "remote", "get-url", "origin"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    url = r.stdout.strip()
+    return url or None
+
+
+_ORIGIN_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_ORIGIN_SCP = re.compile(r"^[^@/]+@([^:/]+)[:/](.+)$")
+
+
+def _normalize_origin(url: str) -> str:
+    """`git@github.com:docwilde/LORE.git` and `https://github.com/docwilde/LORE`
+    both reduce to `github.com/docwilde/lore`: scheme stripped, the scp-like
+    `user@host:path` shorthand rewritten to `host/path`, a trailing `.git`
+    dropped, the whole thing lower-cased. Same string for any checkout of the
+    same remote, on any machine — see project_key."""
+    url = _ORIGIN_SCHEME.sub("", url.strip())
+    m = _ORIGIN_SCP.match(url)
+    if m:
+        url = f"{m.group(1)}/{m.group(2)}"
+    if url.endswith(".git"):
+        url = url[:-4]
+    return url.lower()
+
+
+def project_key(cwd: str) -> str:
+    """A project's identity that SURVIVES the machine (docs/plans/sync.md,
+    'A project identity that survives the machine'): the same string for
+    every checkout of the same remote, on any path, on any machine — unlike
+    project_slug, which is the checkout's own path flattened and therefore
+    different per clone.
+
+    Derived from `git -C <identity root> remote get-url origin`, normalized
+    by _normalize_origin. No remote, or not a repository at all, falls back
+    to project_slug(cwd) — the project still needs SOME identity to sync
+    under, and its own (machine-local) slug is the only one it has. Never
+    raises: a git failure of any kind is the fallback, not an exception —
+    the caller (inject, doctor, a future sync op writer) always gets a
+    usable string back."""
+    origin = project_origin(cwd)
+    if not origin:
+        return project_slug(cwd)
+    return _normalize_origin(origin)
 
 
 def known_project_slugs() -> set[str]:
