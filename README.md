@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/banner.png" width="720" alt="LORE — Lots Of Reconciled Engrams: the coral crab beside the block wordmark, a belief trail rising from its claw"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/status-alpha-e03131" alt="alpha: interfaces change between releases">
+  <img src="https://img.shields.io/badge/status-beta-f59f00" alt="beta: the store migrates itself; command surfaces can still change">
   <a href="https://github.com/docwilde/LORE/releases"><img src="https://img.shields.io/github/v/release/docwilde/LORE?label=release&color=ff7f50" alt="latest release"></a>
   <img src="https://img.shields.io/badge/Claude%20Code-plugin-d97757" alt="Claude Code plugin">
   <img src="https://img.shields.io/badge/writes-human--approved-2f9e44" alt="nothing writes without approval">
@@ -15,10 +15,10 @@
 **Persistent memory for Claude Code that nothing writes to without your approval.** Curated memory stays hard-capped and human-directed. A derived belief store keeps everything the agent concluded on its own — and reaches the agent only when you ask for it.
 
 > [!WARNING]
-> **Alpha — work in progress.** LORE is `0.x` and moves daily: 54 releases took it
-> from `0.6.0` to `0.42.0` in a week. Config keys, command surfaces and the
-> curated-memory caps change between releases — the SQLite store migrates itself
-> additively, nothing else promises to.
+> **Beta.** LORE is `0.x` and still moves fast: 75 releases took it from `0.6.0`
+> to `0.53.0` between 21 August and 16 September 2026. Config keys, command
+> surfaces and the curated-memory caps can still change between releases — the
+> SQLite store migrates itself additively, nothing else promises to.
 >
 > What that means concretely for you: it reads every transcript under
 > `~/.claude/projects/`, sends a scrubbed session digest to the same Anthropic
