@@ -19,6 +19,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 from .config import (
@@ -140,8 +141,8 @@ def belief_insert(
         now = utcnow()
         cur = conn.execute(
             "INSERT INTO beliefs(subject, claim, confidence, status, created, updated,"
-            " writer, via) VALUES(?,?,?,'active',?,?,?,?)",
-            (subject, claim, confidence, now, now, writer_class(), via),
+            " writer, via, uid) VALUES(?,?,?,'active',?,?,?,?,?)",
+            (subject, claim, confidence, now, now, writer_class(), via, str(uuid.uuid4())),
         )
         bid, created = cur.lastrowid, True
         conn.execute("INSERT INTO belief_fts(belief_id, claim) VALUES(?,?)", (bid, claim))
@@ -501,10 +502,10 @@ def record_outcome(conn: sqlite3.Connection, belief_id: int, event: str, source:
     """One ledger row; the single write path for every source (dream/user/audit),
     so the dormancy trigger below cannot be bypassed by one of them."""
     conn.execute(
-        "INSERT INTO belief_outcomes(belief_id, event, source, session_id, agent, note, created)"
-        " VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO belief_outcomes(belief_id, event, source, session_id, agent, note,"
+        " created, uid) VALUES(?,?,?,?,?,?,?,?)",
         (belief_id, event, source, session_id, agent or agent_id(),
-         one_line(note or "")[:300] or None, utcnow()),
+         one_line(note or "")[:300] or None, utcnow(), str(uuid.uuid4())),
     )
     if event == "contradicted":
         n = conn.execute(
