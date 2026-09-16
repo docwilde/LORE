@@ -718,8 +718,16 @@ class TestPendingAndSkillRules(unittest.TestCase):
         from A's apply lands either way, which is the right outcome -- an
         approval is a write, a rejection is only a tidy."
         """
-        _, a = _machine("pend-a", MACHINE_A)
+        # B is exec'd FIRST so that A is the most recently loaded lore_core
+        # instance. gate.append_pending_stage_op resolves its store import at
+        # CALL time (`from .store import db_connect`), and in this
+        # two-instances-in-one-process harness a call-time import resolves
+        # through sys.modules to whichever instance was loaded LAST -- so with
+        # the other ordering A's staging op lands in B's log and A's own log
+        # comes back empty. Production loads exactly one instance and is
+        # unaffected; this ordering is what makes the harness honest.
         _, b = _machine("pend-b", MACHINE_B)
+        _, a = _machine("pend-a", MACHINE_A)
 
         pid = a.stage_write({"kind": "memory", "scope": "user", "action": "add",
                              "text": "the fact one machine approved", "project": "p"})
