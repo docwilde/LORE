@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import sys
+import uuid
 from pathlib import Path
 
 from .config import (
@@ -113,6 +114,34 @@ def db_connect() -> sqlite3.Connection:
             conn.execute(f"ALTER TABLE beliefs ADD COLUMN {_col} TEXT")
         except sqlite3.OperationalError:
             pass  # column already present
+    # BELIEF UID migration (sync spec PR 2, docs/plans/sync.md "ids that
+    # cannot collide"): the INTEGER PRIMARY KEY stays the local join key --
+    # rewriting every join, graph traversal and CLI line for a property only
+    # the wire needs was rejected -- but two machines both minting id 4711
+    # via lastrowid are different beliefs, so a UNIQUE `uid` rides beside it.
+    # Same ALTER-inside-except shape as the writer/via migration above, and
+    # -- unlike that one -- BACK-FILLED: a row without a uid cannot travel,
+    # and a random uuid4 is a name, not a fabricated fact about the row. The
+    # backfill sits in the `else` branch so it runs exactly once, the same
+    # moment the column is added; a row that already has a uid is never
+    # touched again on a later connect.
+    try:
+        conn.execute("ALTER TABLE beliefs ADD COLUMN uid TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already present
+    else:
+        conn.executemany(
+            "UPDATE beliefs SET uid = ? WHERE id = ?",
+            [(str(uuid.uuid4()), bid) for (bid,) in
+             conn.execute("SELECT id FROM beliefs WHERE uid IS NULL")],
+        )
+        # commit now, not left to the caller: the ALTER above already
+        # auto-committed as DDL, so a process that closes this connection
+        # without writing anything else would otherwise roll the backfill
+        # UPDATE back -- and the ALTER, now a no-op on every later connect,
+        # would never give the backfill a second chance to run.
+        conn.commit()
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS beliefs_uid ON beliefs(uid)")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS belief_evidence("
         "belief_id INTEGER, session_id TEXT, project TEXT, note TEXT, created TEXT)"
@@ -170,6 +199,21 @@ def db_connect() -> sqlite3.Connection:
         " event TEXT NOT NULL CHECK(event IN ('confirmed','contradicted','stale')),"
         " source TEXT NOT NULL, session_id TEXT, agent TEXT, note TEXT, created TEXT)"
     )
+    # Same uid migration as beliefs above: an append-only ledger row also
+    # has to travel on the wire, so it gets the same wire identity beside
+    # its local INTEGER PRIMARY KEY, back-filled the same way.
+    try:
+        conn.execute("ALTER TABLE belief_outcomes ADD COLUMN uid TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already present
+    else:
+        conn.executemany(
+            "UPDATE belief_outcomes SET uid = ? WHERE id = ?",
+            [(str(uuid.uuid4()), oid) for (oid,) in
+             conn.execute("SELECT id FROM belief_outcomes WHERE uid IS NULL")],
+        )
+        conn.commit()  # see the beliefs.uid migration above for why
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS belief_outcomes_uid ON belief_outcomes(uid)")
     return conn
 
 
