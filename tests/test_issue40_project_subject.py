@@ -134,7 +134,10 @@ class TestStageProposalsSubject(unittest.TestCase):
 
     def test_default_path_is_byte_identical_shape(self):
         # no "project" key on the memory entry -> today's exact shape, no
-        # new keys leak in for the common (no-subject) case.
+        # new keys leak in for the common (no-subject) case. "uid" is the
+        # one deliberate addition (sync spec PR 2, "ids that cannot
+        # collide"): every staged proposal gets a wire identity at staging
+        # time, minted fresh regardless of what the item itself carries.
         data = {"memory": [{"scope": "project", "action": "add",
                             "text": "unique default-path fact one"}]}
         n = lore.stage_proposals(data, "-origin-slug", "sess-default")
@@ -145,7 +148,7 @@ class TestStageProposalsSubject(unittest.TestCase):
         self.assertEqual(
             set(item.keys()),
             {"kind", "scope", "action", "match", "text", "created",
-             "project", "session_id", "derived_by"})
+             "project", "session_id", "derived_by", "uid"})
 
     def test_user_scope_ignores_subject_field(self):
         # a "project" subject only means something for scope "project" --
