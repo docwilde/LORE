@@ -182,7 +182,12 @@ def project_root(cwd: str) -> str:
                            capture_output=True, text=True, timeout=5)
         if r.returncode == 0 and r.stdout.strip():
             root = r.stdout.strip()
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
+        # TimeoutExpired alongside OSError (not a subclass of it) — same pair
+        # project_identity_root already guards its own git call with, a few
+        # lines below. project_key falls back through here when there is no
+        # origin to report, and its own "never raise" contract only holds if
+        # every git call on that fallback path degrades the same way.
         pass
     return root
 
