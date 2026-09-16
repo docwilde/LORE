@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.53.0 — 2026-09-16
+
+- **`lore approve`** refuses a skill proposal whose name is not one lowercase, hyphen-separated path component (**`SKILL_NAME_RE`**). A model-authored name such as `../x` could write outside the skills directory on approval.
+- Enforced twice. **`stage_write`** and the deriver refuse an unsafe name before it enters the pile; **`apply_item`** re-validates and resolves both the install target and the retire graveyard inside their directories.
+- Refusal, not rewriting: the deriver used to substitute `-` for disallowed characters, which turned a traversal attempt into an innocuous name a reviewer would never suspect.
+- **`archive()`** writes the copy to a temp name, fsyncs, renames it, then unlinks the source. A failed copy leaves the proposal in `pending/`, raises, and appends no resolve op. A corrupt source is quarantined to `pending/corrupt/`.
+- `lore approve` and `lore reject` report an archive failure per proposal and leave it pending for retry, instead of claiming success.
+- Found by the panel review, both external families independently on both defects. Tests: `tests/test_pending_safety.py` (15, new). Suite 516.
+
 ## 0.52.0 — 2026-09-16
 
 - New **`lore_core/sync_oplog.py`**: every mutation to a synced class appends one op row, in the same SQLite transaction as the mutation. A store becomes a function of its log, which is what the sync design rests on.

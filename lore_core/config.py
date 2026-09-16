@@ -36,6 +36,8 @@ __all__ = [
     'DIALECTIC_MODEL',
     'REVIEW_MIN_MESSAGES',
     'SKILLS_DIR',
+    'SKILL_NAME_RE',
+    'valid_skill_name',
     'PROJECTS_DIR',
     'MSG_TRUNC',
     'DIGEST_MSG_TRUNC',
@@ -108,6 +110,36 @@ DIALECTIC_MODEL = os.environ.get("LORE_DIALECTIC_MODEL", "")
 REVIEW_MIN_MESSAGES = int(os.environ.get("LORE_REVIEW_MIN_MESSAGES", "3"))
 SKILLS_DIR = Path(os.environ.get("LORE_SKILLS_DIR", str(Path.home() / ".claude" / "skills")))
 PROJECTS_DIR = Path(os.environ.get("LORE_PROJECTS_DIR", str(Path.home() / ".claude" / "projects")))
+
+# SKILL NAME SHAPE (path traversal, two independent reports). A skill
+# proposal's "name" becomes a path component -- SKILLS_DIR / name / SKILL.md
+# on install, ROOT / "skills-retired" / f"{name}-<stamp>" on retire -- and it
+# is AUTHORED BY A MODEL (the deriver) with approval one keystroke away,
+# which is exactly the content the write gate exists to distrust. Every
+# lore-learned skill actually installed today already has this shape, e.g.
+# "worktree-agent-isolation": lowercase letters/digits in hyphen-separated
+# groups, no leading/trailing/doubled hyphen, never empty. The pattern
+# structurally cannot match "/", "\\", "..", "." or "" -- a name that passes
+# it can be joined onto SKILLS_DIR with nothing to escape with. Named here
+# (not inline in each caller) so gate.stage_write, deriver.stage_proposals
+# and pending.apply_item enforce the SAME rule rather than three that could
+# drift apart.
+SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def valid_skill_name(name: object) -> bool:
+    """True iff `name` is safe to use as a single path component under
+    SKILLS_DIR or ROOT / "skills-retired" -- see SKILL_NAME_RE.
+
+    This is the STAGING-time gate, where a proposal is just a string with no
+    filesystem target yet to resolve. Applying it is not a substitute for
+    the APPLY-time containment check (pending.apply_item resolves the final
+    path and asserts it sits inside SKILLS_DIR): that second, independent
+    layer also catches what a name pattern alone cannot, such as a symlink
+    planted inside SKILLS_DIR itself.
+    """
+    return isinstance(name, str) and bool(SKILL_NAME_RE.fullmatch(name))
+
 
 MSG_TRUNC = 4000          # chars kept per indexed message
 DIGEST_MSG_TRUNC = 700    # chars kept per message in the review digest

@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from .beliefs import belief_insert, belief_retract, belief_subject
-from .config import ROOT, SKILLS_DIR, project_slug, utcnow
+from .config import ROOT, SKILLS_DIR, SKILL_NAME_RE, project_slug, utcnow, valid_skill_name
 from .filemap import filemap_add, filemap_remove, filemap_replace
 from .gate import pending_op_project_key
 from .memory import memory_add, memory_move, memory_remove, memory_replace
@@ -410,22 +410,63 @@ def cmd_pending(args) -> int:
 
 
 def archive(pid: str, status: str) -> None:
+    """Move a resolved proposal from pending/ into pending/archive/, stamped
+    with its resolution, and append the sync op that records it.
+
+    THE INVARIANT (two independent reports of the data-loss bug this
+    replaced): `src` is unlinked ONLY after the archive copy is confirmed
+    durable -- write a temp file, fsync, rename into place, THEN unlink. The
+    old code wrote the copy inside a try/except that swallowed both OSError
+    and JSONDecodeError and then unlinked `src` UNCONDITIONALLY; a disk-full
+    or permission error on the archive write destroyed a not-yet-reviewed
+    proposal with no copy anywhere, no error surfaced, and (because `item`
+    stayed None on that path) the resolve op silently skipped too.
+
+    A corrupt source (JSONDecodeError) is a DIFFERENT failure from a write
+    error -- nothing is wrong with the disk, the proposal itself cannot be
+    read -- so it is quarantined to pending/corrupt/ instead of archived
+    normally (see _quarantine_corrupt) and this returns without raising:
+    there is no status or uid left to resolve.
+
+    Raises OSError when the archive write itself fails. `src` is left
+    untouched in pending/ on every failure path, and no resolve op is
+    appended -- the caller (cmd_approve/cmd_reject) decides how to report it
+    and the proposal simply stays pending for a retry.
+    """
     src = ROOT / "pending" / f"{pid}.json"
-    dst_dir = ROOT / "pending" / "archive"
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    item = None
+    raw = src.read_text(encoding="utf-8")
     try:
-        item = json.loads(src.read_text(encoding="utf-8"))
-        item["status"] = status
-        item["resolved"] = utcnow()
-        (dst_dir / f"{pid}.json").write_text(json.dumps(item, indent=2), encoding="utf-8")
-    except (json.JSONDecodeError, OSError):
-        pass
-    src.unlink(missing_ok=True)
+        item = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _quarantine_corrupt(pid, src, raw, exc)
+        return
+    item["status"] = status
+    item["resolved"] = utcnow()
+
+    dst_dir = ROOT / "pending" / "archive"
+    dst = dst_dir / f"{pid}.json"
+    tmp = dst.with_name(dst.name + ".tmp")
+    try:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(item, indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, dst)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    # Only now -- the archive copy is confirmed on disk -- may the source go.
+    src.unlink()
+
     # sync spec PR 3 ("pending" verb `resolve {uid, status}"): the archive
     # IS the resolution, whether approved or rejected -- appended right
-    # after it, same "immediately after the file write" rule as stage_write.
-    uid = item.get("uid") if isinstance(item, dict) else None
+    # after it succeeds, same "immediately after the file write" rule as
+    # stage_write. Never allowed to turn a successful archive into an error:
+    # the resolution's own bookkeeping is best-effort, same house rule as
+    # append_pending_stage_op.
+    uid = item.get("uid")
     if uid:
         try:
             conn = db_connect()
@@ -435,6 +476,31 @@ def archive(pid: str, status: str) -> None:
             conn.close()
         except Exception:                                   # noqa: BLE001
             pass
+
+
+def _quarantine_corrupt(pid: str, src: Path, raw: str, exc: json.JSONDecodeError) -> None:
+    """A pending file that will not parse as JSON: not a disk failure, the
+    proposal itself is unreadable. Filed to pending/corrupt/ -- via the same
+    temp-then-rename discipline as the normal archive, so `src` is never
+    unlinked outright -- rather than left blocking the pile forever
+    (load_pending() silently skips a file it cannot parse) or destroyed.
+    """
+    corrupt_dir = ROOT / "pending" / "corrupt"
+    dst = corrupt_dir / f"{pid}.json"
+    tmp = dst.with_name(dst.name + ".tmp")
+    try:
+        corrupt_dir.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(raw, encoding="utf-8")
+        os.replace(tmp, dst)
+    except OSError as write_exc:
+        tmp.unlink(missing_ok=True)
+        print(f"{pid}: not valid JSON ({exc}) and could not be moved to"
+              f" pending/corrupt/ ({write_exc}) -- left in place in pending/",
+              file=sys.stderr)
+        return
+    src.unlink()
+    print(f"{pid}: pending proposal was not valid JSON ({exc}) -- moved to"
+          f" pending/corrupt/{pid}.json rather than lost")
 
 
 def apply_item(pid: str, item: dict, force: bool) -> str | None:
@@ -497,39 +563,76 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
         else:
             err = memory_add(item["scope"], slug, item["text"], via="approved")
         return err
-    target = SKILLS_DIR / item["name"] / "SKILL.md"
+    # Everything else is a skill proposal. Its "name" is AUTHORED BY A MODEL
+    # (deriver.stage_proposals) or by whatever else staged it, and approval
+    # is one keystroke -- exactly what the write gate exists to distrust.
+    # stage_write / stage_proposals already refuse an unsafe name before it
+    # is written to pending/ (defence in depth's OUTER layer); this is the
+    # INNER layer, so an item that reached pending/ some other way -- an
+    # older pile, a hand-edited file, a future staging path that forgets the
+    # check -- still cannot make apply touch anything outside SKILLS_DIR.
+    name = item.get("name")
+    if not valid_skill_name(name):
+        return (f"skill proposal has an unsafe name ({name!r}) -- must match"
+                f" {SKILL_NAME_RE.pattern!r}; refusing to touch the filesystem for it"
+                f" (the proposal stays pending)")
+    try:
+        target = _resolve_contained(SKILLS_DIR, SKILLS_DIR / name / "SKILL.md")
+    except ValueError:
+        return (f"skill {name!r} resolves outside SKILLS_DIR -- refusing to apply"
+                f" (the proposal stays pending)")
     if item.get("action") == "retire":
         if not target.exists():
-            return f"skill {item['name']} is not installed — nothing to retire"
+            return f"skill {name} is not installed — nothing to retire"
         if "lore-learned" not in target.read_text(encoding="utf-8")[:600] and not force:
-            return f"skill {item['name']} was not installed by lore (use --force to retire anyway)"
-        graveyard = ROOT / "skills-retired" / f"{item['name']}-{utcnow().replace(':', '')}"
+            return f"skill {name} was not installed by lore (use --force to retire anyway)"
+        graveyard_dir = ROOT / "skills-retired"
+        try:
+            graveyard = _resolve_contained(
+                graveyard_dir, graveyard_dir / f"{name}-{utcnow().replace(':', '')}")
+        except ValueError:
+            return (f"skill {name!r} retire target resolves outside skills-retired --"
+                    f" refusing to apply (the proposal stays pending)")
         graveyard.parent.mkdir(parents=True, exist_ok=True)
         target.parent.rename(graveyard)
-        print(f"retired {item['name']} -> {graveyard}")
-        _append_skill_op("remove", item["name"], None)
+        print(f"retired {name} -> {graveyard}")
+        _append_skill_op("remove", name, None)
         return None
     old = None
     if target.exists():
         old = target.read_text(encoding="utf-8")
         overwritable = item.get("action") == "update" and "lore-learned" in old[:600]
         if not (overwritable or force):
-            return f"skill {item['name']} already exists at {target} (use --force to overwrite)"
+            return f"skill {name} already exists at {target} (use --force to overwrite)"
     target.parent.mkdir(parents=True, exist_ok=True)
-    desc = (item.get("description") or item["name"]).replace('"', "'")
+    desc = (item.get("description") or name).replace('"', "'")
     new = (
-        f'---\nname: {item["name"]}\ndescription: "{desc} (lore-learned)"\n---\n\n'
+        f'---\nname: {name}\ndescription: "{desc} (lore-learned)"\n---\n\n'
         f'{item["body"]}\n'
     )
     if old is not None:
         diff = list(difflib.unified_diff(
             old.splitlines(), new.splitlines(),
-            fromfile=f"{item['name']} (installed)", tofile=f"{item['name']} (update)", lineterm="",
+            fromfile=f"{name} (installed)", tofile=f"{name} (update)", lineterm="",
         ))[:60]
         print("\n".join(diff))
     target.write_text(new, encoding="utf-8")
-    _append_skill_op("put", item["name"], item["body"])
+    _append_skill_op("put", name, item["body"])
     return None
+
+
+def _resolve_contained(base: Path, target: Path) -> Path:
+    """Resolve `target` and assert it sits inside `base` -- Path.resolve()
+    plus relative_to(), never a string-prefix compare (which would let
+    "/skills-evil" pass a base of "/skills"). The SECOND, independent layer
+    against a skill-name path traversal: valid_skill_name (config.py)
+    already rejects any name that could produce "/" or ".." -- this instead
+    catches what a name pattern cannot, such as a symlink planted inside
+    `base` itself. Raises ValueError when `target` resolves outside `base`.
+    """
+    resolved = target.resolve()
+    resolved.relative_to(base.resolve())
+    return resolved
 
 
 def _append_skill_op(op: str, name: str, body: "str | None") -> None:
@@ -566,10 +669,20 @@ def cmd_approve(args) -> int:
         if err:
             failures += 1
             print(f"{pid}: NOT applied — {err}")
-        else:
+            continue
+        try:
             archive(pid, "approved")
-            note = cross_project_note(items[pid])
-            print(f"{pid}: applied." + (f" ({note})" if note else ""))
+        except OSError as exc:
+            # The write already landed (apply_item succeeded); only the
+            # archive copy failed. `archive` left the source in pending/
+            # untouched, so surface this rather than claim it is resolved --
+            # a retried `lore approve` will re-run apply_item on it.
+            failures += 1
+            print(f"{pid}: applied, but could not archive the proposal — {exc}."
+                  f" It remains in pending/ for a retry.")
+            continue
+        note = cross_project_note(items[pid])
+        print(f"{pid}: applied." + (f" ({note})" if note else ""))
     return 1 if failures else 0
 
 
@@ -578,7 +691,13 @@ def cmd_reject(args) -> int:
     if not ids:
         print("nothing matched.", file=sys.stderr)
         return 1
+    failures = 0
     for pid in ids:
-        archive(pid, "rejected")
+        try:
+            archive(pid, "rejected")
+        except OSError as exc:
+            failures += 1
+            print(f"{pid}: NOT rejected — could not archive: {exc}")
+            continue
         print(f"{pid}: rejected.")
-    return 0
+    return 1 if failures else 0

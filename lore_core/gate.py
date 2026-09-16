@@ -63,7 +63,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from .config import ROOT, agent_id, one_line, utcnow
+from .config import ROOT, SKILL_NAME_RE, agent_id, one_line, utcnow, valid_skill_name
 from .sync_oplog import append_op, resolve_project_key_for_slug
 
 
@@ -210,7 +210,17 @@ def stage_write(item: dict) -> str:
     Same atomic id-claim discipline as the deriver's staging (open "x", step
     over a taken id): two callers landing in the same second must not
     overwrite each other's proposal.
+
+    Raises ValueError, before anything is written, when `item` is a skill
+    proposal whose name is unsafe (path traversal defence, outer layer --
+    pending.apply_item's containment check is the inner one): a bad name
+    must never enter the pile at all, whichever caller is staging it.
     """
+    if item.get("kind") == "skill" and not valid_skill_name(item.get("name")):
+        raise ValueError(
+            f"refusing to stage skill proposal with unsafe name {item.get('name')!r}"
+            f" (must match {SKILL_NAME_RE.pattern!r})"
+        )
     pdir = ROOT / "pending"
     pdir.mkdir(parents=True, exist_ok=True)
     stamp = utcnow().replace("-", "").replace(":", "").replace("T", "").rstrip("Z")
@@ -291,11 +301,20 @@ def gate_write(item: dict) -> "int | None":
     Returns 0 on a staged write, not a failure code: the write was ACCEPTED,
     it just has to be approved before it steers anything. A hook that fails
     loudly here would turn a memory write into a broken session.
+
+    Returns 1, staging nothing, when stage_write refuses the item outright
+    (currently: an unsafe skill name) -- that failure is the caller's own
+    input being rejected, not the advisory gate doing its job, so it is
+    reported as an error rather than the usual "staged" message.
     """
     allowed, cls, why = write_allowed()
     if allowed:
         return None
-    pid = stage_write(dict(item) | {"writer": cls, "writer_evidence": why})
+    try:
+        pid = stage_write(dict(item) | {"writer": cls, "writer_evidence": why})
+    except ValueError as exc:
+        print(f"refused — {exc}", file=sys.stderr)
+        return 1
     print(f"staged, NOT applied — this write arrived from a {cls} context ({why}).")
     print(f"  {pid}  {_describe(item)}")
     print("Curated memory and beliefs are injected into the model's context, so writes"

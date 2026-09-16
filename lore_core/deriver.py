@@ -49,6 +49,7 @@ from .config import (
     REVIEW_MIN_MESSAGES,
     ROOT,
     SKILLS_DIR,
+    SKILL_NAME_RE,
     agent_id,
     one_line,
     project_slug,
@@ -56,6 +57,7 @@ from .config import (
     resolve_subject_slug,
     stage_disabled,
     utcnow,
+    valid_skill_name,
 )
 from .filemap import filemap_entries
 from .gate import append_pending_stage_op
@@ -1881,7 +1883,22 @@ def stage_proposals(data: dict, slug: str, session_id: str,
     for s in skill_items:
         if not isinstance(s, dict):
             continue
-        name = re.sub(r"[^a-z0-9-]", "-", str(s.get("name") or "").lower()).strip("-")
+        raw_name = str(s.get("name") or "")
+        name = raw_name.strip().lower()
+        # PATH TRAVERSAL (two independent reports): on approval this name
+        # becomes SKILLS_DIR / name / SKILL.md, and it is authored by THIS
+        # model -- precisely the content the write gate exists to distrust.
+        # The old code rewrote every disallowed character to "-", which
+        # happened to defuse "/" and ".." too but silently turned a
+        # traversal attempt into a plausible-looking name a reviewer would
+        # never suspect. Refusing it outright -- with the attempt printed --
+        # is the honest response; see SKILL_NAME_RE (config.py), which is
+        # also enforced again at apply time (pending.apply_item) in case a
+        # name ever reaches pending/ some other way.
+        if not valid_skill_name(name):
+            print(f"skill proposal dropped -- name {raw_name!r} does not match"
+                  f" {SKILL_NAME_RE.pattern!r} (lowercase letters/digits/hyphens only)")
+            continue
         # scrub model-authored skill body (0.31.1, Codex): on approval this
         # installs verbatim as a durable SKILL.md; a transcript credential the
         # model echoed here would otherwise persist and be shown at approval.
@@ -1912,7 +1929,7 @@ def stage_proposals(data: dict, slug: str, session_id: str,
                 print(f"skill '{name}': {action} proposal dropped -- "
                       f"{_n} recorded outcome(s), guard requires >= {_need}")
                 continue
-        if not name or (not body and action != "retire"):
+        if not body and action != "retire":
             continue
         put({"kind": "skill", "name": name, "action": action,
              "description": one_line(scrub_secrets(str(s.get("description") or "")))[:300],
