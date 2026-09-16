@@ -1,0 +1,26 @@
+{
+  "description": "belief/reinforce whose confidence was raised (0.6 -> 0.99) after the mac was computed over the original payload. mac_should_verify is false: recomputing the mac from the fields as received (tampered payload) does not match the mac field carried in the envelope.",
+  "op": {
+    "op_id": "dfdf1fff-dddd-4b1b-8b1b-1b1b1b1b1b1b",
+    "machine_id": "1b1e1fbf-9c1e-4f0f-9c1e-9c1e9c1e9c1e",
+    "machine_seq": 11,
+    "lamport": 111,
+    "class": "belief",
+    "op": "reinforce",
+    "project_key": "github.com/docwilde/lore",
+    "payload": {
+      "uid": "5e5e9f5f-5555-4f5f-8f5f-5e5e5e5e5e5e",
+      "confidence": 0.99,
+      "evidence": {
+        "session_id": "c0ffee00-0000-4000-8000-000000000002",
+        "project_key": "github.com/docwilde/lore",
+        "note": "second confirmation"
+      }
+    },
+    "mac": "5b433aa8e9e67468a438e6812dcdeab1b8c67e1d6b1e3d3285c86fb6d7b8e740",
+    "created": "2026-09-16T09:49:00Z"
+  },
+  "canonical_bytes_hex": "5b2264666466316666662d646464642d346231622d386231622d316231623162316231623162222c2231623165316662662d396331652d346630662d396331652d396331653963316539633165222c31312c3131312c2262656c696566222c227265696e666f726365222c226769746875622e636f6d2f646f6377696c64652f6c6f7265222c7b22636f6e666964656e6365223a302e39392c2265766964656e6365223a7b226e6f7465223a227365636f6e6420636f6e6669726d6174696f6e222c2270726f6a6563745f6b6579223a226769746875622e636f6d2f646f6377696c64652f6c6f7265222c2273657373696f6e5f6964223a2263306666656530302d303030302d343030302d383030302d303030303030303030303032227d2c22756964223a2235653565396635662d353535352d346635662d386635662d356535653565356535653565227d5d",
+  "expected_mac_hex": "3dc6008671d6c9b229c1d979b7c43c0747699292387d2a47fbb33cfa7a6a7409",
+  "mac_should_verify": false
+}

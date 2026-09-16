@@ -1,0 +1,22 @@
+{
+  "description": "memory/add carrying non-ASCII text (German umlauts, em dash, emoji, CJK, math symbol) to pin literal UTF-8 emission.",
+  "op": {
+    "op_id": "2b2b6f2e-2222-4c2c-8c2c-2c2c2c2c2c2c",
+    "machine_id": "1b1e1fbf-9c1e-4f0f-9c1e-9c1e9c1e9c1e",
+    "machine_seq": 2,
+    "lamport": 102,
+    "class": "memory",
+    "op": "add",
+    "project_key": "github.com/docwilde/lore",
+    "payload": {
+      "text": "docwilde schreibt gern über Rundungsfehler — 😀 π ≈ 3.14159, 北京.",
+      "via": "interactive",
+      "writer": "approved"
+    },
+    "mac": "5a4cb20ca91e7395f6de7c85f637511909a909c27f97eb845344e9c821a2b72f",
+    "created": "2026-09-14T17:31:00Z"
+  },
+  "canonical_bytes_hex": "5b2232623262366632652d323232322d346332632d386332632d326332633263326332633263222c2231623165316662662d396331652d346630662d396331652d396331653963316539633165222c322c3130322c226d656d6f7279222c22616464222c226769746875622e636f6d2f646f6377696c64652f6c6f7265222c7b2274657874223a22646f6377696c6465207363687265696274206765726e20c3bc6265722052756e64756e67736665686c657220e2809420f09f988020cf8020e2898820332e31343135392c20e58c97e4baac2e222c22766961223a22696e746572616374697665222c22777269746572223a22617070726f766564227d5d",
+  "expected_mac_hex": "5a4cb20ca91e7395f6de7c85f637511909a909c27f97eb845344e9c821a2b72f",
+  "mac_should_verify": true
+}

@@ -1,0 +1,26 @@
+{
+  "description": "pending/stage carrying a nested proposal item.",
+  "op": {
+    "op_id": "6f6fafcf-6666-4a6a-8a6a-6a6a6a6a6a6a",
+    "machine_id": "1b1e1fbf-9c1e-4f0f-9c1e-9c1e9c1e9c1e",
+    "machine_seq": 5,
+    "lamport": 105,
+    "class": "pending",
+    "op": "stage",
+    "project_key": "github.com/docwilde/lore",
+    "payload": {
+      "uid": "7a7abfdf-7777-4b7b-8b7b-7b7b7b7b7b7b",
+      "item": {
+        "kind": "memory",
+        "action": "add",
+        "text": "Uses uv, not pip, for LORE.",
+        "origin": "derived"
+      }
+    },
+    "mac": "ba32fbf6d45a2cf8aa7f4307a00dfbddb0cd566990a4d648569fba8b6ba58d1d",
+    "created": "2026-09-14T17:34:00Z"
+  },
+  "canonical_bytes_hex": "5b2236663666616663662d363636362d346136612d386136612d366136613661366136613661222c2231623165316662662d396331652d346630662d396331652d396331653963316539633165222c352c3130352c2270656e64696e67222c227374616765222c226769746875622e636f6d2f646f6377696c64652f6c6f7265222c7b226974656d223a7b22616374696f6e223a22616464222c226b696e64223a226d656d6f7279222c226f726967696e223a2264657269766564222c2274657874223a22557365732075762c206e6f74207069702c20666f72204c4f52452e227d2c22756964223a2237613761626664662d373737372d346237622d386237622d376237623762376237623762227d5d",
+  "expected_mac_hex": "ba32fbf6d45a2cf8aa7f4307a00dfbddb0cd566990a4d648569fba8b6ba58d1d",
+  "mac_should_verify": true
+}

@@ -1,0 +1,22 @@
+{
+  "description": "filemap/add, project scope.",
+  "op": {
+    "op_id": "3c3c7f3f-3333-4d3d-8d3d-3d3d3d3d3d3d",
+    "machine_id": "1b1e1fbf-9c1e-4f0f-9c1e-9c1e9c1e9c1e",
+    "machine_seq": 3,
+    "lamport": 103,
+    "class": "filemap",
+    "op": "add",
+    "project_key": "github.com/docwilde/lore",
+    "payload": {
+      "text": "lore_core/store.py — SQLite connection, WAL setup, schema migrations.",
+      "via": "interactive",
+      "writer": "approved"
+    },
+    "mac": "7611c2067afe9e65ab0dfefd785f74eb6a6201c22b29bf7c0ea0036de02953b6",
+    "created": "2026-09-14T17:32:00Z"
+  },
+  "canonical_bytes_hex": "5b2233633363376633662d333333332d346433642d386433642d336433643364336433643364222c2231623165316662662d396331652d346630662d396331652d396331653963316539633165222c332c3130332c2266696c656d6170222c22616464222c226769746875622e636f6d2f646f6377696c64652f6c6f7265222c7b2274657874223a226c6f72655f636f72652f73746f72652e707920e280942053514c69746520636f6e6e656374696f6e2c2057414c2073657475702c20736368656d61206d6967726174696f6e732e222c22766961223a22696e746572616374697665222c22777269746572223a22617070726f766564227d5d",
+  "expected_mac_hex": "7611c2067afe9e65ab0dfefd785f74eb6a6201c22b29bf7c0ea0036de02953b6",
+  "mac_should_verify": true
+}
