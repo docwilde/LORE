@@ -39,9 +39,11 @@ import os
 import sys
 
 from .config import FILEMAP_CAP, ROOT, one_line, project_root, project_slug
-from .gate import forget_entry, gate_write, provenance_tag, record_entry
+from .gate import entry_key, forget_entry, gate_write, provenance_tag, record_entry, writer_class
 from .memory import match_entries, read_entries, render_entries, usage_line
 from .scrub import scrub_secrets
+from .store import db_connect
+from .sync_oplog import append_op, resolve_project_key_for_slug
 
 
 __all__ = [
@@ -124,6 +126,20 @@ def write_filemap(slug: str, entries: list[str]) -> str | None:
     return None
 
 
+def _append_filemap_op(slug: str, op: str, payload: dict) -> None:
+    """sync spec PR 3: same "own connection, immediate commit" pattern as
+    memory.py's _append_memory_op -- the file map has no user scope, so
+    project_key always resolves through sync_projects. Never raises."""
+    try:
+        conn = db_connect()
+        pk = resolve_project_key_for_slug(conn, slug)
+        append_op(conn, "filemap", op, pk, payload)
+        conn.commit()
+        conn.close()
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
 def filemap_add(slug: str, path: str, purpose: str,
                 root: "str | None" = None, *, via: str = "direct") -> str | None:
     path = one_line(scrub_secrets(str(path)))
@@ -146,11 +162,16 @@ def filemap_add(slug: str, path: str, purpose: str,
             if err is None:
                 forget_entry("filemap", slug, old)
                 record_entry("filemap", slug, entry, via=via)
+                old_key = entry_key("filemap", slug, old)
+                _append_filemap_op(slug, "replace",
+                                   {"old_key": old_key, "text": entry, "via": via,
+                                    "writer": writer_class()})
             return err
     entries.append(entry)
     err = write_filemap(slug, entries)
     if err is None:
         record_entry("filemap", slug, entry, via=via)
+        _append_filemap_op(slug, "add", {"text": entry, "via": via, "writer": writer_class()})
     return err
 
 
@@ -172,6 +193,10 @@ def filemap_replace(slug: str, needle: str, path: str, purpose: str,
     if err is None:
         forget_entry("filemap", slug, old)
         record_entry("filemap", slug, entries[hits[0]], via=via)
+        old_key = entry_key("filemap", slug, old)
+        _append_filemap_op(slug, "replace",
+                           {"old_key": old_key, "text": entries[hits[0]], "via": via,
+                            "writer": writer_class()})
     return err
 
 
@@ -187,6 +212,8 @@ def filemap_remove(slug: str, needle: str) -> str | None:
     err = write_filemap(slug, entries)
     if err is None:
         forget_entry("filemap", slug, gone)
+        key = entry_key("filemap", slug, gone)
+        _append_filemap_op(slug, "remove", {"key": key})
     return err
 
 

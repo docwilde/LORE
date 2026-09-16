@@ -17,12 +17,16 @@ from .config import (
     resolve_subject_slug,
 )
 from .gate import (
+    entry_key,
     entry_provenance,
     forget_entry,
     gate_write,
     provenance_tag,
     record_entry,
+    writer_class,
 )
+from .store import db_connect
+from .sync_oplog import append_op, resolve_project_key_for_slug
 
 
 __all__ = [
@@ -99,6 +103,30 @@ def match_entries(entries: list[str], needle: str) -> list[int]:
     return [i for i, e in enumerate(entries) if low in e.lower()]
 
 
+def _memory_op_project_key(conn, scope: str, slug: str) -> "str | None":
+    """sync spec PR 3: user memory has no project dimension (None, the wire
+    spelling for "no project" -- docs/sync-protocol.md S3); project memory
+    resolves through sync_projects like every other project-scoped class."""
+    return None if scope == "user" else resolve_project_key_for_slug(conn, slug)
+
+
+def _append_memory_op(scope: str, slug: str, op: str, payload: dict) -> None:
+    """Append a `memory` op right after the file write that made it true --
+    a fresh connection, its own small transaction, immediately committed
+    (sync_oplog.append_op's own docstring explains why this differs from
+    the beliefs.py call sites, which share the mutation's own connection).
+    Never raises: a memory write must not fail because logging it did (same
+    house rule as gate.record_entry)."""
+    try:
+        conn = db_connect()
+        pk = _memory_op_project_key(conn, scope, slug)
+        append_op(conn, "memory", op, pk, payload)
+        conn.commit()
+        conn.close()
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
 def memory_add(scope: str, slug: str, text: str, *, via: str = "direct",
                origin: "str | None" = None) -> str | None:
     """`via` (ISSUE #43) records HOW this entry got in — "direct" for a write
@@ -116,6 +144,7 @@ def memory_add(scope: str, slug: str, text: str, *, via: str = "direct",
     err = write_entries(path, entries, memory_cap(scope), scope)
     if err is None:
         record_entry("memory", memory_bucket(scope, slug), text, via=via, origin=origin)
+        _append_memory_op(scope, slug, "add", {"text": text, "via": via, "writer": writer_class()})
     return err
 
 
@@ -137,6 +166,9 @@ def memory_replace(scope: str, slug: str, needle: str, text: str, *,
         bucket = memory_bucket(scope, slug)
         forget_entry("memory", bucket, old)
         record_entry("memory", bucket, new, via=via, origin=origin)
+        old_key = entry_key("memory", bucket, old)
+        _append_memory_op(scope, slug, "replace",
+                          {"old_key": old_key, "text": new, "via": via, "writer": writer_class()})
     return err
 
 
@@ -152,7 +184,10 @@ def memory_remove(scope: str, slug: str, needle: str) -> str | None:
     gone = entries.pop(hits[0])
     err = write_entries(path, entries, memory_cap(scope), scope)
     if err is None:
-        forget_entry("memory", memory_bucket(scope, slug), gone)
+        bucket = memory_bucket(scope, slug)
+        forget_entry("memory", bucket, gone)
+        key = entry_key("memory", bucket, gone)
+        _append_memory_op(scope, slug, "remove", {"key": key})
     return err
 
 

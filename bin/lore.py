@@ -108,6 +108,40 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_sync_status(args) -> int:
+    """`lore sync status` (sync spec PR 3, docs/plans/sync.md "The client"):
+    machine identity, unpushed op count, which classes are on/off, and the
+    per-peer cursors -- everything this PR's op log can report on its own,
+    with no network call. Transport (push/pull/bootstrap/login, `sync
+    conflicts`) is PR 5's job."""
+    conn = db_connect()
+    machine_id, label = get_or_create_machine(conn)
+    conn.commit()
+    print(f"machine:      {machine_id}  [{label}]")
+    print(f"sync:         {'OFF (LORE_DISABLE_SYNC)' if sync_disabled() else 'on'}")
+    enabled = sync_classes()
+    classes = ", ".join(
+        f"{name}={'on' if name in enabled else 'off'}"
+        for name in DEFAULT_SYNC_CLASSES.split(",")
+    )
+    print(f"classes:      {classes}")
+    print(f"unpushed ops: {unpushed_op_count(conn, machine_id)}")
+    peers = peer_rows(conn)
+    if not peers:
+        print("peers:        none configured")
+        return 0
+    max_seq = conn.execute(
+        "SELECT coalesce(max(seq), 0) FROM sync_ops WHERE machine_id = ?", (machine_id,)
+    ).fetchone()[0]
+    for peer, pushed_seq, cursor, last_push, last_pull, last_error in peers:
+        behind = max(0, max_seq - pushed_seq)
+        print(f"peer {peer}:   pushed_seq={pushed_seq} ({behind} behind)"
+              f" pulled_cursor={cursor or '-'}"
+              f" last_push={last_push or '-'} last_pull={last_pull or '-'}"
+              + (f"  ERROR: {last_error}" if last_error else ""))
+    return 0
+
+
 def claude_settings_path() -> Path:
     """~/.claude/settings.json — one accessor, so tests can point it elsewhere."""
     return Path.home() / ".claude" / "settings.json"
@@ -806,6 +840,13 @@ def main() -> int:
     sp = sub.add_parser("doctor", help="environment checks")
     sp.add_argument("--cwd")
     sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("sync", help="op log sync: machine identity, unpushed ops, peers")
+    syncsub = sp.add_subparsers(dest="scmd", required=True)
+    syp = syncsub.add_parser(
+        "status", help="machine id/label, unpushed op count, classes on/off, peer cursors")
+    syp.add_argument("--cwd")
+    syp.set_defaults(fn=cmd_sync_status, scmd="status")
 
     sp = sub.add_parser(
         "teardown",

@@ -32,6 +32,7 @@ from .config import (
 )
 from .gate import gate_write, writer_class
 from .store import db_connect, fts_expr
+from .sync_oplog import append_op, resolve_project_key_for_slug
 
 
 __all__ = [
@@ -39,6 +40,8 @@ __all__ = [
     'belief_insert',
     'belief_reinforce',
     'belief_supersede',
+    'belief_retract',
+    'record_dream_reviewed',
     'BELIEF_RELATIONS',
     'SYMMETRIC_RELATIONS',
     'edge_insert',
@@ -81,6 +84,19 @@ def belief_subject(scope: str, slug: str) -> str:
     return "user" if scope == "user" else f"project:{slug}"
 
 
+def _op_project_key(conn: sqlite3.Connection, subject: str) -> "str | None":
+    """The wire `project_key` for a belief op, derived from ITS OWN subject
+    (sync spec PR 3) -- not from the incidental `project` slug some callers
+    also pass for belief_evidence.project's display purposes. `user` and
+    `user-model` are global scope (None, same spelling docs/sync-protocol.md
+    S3 fixes for "no project"); `project:<slug>` resolves through
+    sync_projects the same way every other class's project-scoped op does.
+    """
+    if subject.startswith("project:"):
+        return resolve_project_key_for_slug(conn, subject[len("project:"):])
+    return None
+
+
 def belief_reinforce(
     conn: sqlite3.Connection, bid: int, confidence: float,
     session_id: str | None, project: str | None, note: str | None,
@@ -97,22 +113,33 @@ def belief_reinforce(
     deriver's write site -- reinforce the same way through one path, rather
     than the fold growing a second copy of this UPDATE+INSERT that could drift.
     """
-    row = conn.execute("SELECT confidence FROM beliefs WHERE id = ?", (bid,)).fetchone()
+    row = conn.execute("SELECT confidence, subject, uid FROM beliefs WHERE id = ?", (bid,)).fetchone()
     now = utcnow()
     conn.execute(
         "UPDATE beliefs SET confidence = ?, updated = ? WHERE id = ?",
         (max(row[0], confidence) if row else confidence, now, bid),
     )
+    note_text = one_line(note or "")[:300] or None
     conn.execute(
         "INSERT INTO belief_evidence VALUES(?,?,?,?,?)",
-        (bid, session_id, project, one_line(note or "")[:300] or None, now),
+        (bid, session_id, project, note_text, now),
     )
+    # sync spec PR 3 ("belief" verb `reinforce {uid, confidence, evidence}"):
+    # same transaction as the UPDATE+INSERT above -- a crash between them
+    # loses both or neither.
+    if row:
+        project_key = _op_project_key(conn, row[1])
+        append_op(conn, "belief", "reinforce", project_key, {
+            "uid": row[2], "confidence": max(row[0], confidence),
+            "evidence": {"session_id": session_id, "project_key": project_key, "note": note_text},
+        })
 
 
 def belief_insert(
     conn: sqlite3.Connection, subject: str, claim: str, confidence: float,
     session_id: str | None, project: str | None, note: str | None,
     exclude_ids: "set[int] | None" = None, *, via: str = "direct",
+    uid: "str | None" = None,
 ) -> tuple[int, bool]:
     """Insert or reinforce a belief; returns (id, created). An exact restatement
     of an active claim adds evidence and lifts confidence instead of duplicating.
@@ -124,7 +151,12 @@ def belief_insert(
     (reconciler), "direct" (a trusted CLI write), "approved" (a staged
     proposal the user applied). Stored alongside the detected writer class;
     reinforcement of an existing belief leaves both untouched, since the
-    claim's origin is where it FIRST entered the store."""
+    claim's origin is where it FIRST entered the store.
+    uid (sync spec PR 3): mint a fresh uuid4 when None (every ordinary
+    caller). A caller replaying a remote `insert` op passes the op's own
+    uid instead, so the row this machine creates carries the SAME wire
+    identity the authoring machine minted -- the property
+    test_store_is_a_function_of_its_log rests on."""
     claim = one_line(claim)
     confidence = min(max(confidence, 0.0), 1.0)
     row = conn.execute(
@@ -139,17 +171,28 @@ def belief_insert(
         belief_reinforce(conn, bid, confidence, session_id, project, note)
     else:
         now = utcnow()
+        row_uid = uid or str(uuid.uuid4())
         cur = conn.execute(
             "INSERT INTO beliefs(subject, claim, confidence, status, created, updated,"
             " writer, via, uid) VALUES(?,?,?,'active',?,?,?,?,?)",
-            (subject, claim, confidence, now, now, writer_class(), via, str(uuid.uuid4())),
+            (subject, claim, confidence, now, now, writer_class(), via, row_uid),
         )
         bid, created = cur.lastrowid, True
         conn.execute("INSERT INTO belief_fts(belief_id, claim) VALUES(?,?)", (bid, claim))
+        note_text = one_line(note or "")[:300] or None
         conn.execute(
             "INSERT INTO belief_evidence VALUES(?,?,?,?,?)",
-            (bid, session_id, project, one_line(note or "")[:300] or None, now),
+            (bid, session_id, project, note_text, now),
         )
+        # sync spec PR 3 ("belief" verb `insert {uid, subject, claim,
+        # confidence, via, writer, created, evidence{...}}"): same
+        # transaction as the three INSERTs above.
+        project_key = _op_project_key(conn, subject)
+        append_op(conn, "belief", "insert", project_key, {
+            "uid": row_uid, "subject": subject, "claim": claim, "confidence": confidence,
+            "via": via, "writer": writer_class(), "created": now,
+            "evidence": {"session_id": session_id, "project_key": project_key, "note": note_text},
+        })
     return bid, created
 
 
@@ -193,19 +236,33 @@ def edge_insert(conn: sqlite3.Connection, src: int, dst: int, rel: str, source: 
         return False
     if rel in SYMMETRIC_RELATIONS and src > dst:
         src, dst = dst, src
-    n = conn.execute("SELECT count(*) FROM beliefs WHERE id IN (?, ?)", (src, dst)).fetchone()[0]
-    if n != 2:
+    rows = conn.execute(
+        "SELECT id, subject, uid FROM beliefs WHERE id IN (?, ?)", (src, dst)).fetchall()
+    if len(rows) != 2:
         return False
+    by_id = {r[0]: r for r in rows}
     now = utcnow()
+    note_text = one_line(note or "")[:300] or None
     created = conn.execute(
         "INSERT OR IGNORE INTO belief_edges(src, dst, rel, source, session_id, note, created)"
         " VALUES(?,?,?,?,?,?,?)",
-        (src, dst, rel, source, session_id, one_line(note or "")[:300] or None, now),
+        (src, dst, rel, source, session_id, note_text, now),
     ).rowcount == 1
+    asserted = False
     if session_id:
-        conn.execute(
+        asserted = conn.execute(
             "INSERT OR IGNORE INTO belief_edge_assertions(src, dst, rel, session_id, created)"
-            " VALUES(?,?,?,?,?)", (src, dst, rel, session_id, now))
+            " VALUES(?,?,?,?,?)", (src, dst, rel, session_id, now)).rowcount == 1
+    # sync spec PR 3 ("belief" verb `edge {src_uid, dst_uid, rel, source,
+    # session_id, note}"): only when THIS call actually changed local
+    # state -- a same-session restatement that hits neither INSERT OR
+    # IGNORE is a domain no-op and must not grow the log.
+    if created or asserted:
+        project_key = _op_project_key(conn, by_id[src][1])
+        append_op(conn, "belief", "edge", project_key, {
+            "src_uid": by_id[src][2], "dst_uid": by_id[dst][2], "rel": rel,
+            "source": source, "session_id": session_id, "note": note_text,
+        })
     return created
 
 
@@ -338,6 +395,7 @@ def belief_supersede(conn: sqlite3.Connection, bid: int, by: int | None, reason:
     # superseded_by/resolution.
     if by == bid:
         return
+    row = conn.execute("SELECT subject, uid FROM beliefs WHERE id = ?", (bid,)).fetchone()
     n = conn.execute(
         "UPDATE beliefs SET status = 'superseded', superseded_by = ?, resolution = ?,"
         " updated = ? WHERE id = ? AND status = 'active'",
@@ -346,6 +404,57 @@ def belief_supersede(conn: sqlite3.Connection, bid: int, by: int | None, reason:
     if by and n:
         conn.execute("UPDATE belief_evidence SET belief_id = ? WHERE belief_id = ?", (by, bid))
         edge_repoint(conn, bid, by)
+        # sync spec PR 3 ("belief" verb `supersede {uid, by_uid, reason}"):
+        # `by is None` is belief_retract's own transitional step (below) --
+        # it never appends here, only belief_retract's OWN `retract` op does.
+        if row:
+            by_row = conn.execute("SELECT uid FROM beliefs WHERE id = ?", (by,)).fetchone()
+            project_key = _op_project_key(conn, row[0])
+            append_op(conn, "belief", "supersede", project_key, {
+                "uid": row[1], "by_uid": by_row[0] if by_row else None,
+                "reason": one_line(reason)[:300],
+            })
+
+
+def belief_retract(conn: sqlite3.Connection, bid: int, reason: str) -> bool:
+    """Retract a belief unconditionally -- the CLI `lore belief retract` and
+    approved-pending-retraction path (previously duplicated inline in
+    cmd_belief and pending.apply_item; consolidated here so the `retract` op
+    below is appended from exactly one place).
+
+    Two local writes, same as before this consolidation: belief_supersede
+    (transitions active -> superseded, by=None, so IT appends no op -- see
+    its own docstring) followed by an unconditional status='retracted',
+    matching the ORIGINAL two-step inline behaviour byte for byte. Returns
+    False when the belief does not exist.
+    """
+    row = conn.execute("SELECT subject, uid FROM beliefs WHERE id = ?", (bid,)).fetchone()
+    if not row:
+        return False
+    belief_supersede(conn, bid, None, reason)
+    n = conn.execute("UPDATE beliefs SET status = 'retracted' WHERE id = ?", (bid,)).rowcount
+    if n:
+        project_key = _op_project_key(conn, row[0])
+        append_op(conn, "belief", "retract", project_key, {"uid": row[1]})
+    return bool(n)
+
+
+def record_dream_reviewed(conn: sqlite3.Connection, a: int, b: int) -> bool:
+    """Record that the dreamer considered the pair (a, b) and decided
+    "keep both" -- dream_run's own INSERT OR IGNORE INTO dream_reviewed,
+    pulled out here so the `dream_reviewed` op (sync spec PR 3) has one
+    call site. Returns whether the pair was newly recorded."""
+    rows = conn.execute("SELECT id, uid FROM beliefs WHERE id IN (?, ?)", (a, b)).fetchall()
+    by_id = {r[0]: r[1] for r in rows}
+    lo, hi = min(a, b), max(a, b)
+    created = conn.execute(
+        "INSERT OR IGNORE INTO dream_reviewed VALUES(?,?)", (lo, hi)).rowcount == 1
+    if created and a in by_id and b in by_id:
+        subject = conn.execute("SELECT subject FROM beliefs WHERE id = ?", (a,)).fetchone()
+        project_key = _op_project_key(conn, subject[0]) if subject else None
+        append_op(conn, "belief", "dream_reviewed", project_key,
+                 {"a_uid": by_id[a], "b_uid": by_id[b]})
+    return created
 
 
 def format_belief(conn: sqlite3.Connection, row, with_evidence: bool = False) -> str:
@@ -429,8 +538,7 @@ def cmd_belief(args) -> int:
                              "reason": args.reason or "", "project": slug})
         if staged is not None:
             return staged
-        belief_supersede(conn, args.id, None, args.reason or "manually retracted")
-        conn.execute("UPDATE beliefs SET status = 'retracted' WHERE id = ?", (args.id,))
+        belief_retract(conn, args.id, args.reason or "manually retracted")
         conn.commit()
         print(f"belief {args.id} retracted.")
         return 0
@@ -501,12 +609,24 @@ def record_outcome(conn: sqlite3.Connection, belief_id: int, event: str, source:
                    note: "str | None" = None) -> None:
     """One ledger row; the single write path for every source (dream/user/audit),
     so the dormancy trigger below cannot be bypassed by one of them."""
+    outcome_uid = str(uuid.uuid4())
+    note_text = one_line(note or "")[:300] or None
+    agent_val = agent or agent_id()
     conn.execute(
         "INSERT INTO belief_outcomes(belief_id, event, source, session_id, agent, note,"
         " created, uid) VALUES(?,?,?,?,?,?,?,?)",
-        (belief_id, event, source, session_id, agent or agent_id(),
-         one_line(note or "")[:300] or None, utcnow(), str(uuid.uuid4())),
+        (belief_id, event, source, session_id, agent_val, note_text, utcnow(), outcome_uid),
     )
+    row = conn.execute("SELECT subject, uid FROM beliefs WHERE id = ?", (belief_id,)).fetchone()
+    project_key = _op_project_key(conn, row[0]) if row else None
+    # sync spec PR 3 ("belief" verb `outcome {uid, belief_uid, event, source,
+    # session_id, agent, note}"): append-only ledger row, so every call is a
+    # genuinely new mutation -- no idempotence check needed, unlike insert.
+    if row:
+        append_op(conn, "belief", "outcome", project_key, {
+            "uid": outcome_uid, "belief_uid": row[1], "event": event, "source": source,
+            "session_id": session_id, "agent": agent_val, "note": note_text,
+        })
     if event == "contradicted":
         n = conn.execute(
             "SELECT count(*) FROM belief_outcomes WHERE belief_id = ? AND event = 'contradicted'",
@@ -515,11 +635,16 @@ def record_outcome(conn: sqlite3.Connection, belief_id: int, event: str, source:
         if n >= CONTRADICTIONS_TO_DORMANT:
             # status guard: a superseded/retracted belief keeps its terminal
             # status — only an active one is pulled from the working set.
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE beliefs SET status = 'dormant', updated = ?"
                 " WHERE id = ? AND status = 'active'",
                 (utcnow(), belief_id),
             )
+            # sync spec PR 3 ("belief" verb `status {uid, active|dormant}"):
+            # append only when the UPDATE actually transitioned this row.
+            if cur.rowcount and row:
+                append_op(conn, "belief", "status", project_key,
+                         {"uid": row[1], "status": "dormant"})
 
 
 def outcome_counts(conn: sqlite3.Connection, belief_id: int) -> tuple[int, int, int]:
@@ -680,14 +805,29 @@ def dormant_sweep(conn: sqlite3.Connection, days: int = BELIEF_DORMANT_DAYS) -> 
     utcnow() writes; sqlite's datetime('now', '-N day') renders with a space
     where ours has a 'T', which only matters when the date parts are equal —
     a boundary-day belief goes dormant one sweep late, never early.
+
+    sync spec PR 3: one `status` op per row swept (ISSUE the bulk single-
+    statement UPDATE used to be -- individual rows are now needed to name
+    which uid transitioned), so this SELECTs the candidate set first and
+    updates row by row instead of in one statement. Same rows end up
+    dormant either way; only the number of round trips changed.
     """
-    cur = conn.execute(
-        "UPDATE beliefs SET status = 'dormant', updated = ?"
-        " WHERE status = 'active' AND confidence < 0.95"
+    rows = conn.execute(
+        "SELECT id, subject, uid FROM beliefs WHERE status = 'active' AND confidence < 0.95"
         " AND coalesce(last_referenced, updated) < datetime('now', ?)",
-        (utcnow(), f"-{days} day"),
+        (f"-{days} day",),
+    ).fetchall()
+    if not rows:
+        return 0
+    now = utcnow()
+    conn.executemany(
+        "UPDATE beliefs SET status = 'dormant', updated = ? WHERE id = ?",
+        [(now, r[0]) for r in rows],
     )
-    return cur.rowcount
+    for bid, subject, uid in rows:
+        project_key = _op_project_key(conn, subject)
+        append_op(conn, "belief", "status", project_key, {"uid": uid, "status": "dormant"})
+    return len(rows)
 
 
 def interaction_model_lines(limit: int = 5) -> "list[str]":

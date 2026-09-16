@@ -23,6 +23,7 @@ from .config import (
     utcnow,
 )
 from .scrub import scrub_secrets
+from .sync_oplog import append_op, get_or_create_machine, resolve_project_key_for_slug
 
 
 __all__ = [
@@ -230,6 +231,42 @@ def db_connect() -> sqlite3.Connection:
         )
         conn.commit()  # see the beliefs.uid migration above for why
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS belief_outcomes_uid ON belief_outcomes(uid)")
+    # SYNC OP LOG (sync spec PR 3, docs/plans/sync.md "The core: a local op
+    # log"): every mutation to a synced class appends one row here, in the
+    # SAME transaction as the mutation when the mutation is itself SQLite
+    # (beliefs.*), immediately after the write when it is a file (memory,
+    # filemap, pending, skills) -- see lore_core/sync_oplog.py. A plain
+    # CREATE, not an ALTER-inside-except migration, same reasoning as
+    # sync_projects above: these are new tables outright, nothing to migrate
+    # FROM.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_ops("
+        "seq INTEGER PRIMARY KEY, op_id TEXT NOT NULL UNIQUE, machine_id TEXT NOT NULL,"
+        " machine_seq INTEGER NOT NULL, lamport INTEGER NOT NULL, class TEXT NOT NULL,"
+        " op TEXT NOT NULL, project_key TEXT, payload TEXT NOT NULL, mac TEXT,"
+        " created TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0,"
+        " UNIQUE(machine_id, machine_seq))"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS sync_ops_order ON sync_ops(lamport, machine_id, machine_seq)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_machine("
+        "machine_id TEXT NOT NULL, label TEXT, lamport INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_peers("
+        "peer TEXT PRIMARY KEY, pushed_seq INTEGER NOT NULL DEFAULT 0,"
+        " pulled_cursor TEXT, last_push TEXT, last_pull TEXT, last_error TEXT)"
+    )
+    # RECEIVER-side fold record (PR4's apply engine populates this; the
+    # table is created here, alongside every other sync table, so a store
+    # this PR writes to is already shaped for it -- sync.md "The core: a
+    # local op log").
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_belief_aliases("
+        "uid TEXT PRIMARY KEY, belief_id INTEGER NOT NULL)"
+    )
     return conn
 
 
@@ -412,6 +449,23 @@ def index_sessions(conn: sqlite3.Connection, force: bool = False) -> tuple[int, 
         # the file from the top (delete + reread) instead of double-inserting.
         conn.execute("INSERT OR REPLACE INTO files(path, stamp) VALUES(?,?)", (key, stamp))
         indexed += 1
+        # SYNC (sync spec PR 3): a session has exactly one author machine, so
+        # the author's latest upsert is authoritative on every receiver --
+        # sync.md's `session` verb. `msgs` carries this pass's rows in one
+        # chunk (not paginated here -- PR 5's transport is what would need
+        # to page a very large session, not the local append).
+        pk = resolve_project_key_for_slug(conn, proj)
+        mid, _label = get_or_create_machine(conn)
+        append_op(conn, "session", "upsert", pk, {
+            "session_id": session_id, "project_key": pk, "machine_id": mid,
+            "cwd": meta["cwd"], "title": meta["title"], "first_ts": meta["first_ts"],
+            "last_ts": meta["last_ts"], "messages": len(messages),
+        })
+        if messages:
+            append_op(conn, "session", "msgs", pk, {
+                "session_id": session_id,
+                "rows": [{"ts": ts, "role": role, "content": text} for ts, role, text in messages],
+            })
     conn.commit()
     return indexed, skipped
 
@@ -492,6 +546,25 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
             conn.execute("INSERT INTO sessions VALUES(?,?,?,?,?,?,?)",
                          (session_id, proj, None, None,
                           new_rows[0][2] or None, new_rows[-1][2] or None, n))
+        # SYNC (sync spec PR 3): same two verbs as the full-parse path above,
+        # scoped to just the newly-consumed tail -- a streaming pass must not
+        # re-emit ops for lines a prior pass already logged.
+        row = conn.execute(
+            "SELECT project, cwd, title, first_ts, last_ts, messages FROM sessions"
+            " WHERE session_id = ?", (session_id,)).fetchone()
+        pk = resolve_project_key_for_slug(conn, proj)
+        mid, _label = get_or_create_machine(conn)
+        append_op(conn, "session", "upsert", pk, {
+            "session_id": session_id, "project_key": pk, "machine_id": mid,
+            "cwd": row[1] if row else None, "title": row[2] if row else None,
+            "first_ts": row[3] if row else None, "last_ts": row[4] if row else None,
+            "messages": row[5] if row else n,
+        })
+        append_op(conn, "session", "msgs", pk, {
+            "session_id": session_id,
+            "rows": [{"ts": ts, "role": role, "content": text}
+                     for _sid, _proj, ts, role, text in new_rows],
+        })
     if consumed != start or row is None:
         conn.execute(
             "INSERT OR REPLACE INTO files(path, stamp, lines_indexed) VALUES(?,?,?)",
