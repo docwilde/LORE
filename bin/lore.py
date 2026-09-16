@@ -109,11 +109,12 @@ def cmd_status(args) -> int:
 
 
 def cmd_sync_status(args) -> int:
-    """`lore sync status` (sync spec PR 3, docs/plans/sync.md "The client"):
-    machine identity, unpushed op count, which classes are on/off, and the
-    per-peer cursors -- everything this PR's op log can report on its own,
-    with no network call. Transport (push/pull/bootstrap/login, `sync
-    conflicts`) is PR 5's job."""
+    """`lore sync status` (sync spec PR 3/PR 4, docs/plans/sync.md "The
+    client"): machine identity, unpushed op count, which classes are on/off,
+    what the apply engine is holding back, the CONFLICTS a human has to
+    settle, and the per-peer cursors -- everything the local op log can report
+    on its own, with no network call. Transport (push/pull/bootstrap/login) is
+    PR 5's job."""
     conn = db_connect()
     machine_id, label = get_or_create_machine(conn)
     conn.commit()
@@ -126,6 +127,32 @@ def cmd_sync_status(args) -> int:
     )
     print(f"classes:      {classes}")
     print(f"unpushed ops: {unpushed_op_count(conn, machine_id)}")
+    # sync spec PR 4. `waiting` is ops held at applied=0 for a dependency that
+    # has not arrived (an edge naming a belief uid this store has not seen);
+    # they retry after the next pull and need no action. `unverified` is the
+    # containment count -- ops whose MAC was missing or wrong, staged as
+    # pending proposals and applied by nothing but a human.
+    waiting, unverified = deferred_op_count(conn), unverified_op_count(conn)
+    if waiting:
+        print(f"waiting:      {waiting} op(s) held for a missing dependency"
+              " (retried after the next pull)")
+    if unverified:
+        print(f"unverified:   {unverified} op(s) staged, NOT applied —"
+              " review with `lore pending`")
+    # sync.md memory/filemap rule 1: the same entry replaced on two machines.
+    # Both wordings are kept and neither is auto-chosen, so the pair stays
+    # here until a human removes one -- this is the write the gate exists to
+    # keep human, and a model is never asked to pick.
+    conflicts = conflict_rows(conn)
+    if conflicts:
+        print(f"conflicts:    {len(conflicts)} — the same entry was replaced on two"
+              " machines; both wordings were kept, remove one by hand")
+        for kind, bucket, a_text, b_text, _created in conflicts:
+            print(f"  [{kind} {bucket}]")
+            print(f"    A: {a_text}")
+            print(f"    B: {b_text}")
+    else:
+        print("conflicts:    none")
     peers = peer_rows(conn)
     if not peers:
         print("peers:        none configured")
