@@ -410,22 +410,63 @@ def cmd_pending(args) -> int:
 
 
 def archive(pid: str, status: str) -> None:
+    """Move a resolved proposal from pending/ into pending/archive/, stamped
+    with its resolution, and append the sync op that records it.
+
+    THE INVARIANT (two independent reports of the data-loss bug this
+    replaced): `src` is unlinked ONLY after the archive copy is confirmed
+    durable -- write a temp file, fsync, rename into place, THEN unlink. The
+    old code wrote the copy inside a try/except that swallowed both OSError
+    and JSONDecodeError and then unlinked `src` UNCONDITIONALLY; a disk-full
+    or permission error on the archive write destroyed a not-yet-reviewed
+    proposal with no copy anywhere, no error surfaced, and (because `item`
+    stayed None on that path) the resolve op silently skipped too.
+
+    A corrupt source (JSONDecodeError) is a DIFFERENT failure from a write
+    error -- nothing is wrong with the disk, the proposal itself cannot be
+    read -- so it is quarantined to pending/corrupt/ instead of archived
+    normally (see _quarantine_corrupt) and this returns without raising:
+    there is no status or uid left to resolve.
+
+    Raises OSError when the archive write itself fails. `src` is left
+    untouched in pending/ on every failure path, and no resolve op is
+    appended -- the caller (cmd_approve/cmd_reject) decides how to report it
+    and the proposal simply stays pending for a retry.
+    """
     src = ROOT / "pending" / f"{pid}.json"
-    dst_dir = ROOT / "pending" / "archive"
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    item = None
+    raw = src.read_text(encoding="utf-8")
     try:
-        item = json.loads(src.read_text(encoding="utf-8"))
-        item["status"] = status
-        item["resolved"] = utcnow()
-        (dst_dir / f"{pid}.json").write_text(json.dumps(item, indent=2), encoding="utf-8")
-    except (json.JSONDecodeError, OSError):
-        pass
-    src.unlink(missing_ok=True)
+        item = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _quarantine_corrupt(pid, src, raw, exc)
+        return
+    item["status"] = status
+    item["resolved"] = utcnow()
+
+    dst_dir = ROOT / "pending" / "archive"
+    dst = dst_dir / f"{pid}.json"
+    tmp = dst.with_name(dst.name + ".tmp")
+    try:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(item, indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, dst)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    # Only now -- the archive copy is confirmed on disk -- may the source go.
+    src.unlink()
+
     # sync spec PR 3 ("pending" verb `resolve {uid, status}"): the archive
     # IS the resolution, whether approved or rejected -- appended right
-    # after it, same "immediately after the file write" rule as stage_write.
-    uid = item.get("uid") if isinstance(item, dict) else None
+    # after it succeeds, same "immediately after the file write" rule as
+    # stage_write. Never allowed to turn a successful archive into an error:
+    # the resolution's own bookkeeping is best-effort, same house rule as
+    # append_pending_stage_op.
+    uid = item.get("uid")
     if uid:
         try:
             conn = db_connect()
@@ -435,6 +476,31 @@ def archive(pid: str, status: str) -> None:
             conn.close()
         except Exception:                                   # noqa: BLE001
             pass
+
+
+def _quarantine_corrupt(pid: str, src: Path, raw: str, exc: json.JSONDecodeError) -> None:
+    """A pending file that will not parse as JSON: not a disk failure, the
+    proposal itself is unreadable. Filed to pending/corrupt/ -- via the same
+    temp-then-rename discipline as the normal archive, so `src` is never
+    unlinked outright -- rather than left blocking the pile forever
+    (load_pending() silently skips a file it cannot parse) or destroyed.
+    """
+    corrupt_dir = ROOT / "pending" / "corrupt"
+    dst = corrupt_dir / f"{pid}.json"
+    tmp = dst.with_name(dst.name + ".tmp")
+    try:
+        corrupt_dir.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(raw, encoding="utf-8")
+        os.replace(tmp, dst)
+    except OSError as write_exc:
+        tmp.unlink(missing_ok=True)
+        print(f"{pid}: not valid JSON ({exc}) and could not be moved to"
+              f" pending/corrupt/ ({write_exc}) -- left in place in pending/",
+              file=sys.stderr)
+        return
+    src.unlink()
+    print(f"{pid}: pending proposal was not valid JSON ({exc}) -- moved to"
+          f" pending/corrupt/{pid}.json rather than lost")
 
 
 def apply_item(pid: str, item: dict, force: bool) -> str | None:
@@ -603,10 +669,20 @@ def cmd_approve(args) -> int:
         if err:
             failures += 1
             print(f"{pid}: NOT applied — {err}")
-        else:
+            continue
+        try:
             archive(pid, "approved")
-            note = cross_project_note(items[pid])
-            print(f"{pid}: applied." + (f" ({note})" if note else ""))
+        except OSError as exc:
+            # The write already landed (apply_item succeeded); only the
+            # archive copy failed. `archive` left the source in pending/
+            # untouched, so surface this rather than claim it is resolved --
+            # a retried `lore approve` will re-run apply_item on it.
+            failures += 1
+            print(f"{pid}: applied, but could not archive the proposal — {exc}."
+                  f" It remains in pending/ for a retry.")
+            continue
+        note = cross_project_note(items[pid])
+        print(f"{pid}: applied." + (f" ({note})" if note else ""))
     return 1 if failures else 0
 
 
@@ -615,7 +691,13 @@ def cmd_reject(args) -> int:
     if not ids:
         print("nothing matched.", file=sys.stderr)
         return 1
+    failures = 0
     for pid in ids:
-        archive(pid, "rejected")
+        try:
+            archive(pid, "rejected")
+        except OSError as exc:
+            failures += 1
+            print(f"{pid}: NOT rejected — could not archive: {exc}")
+            continue
         print(f"{pid}: rejected.")
-    return 0
+    return 1 if failures else 0

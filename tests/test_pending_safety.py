@@ -16,6 +16,21 @@ resolve()+relative_to() containment check at APPLY time
 (pending.apply_item's _resolve_contained), so an item that reaches pending/
 some other way -- an older pile, a hand-edited file -- still cannot escape.
 
+DEFECT 2: archive() destroyed unreviewed proposals, also confirmed
+independently by two external reviewers. The archive write was wrapped in a
+try/except that swallowed both OSError and JSONDecodeError, after which the
+source was unlinked UNCONDITIONALLY -- a disk-full or permission error on
+the archive copy destroyed a not-yet-reviewed proposal with no copy
+anywhere, no error raised, and (because `item` stayed None on that path)
+the resolve op silently skipped too.
+
+Fixed with a write-temp / fsync / rename / THEN-unlink sequence: the source
+is never removed unless the archive copy is confirmed durable, a write
+failure raises OSError and leaves the source in place (cmd_approve/
+cmd_reject report it without losing the proposal), and a corrupt
+(unparseable) source is quarantined to pending/corrupt/ instead of either
+path -- neither lost nor left blocking the pile.
+
 Isolated LORE_ROOT/LORE_SKILLS_DIR in a fresh temp dir, never the real
 ~/.claude/lore -- same convention as every other file in this suite.
 
@@ -32,6 +47,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest import mock
 
 TMP = tempfile.mkdtemp(prefix="lore-test-pending-safety-")
 os.environ["LORE_ROOT"] = os.path.join(TMP, "root")
@@ -87,6 +103,28 @@ def _write_pending(pid: str, item: dict) -> Path:
     path = pdir / f"{pid}.json"
     path.write_text(json.dumps(item), encoding="utf-8")
     return path
+
+
+def _resolve_op_for_uid(uid: str) -> "dict | None":
+    conn = lore.db_connect()
+    rows = conn.execute(
+        "SELECT payload FROM sync_ops WHERE class = 'pending' AND op = 'resolve'"
+    ).fetchall()
+    conn.close()
+    for (p,) in rows:
+        payload = json.loads(p)
+        if payload.get("uid") == uid:
+            return payload
+    return None
+
+
+def _resolve_op_count() -> int:
+    conn = lore.db_connect()
+    n = conn.execute(
+        "SELECT count(*) FROM sync_ops WHERE class = 'pending' AND op = 'resolve'"
+    ).fetchone()[0]
+    conn.close()
+    return n
 
 
 class TestSkillNameIsValidatedAtStaging(unittest.TestCase):
@@ -205,6 +243,100 @@ class TestSkillNameIsValidatedAtApply(unittest.TestCase):
         self.assertFalse(target.exists())
         retired = list((lore.ROOT / "skills-retired").glob(f"{VALID_NAME}-*"))
         self.assertEqual(len(retired), 1)
+
+
+class TestArchiveNeverLosesAnUnreviewedProposal(unittest.TestCase):
+    """DEFECT 2: unlink only after the archive copy is confirmed durable."""
+
+    def setUp(self):
+        _clear_state()
+
+    def test_happy_path_still_archives_unlinks_and_appends_resolve_with_uid(self):
+        pid = lore.stage_write({"kind": "memory", "scope": "user", "action": "add",
+                                "text": "the happy path"})
+        item = json.loads((_pending_dir() / f"{pid}.json").read_text(encoding="utf-8"))
+        uid = item["uid"]
+
+        lore.archive(pid, "approved")
+
+        self.assertFalse((_pending_dir() / f"{pid}.json").exists())
+        archived_path = _pending_dir() / "archive" / f"{pid}.json"
+        self.assertTrue(archived_path.exists())
+        archived = json.loads(archived_path.read_text(encoding="utf-8"))
+        self.assertEqual(archived["status"], "approved")
+        self.assertIn("resolved", archived)
+        op = _resolve_op_for_uid(uid)
+        self.assertIsNotNone(op)
+        self.assertEqual(op["status"], "approved")
+
+    def test_archive_failure_leaves_the_source_present_raises_and_appends_no_resolve_op(self):
+        pid = lore.stage_write({"kind": "memory", "scope": "user", "action": "add",
+                                "text": "must survive a disk-full archive write"})
+        item = json.loads((_pending_dir() / f"{pid}.json").read_text(encoding="utf-8"))
+        uid = item["uid"]
+
+        with mock.patch("lore_core.pending.os.fsync",
+                        side_effect=OSError("disk full (simulated)")):
+            with self.assertRaises(OSError):
+                lore.archive(pid, "approved")
+
+        # source untouched -- the proposal is still pending, not lost
+        self.assertTrue((_pending_dir() / f"{pid}.json").exists())
+        self.assertFalse((_pending_dir() / "archive" / f"{pid}.json").exists())
+        # no half-written temp file left behind either
+        archive_dir = _pending_dir() / "archive"
+        leftover = list(archive_dir.glob("*.tmp")) if archive_dir.exists() else []
+        self.assertEqual(leftover, [])
+        self.assertIsNone(_resolve_op_for_uid(uid))
+
+    def test_cmd_approve_reports_an_archive_failure_without_losing_the_proposal(self):
+        pid = lore.stage_write({"kind": "memory", "scope": "user", "action": "add",
+                                "text": "approved but the archive write fails"})
+        with mock.patch("lore_core.pending.os.fsync",
+                        side_effect=OSError("disk full (simulated)")), quiet() as out:
+            rc = lore.cmd_approve(Namespace(ids=[pid], force=False))
+        self.assertEqual(rc, 1)
+        self.assertIn(pid, out.getvalue())
+        self.assertTrue((_pending_dir() / f"{pid}.json").exists())
+
+    def test_archive_of_a_corrupt_source_quarantines_it_instead_of_losing_it(self):
+        pid = "corrupt-001"
+        raw = "{this is not valid json"
+        _pending_dir().mkdir(parents=True, exist_ok=True)
+        path = _pending_dir() / f"{pid}.json"
+        path.write_text(raw, encoding="utf-8")
+        before = _resolve_op_count()
+
+        with quiet() as out:
+            lore.archive(pid, "approved")
+
+        self.assertFalse(path.exists())
+        corrupt_path = _pending_dir() / "corrupt" / f"{pid}.json"
+        self.assertTrue(corrupt_path.exists())
+        self.assertEqual(corrupt_path.read_text(encoding="utf-8"), raw)
+        self.assertIn(pid, out.getvalue())
+        self.assertEqual(_resolve_op_count(), before)
+
+    def test_reject_flow_still_works_for_a_valid_proposal(self):
+        pid = lore.stage_write({"kind": "memory", "scope": "user", "action": "add",
+                                "text": "a fact the user rejected"})
+        with quiet():
+            rc = lore.cmd_reject(Namespace(ids=[pid]))
+        self.assertEqual(rc, 0)
+        self.assertFalse((_pending_dir() / f"{pid}.json").exists())
+        self.assertTrue((_pending_dir() / "archive" / f"{pid}.json").exists())
+
+
+class TestPackagingStaysStdlibOnly(unittest.TestCase):
+    """Sanity pin, not a repeat of test_packaging.py's own suite: this file
+    adds no import anywhere in lore_core, so the dependency list this repo's
+    front-page promise rests on must still be empty."""
+
+    def test_pyproject_still_declares_no_runtime_dependencies(self):
+        import tomllib
+        pyproject = tomllib.loads(
+            (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(pyproject["project"].get("dependencies", []), [])
 
 
 if __name__ == "__main__":
