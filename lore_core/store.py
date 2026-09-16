@@ -135,6 +135,12 @@ def db_connect() -> sqlite3.Connection:
             [(str(uuid.uuid4()), bid) for (bid,) in
              conn.execute("SELECT id FROM beliefs WHERE uid IS NULL")],
         )
+        # commit now, not left to the caller: the ALTER above already
+        # auto-committed as DDL, so a process that closes this connection
+        # without writing anything else would otherwise roll the backfill
+        # UPDATE back -- and the ALTER, now a no-op on every later connect,
+        # would never give the backfill a second chance to run.
+        conn.commit()
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS beliefs_uid ON beliefs(uid)")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS belief_evidence("
@@ -206,6 +212,7 @@ def db_connect() -> sqlite3.Connection:
             [(str(uuid.uuid4()), oid) for (oid,) in
              conn.execute("SELECT id FROM belief_outcomes WHERE uid IS NULL")],
         )
+        conn.commit()  # see the beliefs.uid migration above for why
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS belief_outcomes_uid ON belief_outcomes(uid)")
     return conn
 

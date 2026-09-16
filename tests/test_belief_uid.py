@@ -263,19 +263,28 @@ class BeliefShowUnchanged(unittest.TestCase):
         self.assertIn(
             f"[{bid}] (project:{SLUG}, conf 0.75, active, 1 evidence, via direct) shown belief",
             out)
-        # nothing user-facing changed: no uid leaks into the printed line
-        self.assertNotIn("uid", out.lower())
+        # nothing user-facing changed: no uid VALUE leaks into the printed
+        # line (the project slug itself spells "uid", so a bare substring
+        # check on the word would false-positive -- assert on shape instead).
+        conn2 = lore.db_connect()
+        stored_uid = conn2.execute("SELECT uid FROM beliefs WHERE id = ?", (bid,)).fetchone()[0]
+        conn2.close()
+        self.assertNotIn(stored_uid, out)
+        self.assertNotRegex(out, UUID4_RE)
 
     def test_belief_list_output_has_no_uid_either(self):
         conn = lore.db_connect()
-        lore.belief_insert(conn, f"project:{SLUG}", "a listed belief", 0.6,
-                           "s1", SLUG, None, via="direct")
+        bid, _ = lore.belief_insert(conn, f"project:{SLUG}", "a listed belief", 0.6,
+                                    "s1", SLUG, None, via="direct")
         conn.commit()
+        stored_uid = conn.execute("SELECT uid FROM beliefs WHERE id = ?", (bid,)).fetchone()[0]
         conn.close()
         with quiet() as buf:
             rc = lore.cmd_belief(Namespace(bcmd="list", subject=None, all=False, cwd=CWD))
         self.assertEqual(rc, 0)
-        self.assertNotIn("uid", buf.getvalue().lower())
+        out = buf.getvalue()
+        self.assertNotIn(stored_uid, out)
+        self.assertNotRegex(out, UUID4_RE)
 
 
 class StagedProposalsCarryAUid(unittest.TestCase):
