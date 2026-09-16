@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.51.0 — 2026-09-16
+
+- New **`project_key(cwd)`**: a project's identity on the wire, from its `origin` remote with scheme, `.git` and case normalised, so two checkouts of one repository agree. No remote, or a git failure, falls back to the slug.
+- New **`sync_projects`** table maps key to slug. An author records its own pair; a receiver meeting an unknown key gets a synthetic `sync-<key>` slug and a store there.
+- **`lore inject`** reconciles identity: a synthetic slug for this key spawns `lore project move` detached, so the store re-files once and the second run is a no-op. Failures are swallowed; inject never fails over this.
+- **`project_move`** now re-points `sync_projects` rows in the same commit as the move, so a concurrent inject sees a settled state instead of racing a separate update.
+- **`project_root`** also degrades on a git timeout, not only on `OSError`. It previously let a timeout escape the fallback chain.
+- **`lore doctor`** prints the key beside the slug. `project_slug()` is unchanged and no transcript directory moves.
+- Tests: `tests/test_project_key.py` (14, new). Suite 447.
+
 ## 0.50.0 — 2026-09-16
 
 - Every belief and every outcome row carries a **`uid`** (uuid4) beside its integer id. The integer stays the local join key; the uid is the name a row can travel under. Two ALTER-inside-except migrations, each with a `CREATE UNIQUE INDEX`.
