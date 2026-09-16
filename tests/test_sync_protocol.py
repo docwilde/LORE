@@ -173,9 +173,15 @@ class TestCanonicalBytesMatchTheDocument(unittest.TestCase):
                 # escapes) so only structural characters remain, then check
                 # those for the separators a non-compact encoder inserts.
                 structure = re.sub(r'"(?:[^"\\]|\\.)*"', '""', text)
-                self.assertNotIn(", ", structure, f"{name}: space after a structural comma")
-                self.assertNotIn(": ", structure, f"{name}: space after a structural colon")
-                self.assertNotIn("  ", structure, f"{name}: repeated space outside strings")
+                self.assertNotIn(
+                    ", ", structure, f"{name}: space after a structural comma"
+                )
+                self.assertNotIn(
+                    ": ", structure, f"{name}: space after a structural colon"
+                )
+                self.assertNotIn(
+                    "  ", structure, f"{name}: repeated space outside strings"
+                )
 
     def test_canonical_bytes_is_a_flat_8_element_array(self):
         for name, fx in FIXTURES.items():
