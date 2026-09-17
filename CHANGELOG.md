@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.55.0 — 2026-09-17
+
+- New **`sync_client.py`** + **`sync_cmds.py`**: `lore sync push`, `pull`, bare `sync`, `bootstrap`, `login`, `classes`, on stdlib `urllib`. A pulled page sorts into canonical order before it applies: paging order is never merge order.
+- A **detached pull at SessionStart** and a push after the review worker's `dream_run`, guarded by `LORE_SYNC_PUSH_AFTER_REVIEW`. Hook-path failures stay silent, the explicit command is loud, and `UserPromptSubmit` is untouched.
+- Fix **`peer_state`**: it never committed, so sqlite3's legacy isolation held the transaction open and later reads missed ops others had committed. A caller that touched it then wrote memory pushed an empty log, reporting success.
+- Fix **`gate.append_pending_stage_op`** (#74): `db_connect` now imports at module level. Resolved at call time it went through `sys.modules`, so two `lore_core` instances in one process cross-wrote each other's staging ops.
+- **`docs/sync-protocol.md` §6.1** names a third `403`: a push whose batch `machine_id` is not the token's machine. `lore-hub` 0.1.1 enforces it; the contract had not said so.
+- Nothing syncs unless configured, and no key means every op stages unverified (§5.3). Tests: `test_sync_client.py` (21, new), `test_sync_hub.py` (10, new, skipped without a hub). Suite 566 across 26 files.
+
 ## 0.54.0 — 2026-09-16
 
 - New **`lore_core/sync_apply.py`**: applying a pulled op is a pure function of `(local state, op)`. Canonical order is `(lamport, machine_id, machine_seq)` and never a wall clock, so every node converges alike.
