@@ -208,13 +208,19 @@ def stage_rows() -> list[tuple[str, str, str]]:
     return rows
 
 
-def config_env_write(var: str, value: "str | None") -> int:
+def config_env_write(var: str, value: "str | None", *, secret: bool = False) -> int:
     """set (value) / unset (None) one LORE_* variable in settings.json "env".
 
     Teardown's settings-edit pattern: parse, refuse to write over JSON that
     does not parse, preserve every other key, indent=2 + trailing newline.
     Only LORE_* is accepted — this command manages lore's own knobs, not the
     user's environment at large.
+
+    `secret` keeps the VALUE out of the success line (sync spec PR 5): `lore
+    sync login <token>` writes a bearer credential through this path, and a
+    confirmation that echoes it puts the token in the scrollback, the
+    terminal's history file and every pasted bug report. The variable name is
+    still printed — what was written is not the secret, the value is.
     """
     if not re.fullmatch(r"LORE_[A-Z0-9_]+", var):
         print(f"refusing: {var!r} is not a LORE_* variable — only lore's own"
@@ -246,11 +252,91 @@ def config_env_write(var: str, value: "str | None") -> int:
         action = f"removed {var}"
     else:
         env[var] = value
-        action = f"set {var}={value}"
+        action = f"set {var} (value not shown)" if secret else f"set {var}={value}"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     print(f"{action} in {path} — hook-read switches apply from the next hook"
           " fire of a session started with it; restart to refresh everything.")
+    return 0
+
+
+# Every class the op log knows, in the order `lore sync classes` prints them:
+# the six that are on by default (sync_oplog.DEFAULT_SYNC_CLASSES) and the
+# four sync.md's Configuration table lists as opt-in.
+SYNC_OPT_IN_CLASSES = ("transcripts", "tabsets", "worktrees", "skill_usage")
+
+
+def cmd_sync_login(args) -> int:
+    """`lore sync login <token>`: store this machine's bearer token through the
+    same settings.json "env" path as `lore config set` (sync.md "Open
+    decisions" #4 — "the existing mechanism, and the one a sandbox can
+    populate from its own environment").
+
+    The token never reaches stdout: config_env_write is called with
+    secret=True, and the only thing printed about it is that it was written.
+    """
+    token = (args.token or "").strip()
+    if not token:
+        print("sync login: no token given — `lore sync login <token>`",
+              file=sys.stderr)
+        return 1
+    rc = config_env_write("LORE_SYNC_TOKEN", token, secret=True)
+    if rc:
+        return rc
+    env = settings_env()
+    url = env.get("LORE_SYNC_URL") or os.environ.get("LORE_SYNC_URL", "")
+    if not url:
+        print("no hub URL yet — `lore config set LORE_SYNC_URL"
+              " https://hub.example` before the first `lore sync`.")
+    else:
+        print(f"hub: {url}  (check it with `lore sync status`)")
+    return 0
+
+
+def cmd_sync_classes(args) -> int:
+    """`lore sync classes [+class|-class ...]`: show or edit LORE_SYNC_CLASSES.
+
+    With no argument it prints the effective set, settings.json winning over
+    the inherited process environment — the same precedence stage_rows uses,
+    and for the same reason: settings.json is where this command writes, and
+    the process env lags until the next session.
+
+    A class name that is not one of the ten is refused rather than written:
+    LORE_SYNC_CLASSES is an allow-list, so a typo in it does not fail loudly
+    at sync time, it silently stops a whole class from ever travelling.
+    """
+    known = list(DEFAULT_SYNC_CLASSES.split(",")) + list(SYNC_OPT_IN_CLASSES)
+    env = settings_env()
+    raw = env.get("LORE_SYNC_CLASSES", os.environ.get("LORE_SYNC_CLASSES",
+                                                      DEFAULT_SYNC_CLASSES))
+    current = [c.strip() for c in str(raw).split(",") if c.strip()]
+    changes = list(getattr(args, "changes", None) or [])
+    if changes:
+        wanted = list(current)
+        for change in changes:
+            if change[:1] not in ("+", "-") or not change[1:]:
+                print(f"sync classes: {change!r} is not +class or -class",
+                      file=sys.stderr)
+                return 1
+            name = change[1:]
+            if name not in known:
+                print(f"sync classes: unknown class {name!r} — known classes are"
+                      f" {', '.join(known)}", file=sys.stderr)
+                return 1
+            if change[0] == "+" and name not in wanted:
+                wanted.append(name)
+            elif change[0] == "-" and name in wanted:
+                wanted.remove(name)
+        ordered = [c for c in known if c in wanted]
+        rc = config_env_write("LORE_SYNC_CLASSES", ",".join(ordered))
+        if rc:
+            return rc
+        current = ordered
+    for name in known:
+        state = "on" if name in current else "off"
+        note = "  (opt-in)" if name in SYNC_OPT_IN_CLASSES else ""
+        print(f"  {name:<12} {state}{note}")
+    print("edit: lore sync classes +transcripts -sessions")
     return 0
 
 
@@ -868,12 +954,43 @@ def main() -> int:
     sp.add_argument("--cwd")
     sp.set_defaults(fn=cmd_doctor)
 
-    sp = sub.add_parser("sync", help="op log sync: machine identity, unpushed ops, peers")
-    syncsub = sp.add_subparsers(dest="scmd", required=True)
+    sp = sub.add_parser("sync", help="op log sync: pull then push, status, peers")
+    sp.add_argument("--cwd")
+    sp.set_defaults(fn=cmd_sync, scmd=None)
+    syncsub = sp.add_subparsers(dest="scmd")
     syp = syncsub.add_parser(
         "status", help="machine id/label, unpushed op count, classes on/off, peer cursors")
     syp.add_argument("--cwd")
     syp.set_defaults(fn=cmd_sync_status, scmd="status")
+    syp = syncsub.add_parser(
+        "push", help="send this machine's unpushed ops to the hub, page by page")
+    syp.add_argument("--from", dest="from_seq", type=int, default=None,
+                     metavar="SEQ",
+                     help="re-send from this local seq instead of the peer cursor"
+                          " (--from 0 re-seeds a hub that lost its data)")
+    syp.add_argument("--cwd")
+    syp.set_defaults(fn=cmd_sync_push, scmd="push")
+    syp = syncsub.add_parser(
+        "pull", help="fetch what the hub holds, sort into canonical order, apply")
+    syp.add_argument("--cwd")
+    syp.set_defaults(fn=cmd_sync_pull, scmd="pull")
+    syp = syncsub.add_parser(
+        "bootstrap",
+        help="fill a fresh ROOT from the hub: pull from 0 and apply")
+    syp.add_argument("--merge", action="store_true",
+                     help="proceed on a populated ROOT — an ordinary pull,"
+                          " with every merge rule applied")
+    syp.add_argument("--cwd")
+    syp.set_defaults(fn=cmd_sync_bootstrap, scmd="bootstrap")
+    syp = syncsub.add_parser(
+        "login", help='store this machine\'s hub token in settings.json "env"')
+    syp.add_argument("token", help="the bearer token, shown once when it was minted")
+    syp.set_defaults(fn=cmd_sync_login, scmd="login")
+    syp = syncsub.add_parser(
+        "classes", help="show or edit LORE_SYNC_CLASSES (+class / -class)")
+    syp.add_argument("changes", nargs="*", metavar="+class|-class",
+                     help="turn a class on (+) or off (-); no argument shows them")
+    syp.set_defaults(fn=cmd_sync_classes, scmd="classes")
 
     sp = sub.add_parser(
         "teardown",
@@ -889,7 +1006,16 @@ def main() -> int:
     sp.add_argument("--all", action="store_true", help="the whole state.db")
     sp.set_defaults(fn=cmd_reset)
 
-    args = p.parse_args()
+    # `lore sync classes -beliefs` is the documented spelling (sync.md "The
+    # client"), and a leading dash is how argparse recognises an OPTION -- it
+    # would reject `-beliefs` as unrecognised before cmd_sync_classes ever
+    # ran. Inserting the `--` separator argparse already understands keeps the
+    # documented spelling working without teaching every other subcommand a
+    # different prefix character.
+    argv = sys.argv[1:]
+    if argv[:2] == ["sync", "classes"] and "--" not in argv:
+        argv = argv[:2] + ["--"] + argv[2:]
+    args = p.parse_args(argv)
     return args.fn(args)
 
 

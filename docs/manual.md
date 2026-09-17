@@ -28,7 +28,7 @@ decisions were made, see [`user-model-channel-separation.md`](user-model-channel
 
 Everything runs as a plain CLI too — `python3 <plugin>/bin/lore.py --help`, stdlib only:
 
-`inject` · `snapshot` · `memory` · `filemap` · `search` · `session` · `index` · `review` · `backfill` · `pending` · `approve` · `reject` · `belief` · `ask` · `outcome` · `audit` · `consult` · `stats` · `dream` · `crosscheck` · `status` · `motd` · `statusline` · `provenance` · `config` · `doctor` · `teardown` · `reset`
+`inject` · `snapshot` · `memory` · `filemap` · `search` · `session` · `index` · `review` · `backfill` · `pending` · `approve` · `reject` · `belief` · `ask` · `outcome` · `audit` · `consult` · `stats` · `dream` · `crosscheck` · `status` · `motd` · `statusline` · `provenance` · `config` · `doctor` · `sync` · `teardown` · `reset`
 
 ## Five stores
 
@@ -209,9 +209,38 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_DISABLE_BELIEFS` | unset | belief store off; the deriver prompt drops the conclusions channel, `ask` serves memory + search |
 | `LORE_DISABLE_SKILLS` | unset | skillification off; skill proposals drop unstaged with a log line |
 | `LORE_WRITE_GATE` | `on` | `off` lets non-interactive callers write directly again (pre-0.36 behaviour). An escape hatch for your own automation — advisory, not a control: anything able to set it can equally forge the signals the gate reads |
+| `LORE_SYNC_URL` | unset | hub base URL; unset means sync is off entirely |
+| `LORE_SYNC_TOKEN` | unset | this machine's bearer token — written by `lore sync login` |
+| `LORE_SYNC_AUTH` | `token` | `token` (bearer) or `tailscale` (identity header injected by `tailscale serve`) |
+| `LORE_SYNC_HMAC_KEY` | unset | shared integrity key, set on every machine of one account, never sent |
+| `LORE_MACHINE_ID` | persisted uuid4 | this machine's identity in the op log; honoured only at first creation. The hostname is a label, not the id. |
+| `LORE_SYNC_CLASSES` | `memory,filemap,beliefs,pending,skills,sessions` | which classes travel; `transcripts`, `tabsets`, `worktrees`, `skill_usage` are opt-in |
+| `LORE_SYNC_TIMEOUT` | 15 | seconds per hub call |
+| `LORE_SYNC_PULL_AT_START` | `1` | detached pull at SessionStart; `0` turns it off |
+| `LORE_SYNC_PULL_SECS` | 120 | floor between those pulls, so a resume/clear/compact storm does not fan out |
+| `LORE_SYNC_PUSH_AFTER_REVIEW` | `1` | push when the review worker finishes; `0` turns it off |
+| `LORE_DISABLE_SYNC` | unset | stage kill switch: no op is appended and nothing syncs |
 | `LORE_SKIP` | unset | any value no-ops every hook — the master off-switch above all stage switches |
 
 A disabled stage exits silently rather than failing, and drops its channel from the deriver prompt entirely — a model told about a channel will fill it.
+
+## Sync — one memory on every machine
+
+Off until `LORE_SYNC_URL` is set. With it set, every write to a synced class appends an op to a local log, and `lore sync` moves those ops through a hub so the laptop, the workstation and a cloud sandbox end up with one memory instead of three. The merge rules live here, in `lore_core`; the hub stores ops and never interprets one.
+
+| Command | What it does |
+|---|---|
+| `lore sync` | pull, then push |
+| `lore sync status` | machine id and label, unpushed count, classes on/off, what is waiting or unverified, conflicts, peer cursors. No network call. |
+| `lore sync push` | send this machine's own ops from the peer cursor, page by page. `--from <seq>` re-sends from there instead (`--from 0` re-seeds a hub that lost its data). |
+| `lore sync pull` | drain everything past the cursor, sort into canonical order, apply, then advance the cursor |
+| `lore sync bootstrap` | fill a fresh `LORE_ROOT` from the hub. Refuses a populated one and says what is in it; `--merge` proceeds as an ordinary pull. |
+| `lore sync login <token>` | store this machine's bearer token in `settings.json` → `"env"`. The token is never echoed. |
+| `lore sync classes [+class\|-class]` | show or edit `LORE_SYNC_CLASSES` |
+
+A pull runs detached at SessionStart and never on the prompt loop; a push runs after the review worker finishes. Both are silent when the hub is unreachable — ops accumulate and the next push drains them — and an explicit `lore sync` prints the error. A `409` from the hub means the client's log has a gap: it is reported, never retried around, because a lost op means a store that is no longer a function of its log.
+
+Ops are signed with `LORE_SYNC_HMAC_KEY`, which every machine of one account holds and the hub never sees. An op whose MAC is missing or wrong is staged as a pending proposal tagged `unverified` and applied by nothing but a human — a memory entry reaches the model's context verbatim, so an op that could be forged is a prompt injection with a persistence layer.
 
 ## Hooks
 

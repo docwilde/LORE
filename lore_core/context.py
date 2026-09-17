@@ -38,12 +38,16 @@ from .graph import context_candidates, render_context_block
 from .memory import memory_bucket, memory_path, read_entries, render_entries, usage_line
 from .pending import load_pending
 from .store import db_connect, record_project_identity
+from .sync_client import hub_url
+from .sync_oplog import sync_disabled
 
 
 __all__ = [
     'REFRESH_DIR',
     'REFRESH_STAMP_TTL',
+    'SYNC_PULL_STAMP',
     'refresh_interval',
+    'sync_pull_interval',
     'build_context',
     'build_motd',
     'BANNER_WORDMARK',
@@ -57,6 +61,31 @@ __all__ = [
 
 REFRESH_DIR = ROOT / ".refresh"
 REFRESH_STAMP_TTL = 7 * 24 * 3600
+
+# One stamp for the whole machine, not one per session: the storm this
+# throttles (resume / clear / compact, and several terminals opened at once)
+# is precisely a burst of DIFFERENT sessions starting within seconds of each
+# other, and a per-session stamp would let every one of them through.
+SYNC_PULL_STAMP = ROOT / ".sync" / "pull"
+
+
+def sync_pull_interval() -> int:
+    """Seconds between SessionStart pulls (LORE_SYNC_PULL_SECS, default 120).
+
+    Not a rate limit on the hub -- one pull is one drained GET -- but on the
+    fan-out: a `claude --resume` of five sessions is five SessionStart hooks
+    in one second, and five detached pulls racing to apply the same ops would
+    have five processes contending for the same SQLite writer for no gain.
+    """
+    raw = os.environ.get("LORE_SYNC_PULL_SECS", "").strip()
+    if raw:
+        try:
+            secs = int(raw)
+        except ValueError:
+            return 120
+        if secs >= 0:
+            return secs
+    return 120
 
 
 def refresh_interval() -> int | None:
@@ -423,6 +452,13 @@ def cmd_inject(args) -> int:
     hook = read_hook_input()
     cwd = args.cwd or hook.get("cwd") or os.getcwd()
     _reconcile_project_identity(cwd)
+    # sync spec PR 5 (sync.md "Non-blocking pull at SessionStart"): kick a
+    # DETACHED pull and render whatever is on disk now. The inject hook has a
+    # 30 s budget and build_context is synchronous; a round trip to a hub
+    # does not belong inside it. What the pull lands seconds later reaches
+    # the session through refresh_on_change on the next prompt -- no new
+    # delivery mechanism, the one already here does it.
+    _maybe_spawn_sync_pull(cwd, datetime.now(timezone.utc).timestamp())
     # inject kill switch (2026-08-22): a hook fire (payload on stdin) exits 0
     # silently; a manual `lore inject`/`lore snapshot` still renders — the
     # switch turns off the automatic injection, not the CLI.
@@ -529,6 +565,44 @@ def _maybe_spawn_midsession_review(hook: dict, cwd: str, session: str, now: floa
         subprocess.Popen(
             [sys.executable, cli, "review", "--transcript", str(transcript),
              "--cwd", cwd, "--foreground"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+    except OSError:
+        pass
+
+
+def _maybe_spawn_sync_pull(cwd: str, now: float) -> None:
+    """Spawn `lore sync pull`, detached, at most once per sync_pull_interval().
+
+    Spawned exactly the way _maybe_spawn_midsession_review spawns a review --
+    Popen, start_new_session=True, stdio to DEVNULL, every failure path
+    silent -- because the rule is the same one: a hook never fails, stalls or
+    prints over infrastructure (sync.md's Failure modes table: "hook-path
+    pull and background push fail silently"). An explicit `lore sync pull`
+    is where a human sees the error.
+
+    The stamp is written BEFORE the spawn, so a pull that dies still holds
+    the storm off for its interval -- the alternative is a crash loop that
+    re-spawns on every session start.
+    """
+    if os.environ.get("LORE_SYNC_PULL_AT_START", "1").strip() in ("", "0"):
+        return
+    if sync_disabled() or not hub_url():
+        return
+    try:
+        SYNC_PULL_STAMP.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    last = _read_stamp(SYNC_PULL_STAMP)
+    if last is not None and 0 <= now - last < sync_pull_interval():
+        return
+    _write_stamp(SYNC_PULL_STAMP, now)
+    import subprocess
+    cli = str(Path(__file__).resolve().parents[1] / "bin" / "lore.py")
+    env = dict(os.environ, LORE_NOTIFY="0")
+    try:
+        subprocess.Popen(
+            [sys.executable, cli, "sync", "pull", "--cwd", cwd],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL, start_new_session=True, env=env)
     except OSError:

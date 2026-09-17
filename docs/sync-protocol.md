@@ -316,7 +316,11 @@ two.
   `tokens.revoked` is set.
 - **403** `forbidden` — a valid credential lacking the scope the endpoint
   needs (`push` for `POST /ops`, `pull` for `GET /ops` and `GET
-  /snapshot`), or a Tailscale login not on the hub's allow-list.
+  /snapshot`), a Tailscale login not on the hub's allow-list, or — on
+  `POST /ops` in bearer mode — a batch whose top-level `machine_id` is not
+  the machine the token was issued for. A server MAY bind a token to one
+  machine (`lore-hub` does, and answers this 403); a client MUST NOT retry
+  into it, since no retry changes which machine its credential names.
 
 ### 6.2 `POST /ops` — push
 

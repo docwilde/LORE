@@ -27,6 +27,10 @@ in deriver.py's docstring):
     pending    staged proposals: list/approve/reject/archive
     sync_apply sync spec PR 4: the apply engine -- canonical order, the
                per-class merge rules, MAC verification on receipt
+    sync_client sync spec PR 5: the hub transport (urllib, bearer auth,
+               typed errors) -- a leaf, importing nothing from the package
+    sync_cmds  sync spec PR 5: `lore sync push|pull|bootstrap` -- the peer
+               cursors, the drain, and the hook-path entry points
     context    memory snapshot rendering + SessionStart/refresh/MOTD
 
 Off that graph, importing nothing from the package and imported by
@@ -54,6 +58,8 @@ from .dreamer import *  # noqa: F401,F403
 from .dialectic import *  # noqa: F401,F403
 from .pending import *  # noqa: F401,F403
 from .sync_apply import *  # noqa: F401,F403
+from .sync_client import *  # noqa: F401,F403
+from .sync_cmds import *  # noqa: F401,F403
 from .relocate import *  # noqa: F401,F403
 from .context import *  # noqa: F401,F403
 
@@ -71,6 +77,8 @@ from . import dreamer as _dreamer
 from . import dialectic as _dialectic
 from . import pending as _pending
 from . import sync_apply as _sync_apply
+from . import sync_client as _sync_client
+from . import sync_cmds as _sync_cmds
 from . import relocate as _relocate
 from . import context as _context
 
@@ -89,6 +97,8 @@ __all__ = [
     *_dialectic.__all__,
     *_pending.__all__,
     *_sync_apply.__all__,
+    *_sync_client.__all__,
+    *_sync_cmds.__all__,
     *_relocate.__all__,
     *_context.__all__,
 ]
