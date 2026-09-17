@@ -82,8 +82,21 @@ def peer_state(conn: sqlite3.Connection, peer: str = HUB_PEER) -> "tuple[int, st
     """(pushed_seq, pulled_cursor) for this peer, creating the row on first
     sight. pushed_seq is a LOCAL `sync_ops.seq`; pulled_cursor is the peer's
     own opaque position marker (a hub_seq, as text) and is never interpreted
-    here beyond being echoed back as `since`."""
+    here beyond being echoed back as `since`.
+
+    COMMITS, and not only to make the row durable. sqlite3's legacy isolation
+    opens a transaction on that INSERT and holds it, and SQLite reads inside
+    one transaction see the database as it was when the transaction began --
+    so a connection that ran this and then read `sync_ops` would MISS every
+    op another connection committed in between. That is not a theoretical
+    window: memory/filemap/pending/skill writes all append their op on their
+    OWN short-lived connection (sync_oplog's contract), so a caller that
+    opened its connection, called this, and then wrote memory would push an
+    empty log and report success. Committing here ends the transaction, and
+    the read that follows starts a fresh snapshot.
+    """
     _ensure_peer(conn, peer)
+    conn.commit()
     row = conn.execute(
         "SELECT pushed_seq, pulled_cursor FROM sync_peers WHERE peer = ?", (peer,)
     ).fetchone()
