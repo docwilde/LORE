@@ -65,6 +65,13 @@ from pathlib import Path
 
 from .config import ROOT, SKILL_NAME_RE, agent_id, one_line, utcnow, valid_skill_name
 from .sync_oplog import append_op, resolve_project_key_for_slug
+# Module level, deliberately (ISSUE #74). `store` imports this module's
+# siblings but never gate itself, so there is no cycle to dodge. Resolved
+# at CALL time it went through `sys.modules` instead, and a harness holding
+# two lore_core instances -- which is how two machines are played in one
+# process -- got whichever loaded last, silently writing machine A's
+# staging op into machine B's store.
+from .store import db_connect
 
 
 __all__ = [
@@ -267,10 +274,6 @@ def append_pending_stage_op(item: dict) -> None:
     created. Never raises: staging a proposal must not fail because logging
     it did (same house rule as record_entry)."""
     try:
-        from .store import db_connect  # local: store imports THIS module's
-        # siblings (sync_oplog) but not gate, so this is safe at module
-        # level too -- kept local anyway to mirror cmd_provenance's existing
-        # pattern of deferring a store import to the call site.
         conn = db_connect()
         pk = pending_op_project_key(conn, item)
         append_op(conn, "pending", "stage", pk, {"uid": item["uid"], "item": item})
