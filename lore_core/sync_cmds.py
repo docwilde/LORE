@@ -37,6 +37,7 @@ import sys
 
 from .config import utcnow
 from .store import db_connect
+from .sync_apply import apply_ops, canonical_order
 from .sync_oplog import get_or_create_machine
 from .sync_client import (
     DEFAULT_PAGE,
@@ -54,6 +55,10 @@ __all__ = [
     'push_ops',
     'conflict_report',
     'cmd_sync_push',
+    'drain',
+    'pull_ops',
+    'pull_summary',
+    'cmd_sync_pull',
 ]
 
 # The one peer name Transport A ever writes. Transport B (PR 9) writes a
@@ -269,4 +274,134 @@ def cmd_sync_push(args) -> int:
     print(f"sync push: {report['sent']} op(s) in {report['pages']} page(s) —"
           f" {report['accepted']} accepted, {report['duplicate']} duplicate"
           + (f" (hub_seq_max {hub_seq})" if hub_seq is not None else ""))
+    return 0
+
+
+def drain(client, *, since: int = 0, page: int = DEFAULT_PAGE,
+          exclude: "str | None" = None) -> "tuple[list[dict], int, int]":
+    """Fetch every op past `since`, following `next` until it comes back null.
+
+    Returns (ops, pages, drained_to) where `drained_to` is the position in the
+    server's UNFILTERED stream that this drain reached -- the highest of the
+    last non-null `next` and the highest `hub_seq` actually delivered. Both
+    are positions the caller has now seen everything up to (S6.3: `next` is
+    "the hub_seq to pass as since for the following call", and `since` means
+    "already fully drained"), and taking the greater of the two avoids the two
+    ways a cursor built from only one of them stalls: a final page with
+    `next: null` would otherwise be re-delivered on every pull, and an
+    `exclude`d tail would otherwise never be passed.
+
+    NOTHING IS APPLIED HERE (S6.4 step 2: "MUST NOT apply anything before the
+    drain completes"). A page's array is in hub_seq order, which is insertion
+    order on the server and not merge order; applying page by page would apply
+    in the order the ops happened to arrive, which is the one order the whole
+    design says is meaningless.
+    """
+    ops: "list[dict]" = []
+    cursor, pages, last_next = int(since), 0, 0
+    while True:
+        answer = client.pull(cursor, limit=page, exclude=exclude)
+        got = answer.get("ops") or []
+        ops.extend(got)
+        pages += 1
+        nxt = answer.get("next")
+        if nxt is None:
+            break
+        nxt = int(nxt)
+        last_next = max(last_next, nxt)
+        if nxt <= cursor:
+            # The server did not advance. Continuing would spin forever on a
+            # server that is wrong about its own cursor; stopping loses
+            # nothing, because whatever is past here is still past here on the
+            # next pull.
+            break
+        cursor = nxt
+    highest = max((int(o["hub_seq"]) for o in ops if isinstance(o.get("hub_seq"), int)),
+                  default=0)
+    return ops, pages, max(int(since), last_next, highest)
+
+
+def pull_ops(conn: sqlite3.Connection, client, *, machine_id: "str | None" = None,
+             peer: str = HUB_PEER, page: int = DEFAULT_PAGE,
+             since: "int | None" = None, exclude_self: bool = True,
+             key: "str | None" = None) -> dict:
+    """Drain, SORT INTO CANONICAL ORDER, apply, then advance the cursor --
+    in that order, which is the whole of docs/sync-protocol.md S6.4.
+
+    Returns the apply engine's own report plus {"fetched", "pages",
+    "cursor"}. The cursor moves only after the sorted apply has returned: S6.4
+    step 5 -- "if the process is interrupted mid-drain, the cursor MUST NOT
+    have advanced past where it started", and every op in the re-drain that
+    follows is either a fresh application or a no-op through S9's idempotence.
+
+    `exclude_self` keeps this machine's own ops off the wire on an ordinary
+    pull; `lore sync bootstrap` turns it off deliberately (see
+    cmd_sync_bootstrap) because a machine whose store was lost has to pull
+    its OWN history back before its machine_seq counter means anything again.
+    """
+    if machine_id is None:
+        machine_id, _label = get_or_create_machine(conn)
+        conn.commit()
+    cursor_raw = peer_state(conn, peer)[1]
+    if since is None:
+        try:
+            since = int(cursor_raw or 0)
+        except (TypeError, ValueError):
+            since = 0
+    try:
+        ops, pages, drained_to = drain(
+            client, since=int(since), page=page,
+            exclude=machine_id if exclude_self else None)
+    except SyncError as exc:
+        _note(conn, peer, error=str(exc))
+        raise
+
+    # S6.4 step 3. apply_ops sorts too -- it has to, since it is also the
+    # replay path -- but the sort is stated here as well because THIS is the
+    # place the protocol puts it, and a reader following S6.4 should find it
+    # where the drain ends rather than two modules away.
+    report = apply_ops(conn, canonical_order(ops), key=key)
+    report["fetched"] = len(ops)
+    report["pages"] = pages
+    report["cursor"] = drained_to
+    _note(conn, peer, pulled_cursor=str(drained_to), when_pull=True, error=None)
+    return report
+
+
+def pull_summary(report: dict) -> str:
+    """One line, naming only what happened. `waiting` and `unverified` are
+    named rather than folded into a total because they are the two outcomes
+    that need a human eventually -- one after the next pull, one after a
+    review in `lore pending`."""
+    if not report["fetched"]:
+        return "sync pull: nothing new"
+    parts = [f"{report['applied']} applied"]
+    if report.get("duplicate"):
+        parts.append(f"{report['duplicate']} already held")
+    if report.get("deferred"):
+        parts.append(f"{report['deferred']} waiting for a dependency")
+    if report.get("unverified"):
+        parts.append(f"{report['unverified']} unverified (staged, NOT applied)")
+    if report.get("unknown"):
+        parts.append(f"{report['unknown']} unknown")
+    return (f"sync pull: {report['fetched']} op(s) in {report['pages']} page(s) — "
+            + ", ".join(parts))
+
+
+def cmd_sync_pull(args) -> int:
+    """`lore sync pull`: fetch since the peer cursor, sort, apply, advance."""
+    try:
+        client = hub_client()
+    except SyncNotConfigured as exc:
+        print(f"sync pull: {exc}", file=sys.stderr)
+        return 1
+    conn = db_connect()
+    machine_id, _label = get_or_create_machine(conn)
+    conn.commit()
+    try:
+        report = pull_ops(conn, client, machine_id=machine_id)
+    except SyncError as exc:
+        print(f"sync pull failed: {exc}", file=sys.stderr)
+        return 1
+    print(pull_summary(report))
     return 0

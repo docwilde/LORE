@@ -882,6 +882,10 @@ def main() -> int:
                           " (--from 0 re-seeds a hub that lost its data)")
     syp.add_argument("--cwd")
     syp.set_defaults(fn=cmd_sync_push, scmd="push")
+    syp = syncsub.add_parser(
+        "pull", help="fetch what the hub holds, sort into canonical order, apply")
+    syp.add_argument("--cwd")
+    syp.set_defaults(fn=cmd_sync_pull, scmd="pull")
 
     sp = sub.add_parser(
         "teardown",
