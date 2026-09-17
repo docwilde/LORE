@@ -527,7 +527,16 @@ def cmd_sync(args) -> int:
     accumulate either way, and a hub that answered one call and not the other
     is exactly the partial-outage case sync.md says costs lateness, never
     data. Both failures print; the exit code is non-zero if either failed.
+
+    "No hub configured" is checked once, here, rather than twice by the two
+    halves -- it is one fact about this machine, and printing it twice reads
+    like two failures.
     """
+    try:
+        hub_client()
+    except SyncNotConfigured as exc:
+        print(f"sync: {exc}", file=sys.stderr)
+        return 1
     rc = cmd_sync_pull(args)
     return cmd_sync_push(args) or rc
 
