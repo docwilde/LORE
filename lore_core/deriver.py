@@ -1337,6 +1337,17 @@ def worker_run(jobfile: Path) -> int:
             dream_run(conn, job["project"])
         elif derived:
             print("dream deferred (LORE_DEFER_DREAM) — run `lore dream` when the batch ends")
+        # sync spec PR 5 (sync.md "Background push"): this is the one place
+        # every derived write has landed -- proposals, beliefs, edges,
+        # outcomes, then the dreamer -- so one page carries the session's
+        # whole yield, in a process that is already detached. Deferred import
+        # for the same reason dream_run's is: sync_cmds sits above the deriver
+        # in the package's dependency graph (it drives the apply engine), and
+        # a module-level import here would close the cycle.
+        from .sync_cmds import push_after_review
+        pushed = push_after_review()
+        if pushed:
+            print(pushed)
         jobfile.unlink(missing_ok=True)
         return 0
     finally:

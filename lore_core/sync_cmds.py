@@ -32,6 +32,7 @@ where it can be kept honestly.
 """
 
 import json
+import os
 import sqlite3
 import sys
 
@@ -63,6 +64,7 @@ __all__ = [
     'root_is_populated',
     'cmd_sync_bootstrap',
     'cmd_sync',
+    'push_after_review',
 ]
 
 # The one peer name Transport A ever writes. Transport B (PR 9) writes a
@@ -515,3 +517,48 @@ def cmd_sync(args) -> int:
     """
     rc = cmd_sync_pull(args)
     return cmd_sync_push(args) or rc
+
+
+def push_after_review() -> "str | None":
+    """The background push (sync.md "Background push"), called by the review
+    worker after its `dream_run` step and nowhere else. Returns ONE line for
+    the worker's log, or None when there was nothing to say.
+
+    `worker_run` is the one place every derived write lands -- staged
+    proposals, beliefs, edges, outcomes, then the dreamer -- so a push here
+    moves the session's whole yield in one page, in a process that is already
+    detached (deriver.py's Popen with start_new_session=True). Nothing about
+    it is on a hook's clock.
+
+    NEVER RAISES. A failed push costs lateness, not data (sync.md's Failure
+    modes table: "ops accumulate; next push drains"), and a review that
+    already derived its beliefs must not report failure because a hub was
+    down. It does return a line about the failure: the destination is
+    logs/review-<session>.log, which is a log, and an outage that leaves no
+    trace in a log is an outage nobody finds.
+
+    LORE_SYNC_PUSH_AFTER_REVIEW=0 turns it off; an unconfigured hub
+    (LORE_SYNC_URL unset) is silence, not an error, because that is the
+    default state of a machine that has never run `lore sync login`.
+    """
+    if os.environ.get("LORE_SYNC_PUSH_AFTER_REVIEW", "1").strip() in ("", "0"):
+        return None
+    try:
+        client = hub_client()
+    except SyncNotConfigured:
+        return None
+    try:
+        conn = db_connect()
+        machine_id, _label = get_or_create_machine(conn)
+        conn.commit()
+        report = push_ops(conn, client, machine_id=machine_id)
+    except SyncConflict as exc:
+        return conflict_report(exc, "this machine")
+    except SyncError as exc:
+        return f"sync push failed: {exc} — ops kept for the next push"
+    except Exception as exc:  # a broken store must not fail a finished review
+        return f"sync push skipped: {exc.__class__.__name__}: {exc}"
+    if not report["sent"]:
+        return None
+    return (f"sync push: {report['sent']} op(s) — {report['accepted']} accepted,"
+            f" {report['duplicate']} duplicate")
