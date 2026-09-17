@@ -35,7 +35,8 @@ import json
 import sqlite3
 import sys
 
-from .config import utcnow
+from .config import ROOT, utcnow
+from .memory import memory_path, read_entries
 from .store import db_connect
 from .sync_apply import apply_ops, canonical_order
 from .sync_oplog import get_or_create_machine
@@ -59,6 +60,9 @@ __all__ = [
     'pull_ops',
     'pull_summary',
     'cmd_sync_pull',
+    'root_is_populated',
+    'cmd_sync_bootstrap',
+    'cmd_sync',
 ]
 
 # The one peer name Transport A ever writes. Transport B (PR 9) writes a
@@ -405,3 +409,109 @@ def cmd_sync_pull(args) -> int:
         return 1
     print(pull_summary(report))
     return 0
+
+
+def root_is_populated(conn: sqlite3.Connection, machine_id: str) -> "list[str]":
+    """What this ROOT already holds, as lines fit to print -- empty when the
+    machine is fresh.
+
+    `lore sync bootstrap` is for a machine whose ROOT is fresh (sync.md "The
+    client"), and the reason it refuses otherwise is not that merging is
+    dangerous -- `--merge` does exactly that, and an ordinary pull does it
+    every day. It is that a human who types `bootstrap` on the wrong machine
+    means "this store is empty, fill it", and being told what is actually
+    there is more useful than silently proving them wrong.
+
+    Own ops count because they are the sharpest signal available: a store
+    that has ever written a synced mutation has a history of its own, whatever
+    its files currently say.
+    """
+    reasons = []
+    user = len(read_entries(memory_path("user", "")))
+    if user:
+        reasons.append(f"{user} user memory entr{'y' if user == 1 else 'ies'}")
+    project = sum(len(read_entries(path))
+                  for path in sorted((ROOT / "projects").glob("*/MEMORY.md")))
+    if project:
+        reasons.append(f"{project} project memory entr{'y' if project == 1 else 'ies'}")
+    beliefs = conn.execute("SELECT count(*) FROM beliefs").fetchone()[0]
+    if beliefs:
+        reasons.append(f"{beliefs} belief(s)")
+    pending_dir = ROOT / "pending"
+    staged = len(list(pending_dir.glob("*.json"))) if pending_dir.exists() else 0
+    if staged:
+        reasons.append(f"{staged} staged proposal(s)")
+    own = conn.execute("SELECT count(*) FROM sync_ops WHERE machine_id = ?",
+                       (machine_id,)).fetchone()[0]
+    if own:
+        reasons.append(f"{own} op(s) authored here")
+    return reasons
+
+
+def cmd_sync_bootstrap(args) -> int:
+    """`lore sync bootstrap`: pull from 0 and apply. Refuses on a populated
+    ROOT unless `--merge`, which is an ordinary pull (sync.md "The client").
+
+    THE FRESH PATH DOES NOT EXCLUDE ITS OWN MACHINE. An ordinary pull sets
+    `exclude` to this machine because re-downloading ops it authored teaches
+    it nothing. A bootstrap is the one case where that is false: a machine
+    rebuilt from nothing, or restored from a backup, keeps its machine_id and
+    therefore its machine_seq counter, and the hub is the only place the ops
+    between the backup and now still exist. Pulling them back restores both
+    the data and the counter -- without which the very next push offers a
+    machine_seq the hub filled long ago and gets 409 machine_seq_conflict.
+
+    Bootstrap never calls GET /snapshot: S6.5 reserves it, a v1 server
+    answers 501, and v1 bootstrap is a drained pull from since=0 (sync.md
+    "Open decisions" #6).
+    """
+    try:
+        client = hub_client()
+    except SyncNotConfigured as exc:
+        print(f"sync bootstrap: {exc}", file=sys.stderr)
+        return 1
+    conn = db_connect()
+    machine_id, _label = get_or_create_machine(conn)
+    conn.commit()
+    merge = bool(getattr(args, "merge", False))
+    reasons = root_is_populated(conn, machine_id)
+    if reasons and not merge:
+        print("sync bootstrap: this ROOT is not empty — it already holds",
+              file=sys.stderr)
+        for reason in reasons:
+            print(f"  {reason}", file=sys.stderr)
+        print("bootstrap is for a machine starting from nothing. To merge the"
+              " hub's log into what is here — an ordinary pull, with every"
+              " merge rule applied — run:\n  lore sync bootstrap --merge",
+              file=sys.stderr)
+        return 1
+    try:
+        if merge:
+            report = pull_ops(conn, client, machine_id=machine_id)
+        else:
+            report = pull_ops(conn, client, machine_id=machine_id, since=0,
+                              exclude_self=False)
+    except SyncError as exc:
+        print(f"sync bootstrap failed: {exc}", file=sys.stderr)
+        return 1
+    print(pull_summary(report).replace("sync pull:", "sync bootstrap:", 1))
+    return 0
+
+
+def cmd_sync(args) -> int:
+    """`lore sync`: pull, then push.
+
+    In that order on purpose. Pull first means this machine's own push is
+    computed against a store that already holds everything the hub had --
+    and, more importantly, that a machine which lost its log has its
+    machine_seq counter back before it offers the hub a seq the hub has
+    already filled. Push first would be the same two calls with one more way
+    to fail.
+
+    A failed pull does NOT skip the push: the two are independent, ops
+    accumulate either way, and a hub that answered one call and not the other
+    is exactly the partial-outage case sync.md says costs lateness, never
+    data. Both failures print; the exit code is non-zero if either failed.
+    """
+    rc = cmd_sync_pull(args)
+    return cmd_sync_push(args) or rc
