@@ -874,6 +874,14 @@ def main() -> int:
         "status", help="machine id/label, unpushed op count, classes on/off, peer cursors")
     syp.add_argument("--cwd")
     syp.set_defaults(fn=cmd_sync_status, scmd="status")
+    syp = syncsub.add_parser(
+        "push", help="send this machine's unpushed ops to the hub, page by page")
+    syp.add_argument("--from", dest="from_seq", type=int, default=None,
+                     metavar="SEQ",
+                     help="re-send from this local seq instead of the peer cursor"
+                          " (--from 0 re-seeds a hub that lost its data)")
+    syp.add_argument("--cwd")
+    syp.set_defaults(fn=cmd_sync_push, scmd="push")
 
     sp = sub.add_parser(
         "teardown",
