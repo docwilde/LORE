@@ -907,6 +907,60 @@ class PeerContainment(unittest.TestCase):
 # E) the two halves of the Failure modes rule
 # ---------------------------------------------------------------------------
 
+@unittest.skipUnless(SOCKETS_OK, SOCKETS_WHY)
+class BootstrapFromAPeer(unittest.TestCase):
+    """sync.md, Transport B: with no hub "there is no single place to
+    bootstrap a fresh machine from -- it must be TOLD which peer to trust as
+    its starting point, and that peer must be up"."""
+
+    def setUp(self):
+        self.env = dict(os.environ)
+        self.root_a, self.a = _machine("boot-a", MACHINE_A)
+        self.a.memory_add("user", "", "everything this machine knows",
+                          via="direct")
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.env)
+
+    def test_a_fresh_root_fills_from_the_peer_it_was_told_to_trust(self):
+        """The failure this catches is a bootstrap that only knows how to talk
+        to a hub, which would leave a peer-only pair with no way to add a
+        third machine at all."""
+        root_b, b = _machine("boot-b", MACHINE_B)
+        with serving(self.a) as url:
+            class Args:
+                cwd = str(root_b)
+                merge = False
+                peer = url
+
+            with quiet() as buf:
+                rc = b.cmd_sync_bootstrap(Args())
+        self.assertEqual(rc, 0, buf.getvalue())
+        self.assertIn("sync bootstrap", buf.getvalue())
+        self.assertIn("everything this machine knows", _entries(b))
+
+    def test_bootstrap_will_not_pick_a_starting_point_on_your_behalf(self):
+        """Two sources configured and none named: the failure this catches is
+        a bootstrap that silently picks the first one, which on a machine
+        being rebuilt decides which history it gets."""
+        root_b, b = _machine("boot-two", MACHINE_B)
+        os.environ["LORE_SYNC_URL"] = "http://127.0.0.1:9"
+        os.environ["LORE_SYNC_TOKEN"] = "irrelevant"
+        os.environ["LORE_SYNC_PEER"] = "workstation"
+
+        class Args:
+            cwd = str(root_b)
+            merge = False
+            peer = None
+
+        with quiet() as buf:
+            rc = b.cmd_sync_bootstrap(Args())
+        self.assertEqual(rc, 1)
+        self.assertIn("--peer", buf.getvalue())
+        self.assertEqual(_entries(b), [])
+
+
 class PeerHookPaths(unittest.TestCase):
     """sync.md Failure modes: unreachable means "hook-path pull and background
     push fail SILENTLY (house rule: a hook never fails over infrastructure);
