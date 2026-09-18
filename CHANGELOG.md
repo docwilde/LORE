@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.56.0 — 2026-09-18
+
+- New **`lore_core/sync_peer.py`**: `lore sync serve` and the peer client, so two machines converge with **no hub**. `pull_targets` hands hub and peers to the same `pull_ops`: one drain, one canonical order, one MAC check, one apply engine.
+- Loopback bind by default. A non-loopback bind refuses to start unless the operator says so in words, rather than opening a port that only serves refusals. A Tailscale identity header counts only on the loopback listener.
+- A forged op from a peer is staged `unverified` and applied by nothing. Proven against a build with the check removed, which does apply it — so the assertion cannot pass vacuously.
+- Fix: the hub's peer key was unnamespaced, so a tailnet node called `hub` would have shared the hub's cursor row and the two transports would have resumed each other's drains.
+- The README describes sync for the first time, led by the containment: nothing leaves the machine until a hub or peer, a token and a key are configured, and a receiver holding no key stages everything.
+- Tests: `tests/test_sync_peer.py` (43, new). 27 files green by exit code on Python 3.11 through 3.14.
+
 ## 0.55.0 — 2026-09-17
 
 - New **`sync_client.py`** + **`sync_cmds.py`**: `lore sync push`, `pull`, bare `sync`, `bootstrap`, `login`, `classes`, on stdlib `urllib`. A pulled page sorts into canonical order before it applies: paging order is never merge order.
