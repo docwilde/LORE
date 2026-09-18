@@ -153,19 +153,32 @@ def cmd_sync_status(args) -> int:
             print(f"    B: {b_text}")
     else:
         print("conflicts:    none")
+    configured = peer_specs()
+    if configured:
+        print(f"peers:        {', '.join(configured)}  (direct, Transport B)")
     peers = peer_rows(conn)
     if not peers:
-        print("peers:        none configured")
+        if not configured:
+            print("peers:        none configured")
         return 0
     max_seq = conn.execute(
         "SELECT coalesce(max(seq), 0) FROM sync_ops WHERE machine_id = ?", (machine_id,)
     ).fetchone()[0]
     for peer, pushed_seq, cursor, last_push, last_pull, last_error in peers:
+        error = f"  ERROR: {last_error}" if last_error else ""
+        if peer.startswith(PEER_PREFIX):
+            # Transport B has no push (docs/sync-protocol.md S7): both
+            # directions happen as each side pulls. Printing a push cursor for
+            # a peer would be printing a zero that can never move and reading
+            # it as "nothing has been sent yet".
+            print(f"peer {peer_label(peer)} (direct):  pulled_cursor="
+                  f"{cursor or '-'} last_pull={last_pull or '-'}" + error)
+            continue
         behind = max(0, max_seq - pushed_seq)
         print(f"peer {peer}:   pushed_seq={pushed_seq} ({behind} behind)"
               f" pulled_cursor={cursor or '-'}"
               f" last_push={last_push or '-'} last_pull={last_pull or '-'}"
-              + (f"  ERROR: {last_error}" if last_error else ""))
+              + error)
     return 0
 
 
@@ -971,17 +984,37 @@ def main() -> int:
     syp.add_argument("--cwd")
     syp.set_defaults(fn=cmd_sync_push, scmd="push")
     syp = syncsub.add_parser(
-        "pull", help="fetch what the hub holds, sort into canonical order, apply")
+        "pull",
+        help="fetch what the hub and every peer hold, sort into canonical"
+             " order, apply")
+    syp.add_argument("--peer", metavar="NAME",
+                     help="pull from this peer alone — a tailnet node name or"
+                          " an http(s) URL, configured or not (Transport B)")
     syp.add_argument("--cwd")
     syp.set_defaults(fn=cmd_sync_pull, scmd="pull")
     syp = syncsub.add_parser(
         "bootstrap",
-        help="fill a fresh ROOT from the hub: pull from 0 and apply")
+        help="fill a fresh ROOT from the hub or one peer: pull from 0 and apply")
     syp.add_argument("--merge", action="store_true",
                      help="proceed on a populated ROOT — an ordinary pull,"
                           " with every merge rule applied")
+    syp.add_argument("--peer", metavar="NAME",
+                     help="start from this peer rather than the hub"
+                          " (Transport B has no single place to bootstrap from)")
     syp.add_argument("--cwd")
     syp.set_defaults(fn=cmd_sync_bootstrap, scmd="bootstrap")
+    syp = syncsub.add_parser(
+        "serve",
+        help="Transport B: serve this machine's op log to a peer (pull side"
+             " only; loopback unless told otherwise)")
+    syp.add_argument("--bind", default="127.0.0.1", metavar="ADDR",
+                     help="address to bind (default 127.0.0.1 — put"
+                          " `tailscale serve` in front of it)")
+    syp.add_argument("--port", type=int, default=None, metavar="N",
+                     help=f"port to bind (default LORE_SYNC_PEER_PORT or"
+                          f" {DEFAULT_PEER_PORT})")
+    syp.add_argument("--cwd")
+    syp.set_defaults(fn=cmd_sync_serve, scmd="serve")
     syp = syncsub.add_parser(
         "login", help='store this machine\'s hub token in settings.json "env"')
     syp.add_argument("token", help="the bearer token, shown once when it was minted")

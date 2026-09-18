@@ -40,6 +40,7 @@ from .pending import load_pending
 from .store import db_connect, record_project_identity
 from .sync_client import hub_url
 from .sync_oplog import sync_disabled
+from .sync_peer import peer_specs
 
 
 __all__ = [
@@ -587,7 +588,12 @@ def _maybe_spawn_sync_pull(cwd: str, now: float) -> None:
     """
     if os.environ.get("LORE_SYNC_PULL_AT_START", "1").strip() in ("", "0"):
         return
-    if sync_disabled() or not hub_url():
+    # Either transport is a reason to pull. A machine with no hub and one
+    # tailnet peer is exactly the Transport B pair sync.md describes, and it
+    # needs the detached pull at session start for the same reason the hub
+    # case does: the memory a peer holds is no use to a session that started
+    # before it arrived.
+    if sync_disabled() or not (hub_url() or peer_specs()):
         return
     try:
         SYNC_PULL_STAMP.parent.mkdir(parents=True, exist_ok=True)
