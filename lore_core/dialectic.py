@@ -13,7 +13,8 @@ import sys
 
 from .beliefs import BELIEF_COLS_B, calibrated_confidence, format_belief, outcome_counts
 from .graph import adjacency, khop
-from .config import INCLUDE_DORMANT, one_line, project_slug, stage_disabled, utcnow
+from .config import (INCLUDE_DORMANT, one_line, project_slug, stage_disabled,
+                     this_machine, utcnow)
 from .memory import memory_path, read_entries
 from .store import db_connect, fts_expr, index_sessions, print_hits
 
@@ -120,6 +121,12 @@ def cmd_ask(args) -> int:
     for scope in ("user", "project"):
         for e in read_entries(memory_path(scope, slug)):
             print(f"- ({scope}) {e}")
+    # ISSUE #41: this host's machine facts are evidence for a question asked
+    # on this host. Other hosts' are not -- `lore ask` answers about the box
+    # you are on, and pulling the fleet in would make every answer hedge.
+    host = this_machine()
+    for e in read_entries(memory_path("machine", host)):
+        print(f"- (machine: {host}) {e}")
     print("\n## Session hits")
     hits = conn.execute(
         "SELECT m.session_id, m.project, m.ts, m.role, snippet(msg, 4, '[', ']', '…', 16),"

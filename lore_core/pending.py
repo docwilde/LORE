@@ -13,7 +13,8 @@ import sys
 from pathlib import Path
 
 from .beliefs import belief_insert, belief_retract, belief_subject
-from .config import ROOT, SKILLS_DIR, SKILL_NAME_RE, project_slug, utcnow, valid_skill_name
+from .config import (ROOT, SKILLS_DIR, SKILL_NAME_RE, project_slug,
+                     resolve_machine_key, utcnow, valid_skill_name)
 from .filemap import filemap_add, filemap_remove, filemap_replace
 from .gate import pending_op_project_key
 from .memory import memory_add, memory_move, memory_remove, memory_replace
@@ -161,6 +162,10 @@ def cluster_key(item: dict) -> tuple:
     """
     if item.get("scope") == "user":
         return ("user", None)
+    if item.get("scope") == "machine":
+        # ISSUE #41: machine rows block per HOST. Two boxes' quirks are not
+        # near-duplicates of each other just because they are both hardware.
+        return ("machine", item.get("host"))
     return (item.get("scope"), item.get("project"))
 
 
@@ -184,6 +189,9 @@ def cluster_label(item: dict, home_slug: "str | None" = None) -> str:
     """
     if item.get("scope") == "user":
         return "user"
+    if item.get("scope") == "machine":
+        # ISSUE #41: a machine row reads as the box, not as a repo path.
+        return f"machine/{item.get('host') or '?'}"
     slug = item.get("project") or ""
     home = (_home_slug() if home_slug is None else home_slug).rstrip("-") + "-"
     if slug.startswith(home):
@@ -572,19 +580,30 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
         conn.commit()
         return None
     if item.get("kind") == "memory":
-        slug = item.get("project") or project_slug(os.getcwd())
+        scope = item.get("scope")
+        # ISSUE #41: a machine-scoped proposal is addressed by the HOST it
+        # names, not by the project the session happened to run in -- and not
+        # by the host approving it either, which is what makes a proposal that
+        # crossed from another machine land under the box it is actually
+        # about. `resolve_machine_key` falls back to this host only when the
+        # item names none, which is the pre-#41-shaped item.
+        if scope == "machine":
+            slug = resolve_machine_key(item.get("host"))
+        else:
+            slug = item.get("project") or project_slug(os.getcwd())
         action = item.get("action")
         if action == "remove" and item.get("match"):
-            return memory_remove(item["scope"], slug, item["match"])
+            return memory_remove(scope, slug, item["match"])
         if action == "move" and item.get("match") and item.get("to"):
-            return memory_move(item["scope"], slug, item["match"], str(item["to"]))
+            return memory_move(scope, slug, item["match"], str(item["to"]),
+                               to_scope=item.get("to_scope") or scope)
         if action == "replace" and item.get("match"):
-            err = memory_replace(item["scope"], slug, item["match"], item["text"],
+            err = memory_replace(scope, slug, item["match"], item["text"],
                                  via="approved")
             if err and err.startswith("no entry matches"):
-                err = memory_add(item["scope"], slug, item["text"], via="approved")
+                err = memory_add(scope, slug, item["text"], via="approved")
         else:
-            err = memory_add(item["scope"], slug, item["text"], via="approved")
+            err = memory_add(scope, slug, item["text"], via="approved")
         return err
     # Everything else is a skill proposal. Its "name" is AUTHORED BY A MODEL
     # (deriver.stage_proposals) or by whatever else staged it, and approval
