@@ -23,11 +23,12 @@
 > What that means concretely for you: it reads every transcript under
 > `~/.claude/projects/`, sends a scrubbed session digest to the same Anthropic
 > endpoint the session already used, and edits `~/.claude/settings.json` when you
-> run `/lore:setup` (`lore teardown` reverses that). [Sync](#sync--one-memory-on-every-machine)
-> is off until you configure it, and it is the one thing here that sends your
-> memory anywhere but the model. Curated memory is gated —
-> nothing writes without your approval — but the belief store is not: the deriver
-> writes ungated, the largest hallucination surface here, and `0.40.0` exists
+> run `/lore:setup` (`lore teardown` reverses that).
+> [Sync](#sync--one-memory-on-every-machine) is off until you configure it, and
+> is the only thing here that sends your memory anywhere other than the model.
+> Curated memory is gated — nothing writes without your approval — but the
+> belief store is not: the deriver writes ungated, the largest hallucination
+> surface here, and `0.40.0` exists
 > because one fact sat in a live store as four separate beliefs and nothing in the
 > pipeline caught it. It has one author, and most defects so far were found by
 > using it, not by the tests. Read [Data & safety](#data--safety) before pointing
