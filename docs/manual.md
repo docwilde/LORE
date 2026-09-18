@@ -30,12 +30,13 @@ Everything runs as a plain CLI too — `python3 <plugin>/bin/lore.py --help`, st
 
 `inject` · `snapshot` · `memory` · `filemap` · `search` · `session` · `index` · `review` · `backfill` · `pending` · `approve` · `reject` · `belief` · `ask` · `outcome` · `audit` · `consult` · `stats` · `dream` · `crosscheck` · `status` · `motd` · `statusline` · `provenance` · `config` · `doctor` · `sync` · `teardown` · `reset`
 
-## Five stores
+## Six stores
 
 | Store | Location | Cap | Gate |
 |---|---|---|---|
 | User memory | `USER.md` | 9000 chars | write-time |
 | Project memory | `MEMORY.md`, one per repo | 8800 chars | write-time |
+| Machine memory | `machines/<host>.md`, one per host | 4400 chars | write-time |
 | File map | `filemap/<slug>.md`, one per repo | 4400 chars | write-time |
 | Belief store | `state.db` | none | read-time |
 | Session index | `state.db` | none | local search only |
@@ -44,9 +45,16 @@ A project means the **git repo root**, so a session started in `repo/viz` shares
 
 - A project-scoped fact defaults to the repo it was learned in. When a session is clearly about a different repo (reviewing another repo's PR, discussing a plugin from its consumer), the reviewer can name that project explicitly; a resolvable name retargets the write and shows as a cross-project note in `/lore:pending`. An unresolvable name stays filed under the session's own project rather than guessing, flagged the same way.
 - `lore memory move --scope project --match "<substring>" --to <slug>` relocates an already-mis-scoped entry, cap-enforced on the destination like any other write.
+
+**Machine memory** holds what is true of one *box* rather than of the person or the repo: a driver workaround, a kernel or sandbox capability, a tmpfs size, where a tool happens to be installed. Those used to default into user memory, which is asserted on every machine you work on — so a laptop's Wi-Fi quirk was stated as fact on the workstation, and since 0.55.0 it travelled there too.
+
+- The scope is keyed by **host name**, not by sync's `machine_id`: the subject of a machine fact is a box a human names, including boxes lore has never run on (`--host gpu-box` files a note about one you only ever ssh into).
+- **Only the current host's file is injected.** Other hosts cost one pointer line in the snapshot and are read on demand with `lore memory show --scope machine --host <name>` — the same pull-on-demand discipline as the file map. A fleet must not cost context every session.
+- **Machine memory does not sync.** The wire encodes a memory op's scope entirely in `project_key` (`null` means user), so a machine op has no correct shape: `null` files a single box's quirk into every machine's `USER.md`, and a resolved key invents a project named after a host. It stays on the store that learned it until the receiver can name the scope. A machine-scoped *proposal* does cross, carrying the host it names, so approving it elsewhere files it under that host and never injects it there.
+- **Migration:** `lore memory move --scope user --match "<substring>" --to-machine <host>`. Nothing is reclassified automatically — a sweep guessing which user entries are "about this box" would be a model deleting from your memory unsupervised. The *removal* propagates as a sync op, so the fact stops being asserted on the machines it already reached; the arrival does not, so it lands only where it is true.
 - `lore project move <old> <new> [--dry-run]` re-files a whole project identity: beliefs (a verbatim duplicate the destination already holds is superseded by it), evidence, the session index, staged proposals, `MEMORY.md` and the file map. Use it when a checkout moves on disk — its slug is its path, so the old one is dead the moment the directory is. `<old>` may also be a bare belief subject (`finch-releases`), folded into the project it is about. `lore index --force` re-reads transcripts from their original directories and would re-file those sessions under the old slug.
 
-The snapshot injects at `SessionStart`, after `/clear` and compaction, and again whenever its content changes — `UserPromptSubmit` hashes it each prompt and re-sends only on a difference (`LORE_REFRESH_ON_CHANGE=0` opts out). It carries both memory scopes, a one-line file-map pointer, and the top user-model beliefs as a labeled interaction-model section.
+The snapshot injects at `SessionStart`, after `/clear` and compaction, and again whenever its content changes — `UserPromptSubmit` hashes it each prompt and re-sends only on a difference (`LORE_REFRESH_ON_CHANGE=0` opts out). It carries the user and project scopes, this host's machine memory when it has any, a one-line file-map pointer, and the top user-model beliefs as a labeled interaction-model section.
 
 ## Session end → proposal → approval
 
@@ -177,6 +185,8 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_CLUSTER_BLOCK` | 0.30 | `pending --cluster` blocking threshold; lower keeps more candidate pairs |
 | `LORE_CLUSTER_MODEL` | `haiku` | model that splits blocked clusters into same-fact groups; `off` keeps the lexical grouping |
 | `LORE_FILEMAP_CAP` | 4400 | file-map cap, in chars (~55 rows) |
+| `LORE_MACHINE_CAP` | 4400 | machine-memory cap, in chars, per host |
+| `LORE_MACHINE_HOST` | `hostname` | this host's machine-memory key; override when the hostname is not the name you use |
 | `LORE_REVIEW_MODEL` | unset | umbrella override for both headless roles |
 | `LORE_DERIVER_MODEL` | `haiku` | extraction — the easy role |
 | `LORE_DREAMER_MODEL` | `sonnet` | belief reconciliation and promotions — the judgment-heavy role |

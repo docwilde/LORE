@@ -7,7 +7,7 @@ Show this reference card, formatted as below, nothing else:
 
 ## lore — memory that reasons about you and improves itself
 
-**Memory model:** two hard-capped curated scopes — `user` (who you are, preferences) and `project` (per-repo environment facts, workarounds) — plus a hard-capped per-project **file map** (`path — purpose`, pull-on-demand), an uncapped **belief store** (derived conclusions, queryable) and an FTS5 **session index** (full transcript search).
+**Memory model:** three hard-capped curated scopes — `user` (who you are, preferences), `project` (per-repo environment facts, workarounds) and `machine` (true of THIS box only: hardware, drivers, host quirks; only the current host's file injects) — plus a hard-capped per-project **file map** (`path — purpose`, pull-on-demand), an uncapped **belief store** (derived conclusions, queryable) and an FTS5 **session index** (full transcript search).
 
 | command | what it does |
 |---|---|
@@ -31,7 +31,7 @@ Show this reference card, formatted as below, nothing else:
 **Flow:** sessions end → deriver stages proposals → you triage in `/lore:pending` → dreamer reconciles beliefs. Nothing writes to memory without approval.
 
 **CLI:** `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" <cmd>` — extra: `search`, `session <id>`, `index`, `dream`, `crosscheck` (read-only: `user` vs `user-model` near-duplicate beliefs), `memory add|replace|remove|move|list`, `filemap show|add|replace|remove`.
-**Env knobs:** `LORE_USER_CAP` / `LORE_MEMORY_CAP` (9000/8800), `LORE_FILEMAP_CAP` (4400), `LORE_CLUSTER_BLOCK` (0.30) / `LORE_CLUSTER_MODEL` (haiku, `off` to skip), `LORE_DIGEST_LAST_N` / `LORE_DIGEST_TOTAL_CAP` (500/250k), `LORE_MEMORY_PROPOSAL_CAP` (3) / `LORE_DUP_CONTAINMENT` (0.60), `LORE_REFRESH_SECS`, `LORE_DEFER_DREAM`, `LORE_BELIEF_DORMANT_DAYS` (45) / `LORE_INCLUDE_DORMANT`, `LORE_NOTIFY`, `LORE_SKIP`.
+**Env knobs:** `LORE_USER_CAP` / `LORE_MEMORY_CAP` (9000/8800), `LORE_FILEMAP_CAP` (4400), `LORE_MACHINE_CAP` (4400) / `LORE_MACHINE_HOST`, `LORE_CLUSTER_BLOCK` (0.30) / `LORE_CLUSTER_MODEL` (haiku, `off` to skip), `LORE_DIGEST_LAST_N` / `LORE_DIGEST_TOTAL_CAP` (500/250k), `LORE_MEMORY_PROPOSAL_CAP` (3) / `LORE_DUP_CONTAINMENT` (0.60), `LORE_REFRESH_SECS`, `LORE_DEFER_DREAM`, `LORE_BELIEF_DORMANT_DAYS` (45) / `LORE_INCLUDE_DORMANT`, `LORE_NOTIFY`, `LORE_SKIP`.
 **Write gate (0.36.0):** the interactive agent and a human shell write directly; a write arriving from a HOOK or a detached process stages in `pending/` instead, tagged with the context that wrote it. `lore provenance` shows how every entry got in (approved / interactive / derived / unknown for pre-0.36 rows). Advisory, not a boundary — a caller that knows about the gate can forge what it reads; the README says so plainly.
 
 **CLI:** `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" <cmd>` — extra: `search`, `session <id>`, `index`, `dream`, `provenance`, `memory add|replace|remove|move|list`, `filemap show|add|replace|remove`.
