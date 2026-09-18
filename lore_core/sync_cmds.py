@@ -54,7 +54,6 @@ from .sync_peer import peer_clients, peer_label, peer_specs
 __all__ = [
     'HUB_PEER',
     'peer_state',
-    'pull_targets',
     'own_ops_after',
     'push_ops',
     'conflict_report',
@@ -62,6 +61,8 @@ __all__ = [
     'drain',
     'pull_ops',
     'pull_summary',
+    'pull_targets',
+    'no_target_message',
     'cmd_sync_pull',
     'root_is_populated',
     'cmd_sync_bootstrap',
