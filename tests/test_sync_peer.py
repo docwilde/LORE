@@ -572,7 +572,22 @@ class PeerConvergence(unittest.TestCase):
 
         # The identity check, both directions, six projections.
         ident_a, ident_b = _identity(a), _identity(b)
-        self.assertEqual(ident_a, ident_b,
+        for field in ("beliefs", "edges", "dreamed", "outcomes", "pending"):
+            self.assertEqual(ident_a[field], ident_b[field],
+                             f"the two machines disagree about {field}")
+        # ORDER, AND WHAT IS HONESTLY PROMISED ABOUT IT. A curated memory file
+        # is written in the order its entries arrived on THAT machine, and an
+        # author that wrote locally before it pulled has its own entry first.
+        # So two concurrent AUTHORS converge as a set, not byte for byte --
+        # which is exactly what Transport A's own convergence tests assert
+        # (tests/test_sync_client.py:601, tests/test_sync_hub.py:268, both
+        # `sorted(...)`). The byte-identical half of
+        # test_store_is_a_function_of_its_log is a property of REPLAY onto a
+        # store that did not author concurrently, and it is pinned as such by
+        # test_a_third_machine_pulling_from_either_peer_gets_the_same_bytes
+        # below, which is where Transport B can make the stronger claim.
+        self.assertEqual(sorted(ident_a["user_memory"]),
+                         sorted(ident_b["user_memory"]),
                          "the two machines did not converge")
         self.assertIn("prefers concise commits", ident_a["user_memory"])
         self.assertIn("keeps a file map per project", ident_a["user_memory"])
@@ -590,6 +605,43 @@ class PeerConvergence(unittest.TestCase):
             b.memory_path("project", slug).read_text(encoding="utf-8"))
         self.assertEqual(a.read_entries(a.filemap_path("alpha")),
                          b.read_entries(b.filemap_path(slug)))
+
+    def test_a_third_machine_pulling_from_either_peer_gets_the_same_bytes(self):
+        """THE IDENTITY PROPERTY, over Transport B: "a machine's store is a
+        function of its op log" (sync.md "The core: a local op log").
+
+        Two fresh machines bootstrap from the two halves of one converged
+        tailnet -- one from A, one from B -- and must come out byte-identical,
+        USER.md included. They see the same ops by different routes and in
+        different ARRIVAL orders, so anything that made this fail would be a
+        merge that depended on the route: a sort by `hub_seq`, a per-page
+        apply, or a second ordering invented for peers. It is the assertion
+        the design rests on, and the one Transport B has to earn rather than
+        inherit.
+        """
+        a, b = self.a, self.b
+        a.memory_add("user", "", "authored on A", via="direct")
+        a.memory_add("user", "", "also authored on A", via="direct")
+        b.memory_add("user", "", "authored on B", via="direct")
+        with serving(a) as url_a:
+            self._pull(b, url_a, MACHINE_B)
+        with serving(b) as url_b:
+            self._pull(a, url_b, MACHINE_A)
+
+        _root_c, c = _machine("conv-c", MACHINE_C)
+        _root_d, d = _machine("conv-d", MACHINE_C + "-d")
+        with serving(a) as url_a:
+            self._pull(c, url_a, MACHINE_C)
+        with serving(b) as url_b:
+            self._pull(d, url_b, MACHINE_C + "-d")
+
+        self.assertEqual(
+            c.memory_path("user", "").read_text(encoding="utf-8"),
+            d.memory_path("user", "").read_text(encoding="utf-8"),
+            "two receivers of the same log disagree, so the merge depends on"
+            " the route the ops took")
+        self.assertEqual(len(_entries(c)), 3)
+        self.assertEqual(_identity(c), _identity(d))
 
     def test_a_second_pull_from_the_same_peer_applies_nothing_twice(self):
         """S9's idempotence over Transport B's wire. The failure this catches
@@ -680,8 +732,9 @@ class PeerConvergence(unittest.TestCase):
         conn = self.b.db_connect()
         rows = {peer: cursor for peer, _p, cursor, *_rest in self.b.peer_rows(conn)}
         conn.close()
-        self.assertIn("peer:127.0.0.1", rows)
-        self.assertIsNotNone(rows["peer:127.0.0.1"])
+        peers = [name for name in rows if name.startswith("peer:127.0.0.1")]
+        self.assertEqual(len(peers), 1, f"expected one peer cursor, got {rows}")
+        self.assertIsNotNone(rows[peers[0]])
         self.assertNotIn(self.b.HUB_PEER, rows,
                          "a peer pull created or moved the hub's cursor")
 
@@ -1127,6 +1180,7 @@ class ServedOverRealHTTP(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 urllib.request.urlopen(request, timeout=5)
         self.assertEqual(caught.exception.code, 405)
+        caught.exception.close()
 
     def test_health_over_the_wire_needs_no_credential(self):
         with serving(self.mod, auth="tailscale") as url:
@@ -1139,6 +1193,7 @@ class ServedOverRealHTTP(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 self._get(url, "/v1/nope")
         self.assertEqual(caught.exception.code, 404)
+        caught.exception.close()
 
 
 if __name__ == "__main__":
