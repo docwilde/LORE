@@ -896,6 +896,92 @@ class TestBeliefMergeRules(unittest.TestCase):
         conn.close()
 
 
+    def test_a_retract_reaches_every_machine_that_replays_the_log(self):
+        """sync.md's belief verbs include `retract {uid}`, and it is the one
+        that has to travel: a belief withdrawn on the laptop but still active
+        on the workstation is a claim the store keeps asserting after the user
+        took it back -- and `lore ask` reads the ACTIVE set, so the withdrawal
+        has to reach the status column, not merely the outcomes ledger.
+        """
+        _, a = _machine("retract-a", MACHINE_A)
+        conn = a.db_connect()
+        bid, _ = a.belief_insert(conn, "user", "a claim the user later withdrew",
+                                 0.6, "s1", None, None, via="direct")
+        conn.commit()
+        uid = conn.execute("SELECT uid FROM beliefs WHERE id = ?", (bid,)).fetchone()[0]
+        a.belief_retract(conn, bid, "withdrawn on machine A")
+        conn.commit()
+        conn.close()
+
+        _, b = _machine("retract-b", MACHINE_B)
+        report = _apply(b, _read_ops(a))
+        self.assertEqual(report["deferred"], 0)
+
+        conn = b.db_connect()
+        self.assertEqual(
+            conn.execute("SELECT status FROM beliefs WHERE uid = ?", (uid,)).fetchone()[0],
+            "retracted")
+        self.assertEqual(
+            conn.execute("SELECT count(*) FROM beliefs WHERE status = 'active'"
+                         ).fetchone()[0], 0,
+            "a retracted belief must leave the working set on the receiver too")
+        conn.close()
+
+        # A second retract op for the same belief -- a re-pulled page under a
+        # fresh op_id, so the store-level guard cannot be what saves it --
+        # changes nothing.
+        again = _signed(b, machine_id=MACHINE_A, machine_seq=80, lamport=80,
+                        cls="belief", verb="retract", payload={"uid": uid})
+        _apply(b, [again])
+        conn = b.db_connect()
+        self.assertEqual(
+            conn.execute("SELECT status FROM beliefs WHERE uid = ?", (uid,)).fetchone()[0],
+            "retracted")
+        conn.close()
+
+    def test_a_retract_naming_a_belief_that_has_not_arrived_waits_instead_of_vanishing(self):
+        """The dependency rule is not the edge verb's alone: every belief verb
+        that resolves a uid holds at `applied = 0` when it cannot. A retract
+        dropped because its belief had not been paged in yet would leave that
+        belief ACTIVE on this machine forever -- the withdrawal would be lost
+        silently, and the next pull would have nothing left to retry.
+        """
+        _, tgt = _machine("retract-late")
+        uid = str(uuid.uuid4())
+        retract = _signed(tgt, machine_id=MACHINE_A, machine_seq=2, lamport=20,
+                          cls="belief", verb="retract", payload={"uid": uid})
+        report = _apply(tgt, [retract])
+        self.assertEqual(report["deferred"], 1)
+        self.assertEqual(report["applied"], 0)
+
+        conn = tgt.db_connect()
+        self.assertEqual(tgt.deferred_op_count(conn), 1)
+        self.assertEqual(
+            conn.execute("SELECT applied FROM sync_ops WHERE op_id = ?",
+                         (retract["op_id"],)).fetchone()[0], 0)
+        conn.close()
+
+        arrival = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=19,
+                          cls="belief", verb="insert",
+                          payload={"uid": uid, "subject": "user",
+                                   "claim": "the belief that arrived after its own"
+                                            " retraction",
+                                   "confidence": 0.6, "via": "derived",
+                                   "writer": "derived",
+                                   "created": "2026-01-01T00:00:00Z",
+                                   "evidence": {"session_id": "s9",
+                                                "project_key": None, "note": None}})
+        _apply(tgt, [arrival])
+
+        conn = tgt.db_connect()
+        self.assertEqual(tgt.deferred_op_count(conn), 0)
+        self.assertEqual(
+            conn.execute("SELECT status FROM beliefs WHERE uid = ?", (uid,)).fetchone()[0],
+            "retracted",
+            "the held retraction must apply once its belief lands, not be dropped")
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # E) pending and skill
 # ---------------------------------------------------------------------------
@@ -980,6 +1066,66 @@ class TestPendingAndSkillRules(unittest.TestCase):
                           f"{label}: the losing body must be staged, not dropped")
             self.assertEqual(staged[expected_uid]["body"], loser["payload"]["body"])
             self.assertEqual(staged[expected_uid]["kind"], "skill")
+
+    def test_a_skill_remove_deletes_the_skill_and_a_second_remove_changes_nothing(self):
+        """sync.md: "`remove` is idempotent."
+
+        Idempotent is the whole claim, and it is not free: the removal takes a
+        DIRECTORY, so a second delivery arriving against a tree that no longer
+        has it must be a quiet no-op rather than an error that fails the
+        drain and strands every op behind it in the same page.
+        """
+        _, a = _machine("skill-rm-a", MACHINE_A)
+        self.assertIsNone(a.apply_item("x", {"kind": "skill", "name": "doomed-skill",
+                                             "body": "a body that gets deleted",
+                                             "description": "from machine A"}, False))
+        _, b = _machine("skill-rm-b", MACHINE_B)
+        _apply(b, _read_ops(a))
+        installed = b.SKILLS_DIR / "doomed-skill" / "SKILL.md"
+        self.assertTrue(installed.exists(),
+                        "the put must land before the remove means anything")
+
+        # A neighbouring skill proves the removal is targeted, not a sweep.
+        keeper = b.SKILLS_DIR / "keeper-skill"
+        keeper.mkdir(parents=True, exist_ok=True)
+        (keeper / "SKILL.md").write_text("untouched", encoding="utf-8")
+
+        remove = _signed(b, machine_id=MACHINE_A, machine_seq=50, lamport=50,
+                         cls="skill", verb="remove", payload={"name": "doomed-skill"})
+        report = _apply(b, [remove])
+        self.assertEqual(report["applied"], 1)
+        self.assertFalse(installed.parent.exists(),
+                         "the skill directory, not merely SKILL.md, must go")
+        self.assertTrue((keeper / "SKILL.md").exists())
+
+        again = _signed(b, machine_id=MACHINE_A, machine_seq=51, lamport=51,
+                        cls="skill", verb="remove", payload={"name": "doomed-skill"})
+        report = _apply(b, [again])
+        self.assertEqual(report["applied"], 1,
+                         "a remove of what is already gone is settled, not deferred")
+        self.assertEqual(report["deferred"], 0)
+        self.assertTrue((keeper / "SKILL.md").exists())
+
+    def test_a_skill_remove_with_a_traversing_name_stays_inside_skills_dir(self):
+        """A skill name off the wire is as untrusted as one a model authored,
+        and more so: `remove` resolves to `rmtree`, so a name carrying `..`
+        is a DELETE of an attacker's choosing delivered by the sync courier.
+        `valid_skill_name` plus the resolve-and-contain check is what stops it,
+        and a refusal must be recorded as settled rather than retried forever.
+        """
+        _, node = _machine("skill-traverse")
+        victim = node.ROOT / "not-a-skill"
+        victim.mkdir(parents=True, exist_ok=True)
+        (victim / "SKILL.md").write_text("must survive", encoding="utf-8")
+
+        for n, name in enumerate(("../not-a-skill", "..", "sub/dir", "/etc"), start=60):
+            op = _signed(node, machine_id=MACHINE_A, machine_seq=n, lamport=n,
+                         cls="skill", verb="remove", payload={"name": name})
+            report = _apply(node, [op])
+            self.assertEqual(report["deferred"], 0, name)
+            self.assertTrue((victim / "SKILL.md").exists(),
+                            f"{name!r} must not reach outside SKILLS_DIR")
+        self.assertTrue(node.SKILLS_DIR.exists(), "the skills directory itself must survive")
 
 
 # ---------------------------------------------------------------------------
