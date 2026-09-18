@@ -59,7 +59,7 @@ Beliefs form a graph, and it is built for that bet rather than against it. An ed
 - **The relation vocabulary is declared in three tiers**, and only two are writable: the deriver's five verbs, the structural `supersedes` that only the backfill writes, and `co_derived`, which is projected from the session-evidence table at read time and cannot be stored at all. A model cannot assert that one belief supersedes another.
 - **Graph-backed context is opt-in and experimental** (`LORE_GRAPH_CONTEXT`, default off). It is the one channel that puts beliefs into context unasked, so it says so in its own header, carries its own char budget separate from the curated caps, ranks confidence-first — a calibrated belief outranks an asserted one whatever it claims — and prints each belief's character cost so the agent can see what it is spending. It expands along asserted relations only, never co-derivation.
 - **An edge's weight is its distinct-session support**, not its repetition count: one session restating a relation is one source, and an asserted relation is capped below the weight of an observed one.
-- **Every write to a synced class also appends an op**, so the store is a function of its log and a second machine can be replayed into the same state. With sync unconfigured the log is never written and nothing changes.
+- **Every write to a synced class also appends an op**, so the store is a function of its log and a second machine can be replayed into the same state. The log is local and grows whether or not a transport is configured; `LORE_DISABLE_SYNC` stops it being written at all.
 
 Full mechanics — every command, config variable, hook, and the belief/write gates — live in [`docs/manual.md`](docs/manual.md).
 
@@ -79,20 +79,24 @@ Full mechanics — every command, config variable, hook, and the belief/write ga
 
 A laptop, a workstation and a cloud sandbox each build their own store, and
 what you taught one of them is missing from the other two. Sync makes them one
-memory instead of three — and it does nothing whatsoever until you configure
-it. **Unconfigured, nothing leaves the machine:** no hub URL and no peer means
-no network call, no op log, and a LORE identical to the local-only one it has
-always been. Turning it on takes a hub or a peer to talk to, a token for that
-hub, and a signing key shared by the machines you want reconciled.
+memory instead of three — and **nothing leaves the machine until you configure
+it**. No hub URL and no peer means no network call and nowhere to send
+anything; what reaches another machine, and when, is a decision you make and
+not a default you inherit. Making it takes a hub or a peer to talk to, a token
+for that hub, and a signing key shared by the machines you want reconciled.
 
-With it on, every write to a synced class appends one op to a local log in
-`state.db`, and the store becomes a function of that log. Six classes travel by
-default — curated memory, the file map, beliefs, staged proposals, skills and
-the session index — each individually switchable, because carrying a session
-transcript is a different confidentiality decision from carrying a file-map
-row. For a database mutation the op is written in the same transaction as the
-mutation, so a crash loses both or neither; for a file write it is appended
-immediately afterwards, since there is no shared transaction to be inside.
+The local half runs either way, and is the part worth understanding first.
+Every write to a synced class appends one op to a log in `state.db`, so the
+store becomes a function of that log whether or not anything ever reads it —
+which is what lets a second machine be replayed into the same state rather than
+merged towards it. Six classes are logged by default: curated memory, the file
+map, beliefs, staged proposals, skills and the session index, each individually
+switchable, because carrying a session transcript is a different
+confidentiality decision from carrying a file-map row. (`LORE_DISABLE_SYNC`
+stops the log itself, not just the sending.) For a database mutation the op is
+written in the same transaction as the mutation, so a crash loses both or
+neither; for a file write it is appended immediately afterwards, since there is
+no shared transaction to be inside.
 
 ```
 lore sync login <token>   # store this machine's bearer token, never echoed
