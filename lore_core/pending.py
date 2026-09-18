@@ -27,6 +27,8 @@ __all__ = [
     'cross_project_note',
     'archive',
     'apply_item',
+    'skill_frontmatter',
+    'skill_file_text',
     'resolve_ids',
     'cmd_approve',
     'cmd_reject',
@@ -626,11 +628,7 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
         if not (overwritable or force):
             return f"skill {name} already exists at {target} (use --force to overwrite)"
     target.parent.mkdir(parents=True, exist_ok=True)
-    desc = (item.get("description") or name).replace('"', "'")
-    new = (
-        f'---\nname: {name}\ndescription: "{desc} (lore-learned)"\n---\n\n'
-        f'{item["body"]}\n'
-    )
+    new = skill_file_text(name, item.get("description"), item["body"])
     if old is not None:
         diff = list(difflib.unified_diff(
             old.splitlines(), new.splitlines(),
@@ -638,7 +636,10 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
         ))[:60]
         print("\n".join(diff))
     target.write_text(new, encoding="utf-8")
-    _append_skill_op("put", name, item["body"])
+    # ISSUE #73: the op carries the WHOLE FILE, not the bare body. What the
+    # receiver must be able to rebuild is this file, and the only way it can
+    # is if this is what crosses -- see skill_file_text.
+    _append_skill_op("put", name, new)
     return None
 
 
@@ -656,10 +657,65 @@ def _resolve_contained(base: Path, target: Path) -> Path:
     return resolved
 
 
+def skill_frontmatter(text: str) -> bool:
+    """True iff `text` already opens with a SKILL.md frontmatter block -- a
+    `---` fence, a `name:` key inside it, a closing `---` fence.
+
+    The `name:` key is what makes this a test rather than a guess: a prose
+    body may well open with a `---` rule, and a bare pair of fences is not a
+    frontmatter block either. Only the key that skill_file_text itself writes
+    counts as "this is already a whole file".
+    """
+    if not text.startswith("---\n"):
+        return False
+    end = text.find("\n---\n", 3)
+    if end == -1:
+        return False
+    return re.search(r"^name:\s*\S", text[4:end + 1], re.MULTILINE) is not None
+
+
+def skill_file_text(name: str, description: "str | None", body: str) -> str:
+    """THE bytes SKILLS_DIR/<name>/SKILL.md gets -- one definition, because
+    since ISSUE #73 this is also the wire format (see _append_skill_op).
+
+    IDEMPOTENT, and that is the load-bearing part. A `body` that is already a
+    complete SKILL.md is returned untouched instead of being wrapped a second
+    time. Two callers depend on it:
+
+    - sync_apply._apply_skill stages the LOSING body of a `put` conflict back
+      as a pending skill proposal. That body is now a whole file, so
+      approving it must not nest one frontmatter block inside another.
+    - An op written before #73 carries a bare body with no frontmatter. It
+      still wraps, exactly as it always did -- so an older op keeps producing
+      byte-for-byte the file it used to produce.
+    """
+    if skill_frontmatter(body):
+        return body
+    desc = (description or name).replace('"', "'")
+    return f'---\nname: {name}\ndescription: "{desc} (lore-learned)"\n---\n\n{body}\n'
+
+
 def _append_skill_op(op: str, name: str, body: "str | None") -> None:
     """`skill` `put`/`remove` (sync spec PR 3) -- skills are user-global
     (SKILLS_DIR, no project dimension), so project_key is always None.
-    Never raises, same house rule as append_pending_stage_op."""
+    Never raises, same house rule as append_pending_stage_op.
+
+    ISSUE #73: `body` on a `put` is the COMPLETE SKILL.md, frontmatter and
+    all, not the bare body apply_item was handed. The field keeps its name on
+    purpose -- the whole compatibility story rests on it. A receiver of any
+    version writes payload["body"] to disk verbatim, so widening what the
+    field HOLDS needs no receiver change and breaks nothing in either
+    direction: an old op's bare body still lands exactly as it used to, and a
+    new op's whole file lands byte-identical on an old receiver too. Renaming
+    it (to `text`, say) would instead have an old receiver read a missing key
+    and write an EMPTY SKILL.md -- silent data loss, which is why the name
+    stays and the docs carry the meaning.
+
+    Deliberately NOT a separate `description` field. The file is the unit that
+    has to round-trip; carrying the description beside a body that already
+    contains it would put the same fact on the wire twice and leave a receiver
+    to decide which copy wins when they disagree.
+    """
     try:
         conn = db_connect()
         payload = {"name": name} if op == "remove" else {"name": name, "body": body or ""}
