@@ -533,7 +533,7 @@ the others in `bin/lore.py`:
 | `lore sync bootstrap` | on a machine whose `ROOT` is fresh: pull from 0 and apply; refuses on a populated `ROOT` unless `--merge`, which is an ordinary pull |
 | `lore sync login <token>` | writes `LORE_SYNC_TOKEN` through the same `settings.json` path as `lore config set` |
 | `lore sync classes [+class|-class]` | show or edit `LORE_SYNC_CLASSES` |
-| `lore sync serve` | Transport B, deferred |
+| `lore sync serve` | Transport B: serve this machine's op log to a peer (pull side only, loopback by default) |
 
 **Background push.** `worker_run` (`deriver.py:1277-1341`) is the one
 place every derived write lands: staged proposals, beliefs, edges,

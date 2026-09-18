@@ -48,6 +48,7 @@ from .sync_client import (
     SyncNotConfigured,
     hub_client,
 )
+from .sync_peer import peer_clients, peer_label, peer_specs
 
 
 __all__ = [
@@ -60,6 +61,8 @@ __all__ = [
     'drain',
     'pull_ops',
     'pull_summary',
+    'pull_targets',
+    'no_target_message',
     'cmd_sync_pull',
     'root_is_populated',
     'cmd_sync_bootstrap',
@@ -67,9 +70,10 @@ __all__ = [
     'push_after_review',
 ]
 
-# The one peer name Transport A ever writes. Transport B (PR 9) writes a
-# tailnet node name into the same table, which is why the column is a name
-# and not a boolean.
+# The one peer name Transport A ever writes. Transport B writes
+# `peer:<tailnet node name>` into the same table, which is why the column is a
+# name and not a boolean -- one cursor row per place ops come from, and the
+# prefix keeps a node that happens to be called `hub` out of the hub's row.
 HUB_PEER = "hub"
 
 
@@ -387,13 +391,19 @@ def pull_ops(conn: sqlite3.Connection, client, *, machine_id: "str | None" = Non
     return report
 
 
-def pull_summary(report: dict) -> str:
+def pull_summary(report: dict, peer: str = HUB_PEER) -> str:
     """One line, naming only what happened. `waiting` and `unverified` are
     named rather than folded into a total because they are the two outcomes
     that need a human eventually -- one after the next pull, one after a
-    review in `lore pending`."""
+    review in `lore pending`.
+
+    The peer is named only when it is not the hub, so Transport A's output is
+    unchanged to the byte and a machine pulling from two places can still tell
+    which line came from which.
+    """
+    where = "" if peer == HUB_PEER else f" ({peer_label(peer)})"
     if not report["fetched"]:
-        return "sync pull: nothing new"
+        return f"sync pull{where}: nothing new"
     parts = [f"{report['applied']} applied"]
     if report.get("duplicate"):
         parts.append(f"{report['duplicate']} already held")
@@ -403,27 +413,77 @@ def pull_summary(report: dict) -> str:
         parts.append(f"{report['unverified']} unverified (staged, NOT applied)")
     if report.get("unknown"):
         parts.append(f"{report['unknown']} unknown")
-    return (f"sync pull: {report['fetched']} op(s) in {report['pages']} page(s) — "
-            + ", ".join(parts))
+    return (f"sync pull{where}: {report['fetched']} op(s) in"
+            f" {report['pages']} page(s) — " + ", ".join(parts))
+
+
+def pull_targets(*, only_peer: "str | None" = None) -> "list[tuple[str, object]]":
+    """[(sync_peers key, transport)] -- every place this machine pulls from:
+    the hub when LORE_SYNC_URL is set, then every peer LORE_SYNC_PEER names.
+
+    ONE LIST, BECAUSE A PULL IS A PULL. Transport B is a different way to move
+    bytes, not a different command: the drain, the canonical sort, the MAC
+    check, the apply and the cursor are `pull_ops`, identically, whichever
+    entry of this list produced the ops. A second pull path would be a second
+    place for the ordering and containment rules to be got wrong.
+
+    `only_peer` is `lore sync pull --peer <name>`: exactly that peer, hub
+    included in nothing. It may name something LORE_SYNC_PEER has never heard
+    of, which is how a fresh machine bootstraps from the one peer it has been
+    told to trust (sync.md, Transport B).
+    """
+    targets: "list[tuple[str, object]]" = []
+    if only_peer is None:
+        try:
+            targets.append((HUB_PEER, hub_client()))
+        except SyncNotConfigured:
+            pass                        # no hub is a configuration, not a fault
+    targets.extend(peer_clients(only=only_peer))
+    return targets
+
+
+def no_target_message(only_peer: "str | None" = None) -> str:
+    if only_peer:
+        return f"{only_peer!r} is not a usable peer name or URL"
+    return ("no hub and no peer configured — set LORE_SYNC_URL for the hub,"
+            " or LORE_SYNC_PEER=<tailnet node> to pull from another machine"
+            " directly")
 
 
 def cmd_sync_pull(args) -> int:
-    """`lore sync pull`: fetch since the peer cursor, sort, apply, advance."""
+    """`lore sync pull`: fetch since each source's cursor, sort, apply, advance.
+
+    EVERY SOURCE IS PULLED, AND ONE FAILURE DOES NOT STOP THE NEXT. A hub that
+    is down and a workstation that is asleep are two independent outages;
+    skipping the workstation because the hub timed out would turn one outage
+    into two. Each source gets its own line and its own cursor, and the exit
+    code is non-zero if any of them failed -- the loud half of sync.md's
+    Failure modes rule, the silent half being the detached spawn at
+    SessionStart which never reads this code's output at all.
+    """
+    only = getattr(args, "peer", None)
     try:
-        client = hub_client()
+        targets = pull_targets(only_peer=only)
     except SyncNotConfigured as exc:
         print(f"sync pull: {exc}", file=sys.stderr)
+        return 1
+    if not targets:
+        print(f"sync pull: {no_target_message(only)}", file=sys.stderr)
         return 1
     conn = db_connect()
     machine_id, _label = get_or_create_machine(conn)
     conn.commit()
-    try:
-        report = pull_ops(conn, client, machine_id=machine_id)
-    except SyncError as exc:
-        print(f"sync pull failed: {exc}", file=sys.stderr)
-        return 1
-    print(pull_summary(report))
-    return 0
+    rc = 0
+    for peer, client in targets:
+        where = "" if peer == HUB_PEER else f" ({peer_label(peer)})"
+        try:
+            report = pull_ops(conn, client, machine_id=machine_id, peer=peer)
+        except SyncError as exc:
+            print(f"sync pull failed{where}: {exc}", file=sys.stderr)
+            rc = 1
+            continue
+        print(pull_summary(report, peer))
+    return rc
 
 
 def root_is_populated(conn: sqlite3.Connection, machine_id: str) -> "list[str]":
@@ -480,11 +540,27 @@ def cmd_sync_bootstrap(args) -> int:
     answers 501, and v1 bootstrap is a drained pull from since=0 (sync.md
     "Open decisions" #6).
     """
+    only = getattr(args, "peer", None)
     try:
-        client = hub_client()
+        targets = pull_targets(only_peer=only)
     except SyncNotConfigured as exc:
         print(f"sync bootstrap: {exc}", file=sys.stderr)
         return 1
+    if not targets:
+        print(f"sync bootstrap: {no_target_message(only)}", file=sys.stderr)
+        return 1
+    if len(targets) > 1:
+        # Bootstrap means "this store is empty, fill it FROM somewhere", and
+        # with no hub there is no single somewhere: sync.md's own account of
+        # Transport B's cost is that a fresh machine "must be told which peer
+        # to trust as its starting point". Picking one silently would be this
+        # code choosing that peer on the operator's behalf.
+        names = ", ".join(peer_label(peer) for peer, _c in targets)
+        print("sync bootstrap: more than one source is configured"
+              f" ({names}) — name the one to start from with"
+              " `lore sync bootstrap --peer <name>`", file=sys.stderr)
+        return 1
+    peer, client = targets[0]
     conn = db_connect()
     machine_id, _label = get_or_create_machine(conn)
     conn.commit()
@@ -502,14 +578,14 @@ def cmd_sync_bootstrap(args) -> int:
         return 1
     try:
         if merge:
-            report = pull_ops(conn, client, machine_id=machine_id)
+            report = pull_ops(conn, client, machine_id=machine_id, peer=peer)
         else:
-            report = pull_ops(conn, client, machine_id=machine_id, since=0,
-                              exclude_self=False)
+            report = pull_ops(conn, client, machine_id=machine_id, peer=peer,
+                              since=0, exclude_self=False)
     except SyncError as exc:
         print(f"sync bootstrap failed: {exc}", file=sys.stderr)
         return 1
-    print(pull_summary(report).replace("sync pull:", "sync bootstrap:", 1))
+    print(pull_summary(report, peer).replace("sync pull", "sync bootstrap", 1))
     return 0
 
 
@@ -535,8 +611,13 @@ def cmd_sync(args) -> int:
     try:
         hub_client()
     except SyncNotConfigured as exc:
-        print(f"sync: {exc}", file=sys.stderr)
-        return 1
+        # A peer-only machine is configured, not broken: Transport B has no
+        # push at all (docs/sync-protocol.md S7), so `lore sync` there IS the
+        # pull, and the other direction happens when the other machine pulls.
+        if not peer_specs():
+            print(f"sync: {exc}", file=sys.stderr)
+            return 1
+        return cmd_sync_pull(args)
     rc = cmd_sync_pull(args)
     return cmd_sync_push(args) or rc
 

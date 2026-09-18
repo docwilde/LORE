@@ -214,6 +214,21 @@ class HubClient:
     # `_request` refuses this path outright.
     RESERVED_PATHS = ("/snapshot",)
 
+    # What a human is told to DO about a 401 and a 403. Class attributes
+    # rather than literals inside `_http_error` because Transport B's peer
+    # client (sync_peer.PeerClient) is the same transport with a different
+    # credential model -- no bearer token at all (S7) -- so it needs to
+    # replace this advice and nothing else. Forking `_http_error` to change
+    # two sentences would duplicate the status mapping, which is the part
+    # that must not drift between the two transports.
+    WHO = "hub"
+    AUTH_ADVICE = ("`lore sync login <token>` with a token minted for this"
+                   " machine")
+    FORBIDDEN_ADVICE = ("the token is valid but not for this: check that"
+                        " LORE_MACHINE_ID matches the machine the token was"
+                        " minted for, and that it carries the scope this call"
+                        " needs")
+
     def __init__(self, base_url: str, *, token: "str | None" = None,
                  auth: str = "token", timeout: float = DEFAULT_TIMEOUT):
         self.base_url = self._normalise(base_url)
@@ -358,15 +373,11 @@ class HubClient:
         said = f"{code or exc.code}: {detail}" if detail else (code or str(exc.code))
         if exc.code == 401:
             return SyncAuthError(
-                f"hub refused the credential ({said}) — `lore sync login"
-                " <token>` with a token minted for this machine",
+                f"{self.WHO} refused the credential ({said}) — {self.AUTH_ADVICE}",
                 status=401, code=code, body=body)
         if exc.code == 403:
             return SyncForbidden(
-                f"hub refused this request ({said}) — the token is valid but"
-                " not for this: check that LORE_MACHINE_ID matches the machine"
-                " the token was minted for, and that it carries the scope"
-                " this call needs",
+                f"{self.WHO} refused this request ({said}) — {self.FORBIDDEN_ADVICE}",
                 status=403, code=code, body=body)
         if exc.code == 409:
             return SyncConflict(
