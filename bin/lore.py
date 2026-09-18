@@ -85,6 +85,13 @@ def cmd_status(args) -> int:
     print(f"root:            {ROOT}")
     print(f"user memory:     {len(user_entries)} entries, {usage_line(user_entries, USER_CAP)}")
     print(f"project memory:  {len(proj_entries)} entries, {usage_line(proj_entries, MEMORY_CAP)}  [{slug}]")
+    host = this_machine()
+    mach_entries = read_entries(memory_path("machine", host))
+    others = [m for m in known_machines() if m != host]
+    if mach_entries or others:
+        extra = f" (+{len(others)} other host{'s' if len(others) != 1 else ''} on file)" if others else ""
+        print(f"machine memory:  {len(mach_entries)} entries,"
+              f" {usage_line(mach_entries, MACHINE_CAP)}  [{host}]{extra}")
     print(f"pending:         {len(load_pending())}")
     for w in live_workers():
         print(f"worker:          reviewing session {w['session_id']} since {w['started']} (pid {w['pid']})")
@@ -472,13 +479,22 @@ def cmd_doctor(args) -> int:
 
 def render_export(scope: str, slug: str, entries: list[str]) -> str:
     """One curated scope file in the built-in auto-memory topic-file shape:
-    frontmatter (name, description, metadata.type) + the entries as bullets."""
+    frontmatter (name, description, metadata.type) + the entries as bullets.
+
+    ISSUE #41: a machine export is named for its host as well as its scope --
+    a fleet's worth of machine files all called `lore-export-machine.md` would
+    overwrite each other, and the host is the only thing that tells them
+    apart."""
     desc = f"Curated lore {scope} memory exported by `lore teardown`"
+    name = f"lore-export-{scope}"
     if scope == "project":
         desc += f" ({slug})"
+    elif scope == "machine":
+        desc += f" (host {slug})"
+        name += f"-{slug}"
     return (
         "---\n"
-        f"name: lore-export-{scope}\n"
+        f"name: {name}\n"
         f"description: {desc}\n"
         "metadata:\n"
         f"  type: {scope}\n"
@@ -520,6 +536,17 @@ def cmd_teardown(args) -> int:
                 exports.append(("project", d.name,
                                 PROJECTS_DIR / d.name / "memory" / "lore-export-project.md",
                                 entries))
+    # ISSUE #41: machine memory goes back too. Teardown's contract is "leave
+    # nothing load-bearing behind" -- a scope it silently skipped would be
+    # deleted with the store. Every host on file, not just this one: they are
+    # all facts this store holds and none of them is reproducible from a log
+    # (machine memory does not sync -- see memory._append_memory_op).
+    for host in known_machines():
+        entries = read_entries(memory_path("machine", host))
+        if entries:
+            exports.append(("machine", host,
+                            PROJECTS_DIR / slug / "memory"
+                            / f"lore-export-machine-{host}.md", entries))
     if not exports:
         print("no curated entries to export.")
     for scope, target_slug, target, entries in exports:
@@ -651,8 +678,13 @@ def main() -> int:
     msub = sp.add_subparsers(dest="mcmd", required=True)
     for name in ("show", "add", "replace", "remove"):
         mp = msub.add_parser(name)
-        mp.add_argument("--scope", choices=("user", "project"), required=(name != "show"))
+        mp.add_argument("--scope", choices=("user", "project", "machine"),
+                        required=(name != "show"))
         mp.add_argument("--cwd")
+        # ISSUE #41: which BOX a machine-scoped entry is about. Defaults to
+        # this host; naming another files a fleet fact about a box lore may
+        # never run on. Ignored for user/project scope.
+        mp.add_argument("--host", help="machine scope: which host (default: this one)")
         if name in ("replace", "remove"):
             mp.add_argument("--match", required=True)
         if name in ("add", "replace"):
@@ -660,12 +692,19 @@ def main() -> int:
         mp.set_defaults(fn=cmd_memory, mcmd=name)
 
     mp = msub.add_parser(
-        "move", help="retroactive cleanup (issue #40): move a project-scoped"
-                     " entry into a different project's memory")
-    mp.add_argument("--scope", choices=("user", "project"), required=True)
+        "move", help="retroactive cleanup (issues #40/#41): move an entry into a"
+                     " different project's memory, or out of user memory into a"
+                     " machine's")
+    mp.add_argument("--scope", choices=("user", "project", "machine"), required=True)
     mp.add_argument("--cwd", help="source project (default: cwd)")
+    mp.add_argument("--host", help="machine scope: source host (default: this one)")
     mp.add_argument("--match", required=True)
-    mp.add_argument("--to", required=True, help="destination: slug, repo name, or path")
+    # Exactly one destination. --to names a project (issue #40); --to-machine
+    # names a host (issue #41) and is the migration path for the machine facts
+    # already sitting in user memory.
+    dst = mp.add_mutually_exclusive_group(required=True)
+    dst.add_argument("--to", help="destination project: slug, repo name, or path")
+    dst.add_argument("--to-machine", help="destination host (machine scope)")
     mp.set_defaults(fn=cmd_memory, mcmd="move")
 
     sp = sub.add_parser("project",

@@ -53,7 +53,7 @@ different confidentiality decision than a file-map row).
 | File map | `filemap/<slug>.md` (`filemap.py:64-65`) | slug + `path — purpose` | **on** | as project memory |
 | Beliefs, evidence, edges, edge assertions, outcomes | `state.db` tables (`store.py:86-172`) | `INTEGER PRIMARY KEY` id; edges `(src, dst, rel)` on those ids | **on** | a `uid` beside the int id (next section); every op addresses beliefs by uid |
 | Pending proposals + archive | `pending/<stamp>-<nn>.json` (`gate.py:203-221`, `pending.py:250-260`) | filename stamp, per machine | **on** | a `uid` field in the JSON; stage/resolve ops; local filename stays local |
-| Skills | `~/.claude/skills/<name>/SKILL.md` (`config.py:107`) | name | **on** | put/remove ops carrying the body |
+| Skills | `~/.claude/skills/<name>/SKILL.md` (`config.py:107`) | name | **on** | put/remove ops carrying the whole file, frontmatter included (ISSUE #73) |
 | Skill usage | `skill_usage.json` (`deriver.py:564-590`) | skill name | off | per-machine counters; a merge rule (sum, max?) needs its own measurement — deferred |
 | Session index | `sessions`, `msg` FTS (`store.py:73-82`) | `session_id` (Claude Code's UUID) | **on** | a `machine_id` column on `sessions`; rows travel as-is (already scrubbed at index time, `store.py:299-304`) |
 | Transcripts | `~/.claude/projects/<slug>/<id>.jsonl` (Claude Code's own directory) | session id | off (opt-in) | scrubbed line-by-line chunks; land under `ROOT/transcripts/`, never in Claude Code's directory |
@@ -337,6 +337,18 @@ write, a rejection is only a tidy.
 **skill** (`put {name, body}`, `remove {name}`). Last `put` in canonical
 order wins; the losing body is staged as a pending skill proposal rather
 than silently overwritten. `remove` is idempotent.
+
+`body` is the **complete `SKILL.md`** — the frontmatter block
+`pending.apply_item` writes included, not the bare body it was handed
+(ISSUE #73). A receiver reproduces the author's file by writing `body`
+verbatim, which is what it already did; carrying only the body meant the
+description never crossed and a synced skill silently differed from its
+author's. One consequence worth naming: the loser of a `put` conflict is
+staged as a proposal whose body is a whole file, so
+`pending.skill_file_text` is idempotent about the wrapper — approving
+that proposal must not nest a second frontmatter block inside the first.
+An op written before this change carries a bare body, has no frontmatter,
+and is wrapped on approval exactly as it always was.
 
 **session** (`upsert {session_id, project_key, machine_id, cwd, title,
 first_ts, last_ts, messages}`, `msgs {session_id, rows[]}` in chunks).

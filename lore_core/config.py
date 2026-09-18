@@ -16,6 +16,7 @@ per call except through the functions defined lower in the file.
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -57,6 +58,11 @@ __all__ = [
     'project_key',
     'known_project_slugs',
     'resolve_subject_slug',
+    'MACHINE_CAP',
+    'machine_slug',
+    'this_machine',
+    'known_machines',
+    'resolve_machine_key',
     'agent_id',
     'SCOPES',
     'effective_scope',
@@ -84,6 +90,13 @@ MEMORY_CAP = int(os.environ.get("LORE_MEMORY_CAP", "8800"))
 # longer fits is hoarding files nobody hunts for, and the consolidate-first
 # error is the right pressure — same reasoning as the memory caps.
 FILEMAP_CAP = int(os.environ.get("LORE_FILEMAP_CAP", "4400"))
+# Machine memory cap (ISSUE #41): sized like the file map, not like project
+# memory. A host's quirks are few and dense -- a driver workaround, a tmpfs
+# size, where a tool is installed -- and the point of the separate cap is
+# that they stop competing with who the user IS for the user cap. Only the
+# CURRENT host's file is injected, so this is the per-session cost, however
+# many machines the store has heard of.
+MACHINE_CAP = int(os.environ.get("LORE_MACHINE_CAP", "4400"))
 # Per-role models for the three Honcho roles. LORE_REVIEW_MODEL is the
 # umbrella override for the two headless roles; per-role defaults differ —
 # extraction is easy (haiku), reconciliation is the judgment-heavy role
@@ -433,6 +446,70 @@ def resolve_subject_slug(raw: str) -> "str | None":
     return None
 
 
+def machine_slug(name: str) -> str:
+    """A host name flattened into one safe path component.
+
+    Same treatment project_slug gives a checkout path -- everything outside
+    [A-Za-z0-9] becomes a hyphen -- plus a lowercase fold, because host names
+    are case-insensitive and "Workstation" and "workstation" are one box.
+    """
+    return re.sub(r"[^A-Za-z0-9]+", "-", (name or "").strip()).strip("-").lower()
+
+
+def this_machine() -> str:
+    """THIS host's machine-memory key (ISSUE #41). Read per call, never
+    frozen into a constant: a test overrides LORE_MACHINE_HOST after import.
+
+    Deliberately the HOST NAME, not sync's `machine_id`. Those answer
+    different questions and sync.md is explicit that "the hostname is a label
+    and never the identity" -- for a PARTICIPANT in sync, which must survive
+    being renamed. The subject of a machine fact is not a participant: it is
+    a box a human names, including boxes that have never run lore at all (the
+    GPU host you only ever ssh into). A uuid cannot name those; a host name
+    can, and it is what the human types. Empty only if the host name is
+    somehow empty, in which case "unknown" keeps the path valid.
+    """
+    raw = os.environ.get("LORE_MACHINE_HOST", "").strip() or socket.gethostname()
+    return machine_slug(raw) or "unknown"
+
+
+def known_machines() -> list[str]:
+    """Every host key this store holds machine memory for, sorted."""
+    mdir = ROOT / "machines"
+    if not mdir.is_dir():
+        return []
+    return sorted(p.stem for p in mdir.glob("*.md") if p.is_file())
+
+
+def resolve_machine_key(raw: "str | None") -> str:
+    """Resolve a human-typed host to a machine-memory key, defaulting to this
+    host when nothing is named.
+
+    Unlike resolve_subject_slug, this MINTS an unknown name instead of
+    returning None, and the asymmetry is the point: a project must already
+    exist somewhere for a fact to be filed under it, whereas the whole reason
+    machine scope exists is to hold facts about boxes lore has never run on.
+    Refusing an unrecognised host would refuse exactly the fleet case.
+
+    A known host still wins first, and an unambiguous suffix or substring of
+    one resolves to it, so `--host works` finds `workstation` and a near-miss
+    does not silently open a second file for the same box.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return this_machine()
+    slug = machine_slug(raw)
+    known = known_machines()
+    if slug in known:
+        return slug
+    suffix = sorted(k for k in known if k.endswith(slug))
+    contains = sorted(k for k in known if slug in k)
+    for matches in (suffix, contains):
+        if len(matches) == 1:
+            return matches[0]
+    return slug or this_machine()
+
+
 def agent_id() -> str:
     """PER-AGENT IDENTITY (2026-08-22): who is deriving right now.
 
@@ -446,7 +523,7 @@ def agent_id() -> str:
     return os.environ.get("LORE_AGENT_ID", "").strip() or "main"
 
 
-SCOPES = ("user", "project", "all")
+SCOPES = ("user", "project", "machine", "all")
 
 
 def effective_scope(value: "str | None") -> str:

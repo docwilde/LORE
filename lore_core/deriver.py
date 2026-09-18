@@ -56,6 +56,7 @@ from .config import (
     read_hook_input,
     resolve_subject_slug,
     stage_disabled,
+    this_machine,
     utcnow,
     valid_skill_name,
 )
@@ -189,8 +190,8 @@ flags, ordering constraints. If the fix fits in one memory line, propose memory,
 
 # always present: the memory channel and its guardrails.
 _REVIEW_MEMORY_RULES = """A durable memory is a fact that will matter in FUTURE sessions: a user preference or identity \
-fact (scope "user"), or a project environment fact, convention, workaround, or correction \
-(scope "project"). NOT task narration, NOT one-off state, NOT anything already covered by the \
+fact (scope "user"), a project environment fact, convention, workaround, or correction \
+(scope "project"), or a fact about THIS COMPUTER (scope "machine"). NOT task narration, NOT one-off state, NOT anything already covered by the \
 current entries listed below. Each text <= 200 chars, dense, declarative. When a new fact \
 supersedes or merges with an existing entry, use action "replace" with "match" set to a unique \
 substring of that entry.
@@ -258,8 +259,20 @@ entries sitting under it. The test to apply: can you quote the user saying it? T
 you only cite what they DID? Then "user-model". If you find yourself about to write both, you \
 have one claim, and the quote decides which channel gets it.
 
-SUBJECT (ISSUE #40, rare): a project-scoped memory or conclusion is about THIS session's own \
-project by default -- leave "project" absent, which is what almost every entry should do. Set \
+MACHINE SCOPE (ISSUE #41) — the test is "true of this BOX, not of this PERSON". Hardware and \
+driver quirks, kernel or sandbox capabilities, how much RAM or tmpfs this host has, where a tool \
+happens to be installed on this machine, a workaround that exists only because of this host's \
+GPU, network or filesystem: scope "machine". They were going into "user" because there was \
+nowhere else to put them, and user memory is asserted on EVERY machine the person works on, \
+where such a fact is simply false. Machine memory is injected only on the host it is about, so \
+filing it there is what makes it true where it is read.\n\nThe three-way test, in order: does \
+the fact change behaviour on other machines too? Then "user" (or "project" if it is about the \
+repo). Does it change behaviour in other repos on this box, and only on this box? Then \
+"machine". Is it about this repo specifically? Then "project". A preference the person carries \
+between machines is never "machine", however hardware-flavoured the words are: "prefers the \
+GPU build" is a user preference, "this box's GPU driver needs the 550 series pinned" is a \
+machine fact.\n\nSUBJECT (ISSUE #40, rare): a project-scoped memory or conclusion is about \
+THIS session's own project by default -- leave "project" absent, which is what almost every entry should do. Set \
 "project":"<repo name or slug>" ONLY when the fact is unmistakably about a DIFFERENT, \
 specifically-identified project than the one this session is running in (reviewing a PR against \
 another repo, discussing a plugin from inside the repo that consumes it). Never set it to hedge, \
@@ -392,7 +405,9 @@ Learned skills eligible for "update"/"retire" (name, track record, description):
 # JSON-schema fragments — the {{ }} escapes survive to the final .format call.
 # "project" (ISSUE #40): optional on both memory and conclusions, meaningful
 # only for scope "project" -- see the SUBJECT paragraph above for when to set it.
-_SCHEMA_MEMORY = ('"memory":[{{"scope":"user|project","action":"add|replace",'
+_SCHEMA_MEMORY = ('"memory":[{{"scope":"user (true of the person, everywhere) |project|'
+                  'machine (true of THIS box only -- hardware, drivers, host quirks)",'
+                  '"action":"add|replace",'
                   '"match":"substring, replace only","text":"...",'
                   '"project":"optional, only when the subject is a different project"}}]')
 _SCHEMA_FILEMAP = '"filemap":[{{"path":"repo-relative or host:path","purpose":"..."}}]'
@@ -1733,6 +1748,11 @@ def stage_proposals(data: dict, slug: str, session_id: str,
     existing = {t.lower() for t in pending_texts(slug)}
     for scope in ("user", "project"):
         existing.update(e.lower() for e in read_entries(memory_path(scope, slug)))
+    # ISSUE #41: this host's machine memory counts as "already known" too --
+    # a quirk already filed under the box must not be re-proposed into user
+    # memory every session, which is how it got there in the first place.
+    existing.update(e.lower() for e in
+                    read_entries(memory_path("machine", this_machine())))
     staged = 0
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     # ISSUE #48 accounting. Every path out of the memory loop increments
@@ -1804,7 +1824,8 @@ def stage_proposals(data: dict, slug: str, session_id: str,
         # (0.31.0) -- on approval this text lands verbatim in USER.md/MEMORY.md,
         # injected into every future session.
         text = one_line(scrub_secrets(str(m.get("text") or "")))[:300]
-        if scope not in ("user", "project") or action not in ("add", "replace") or not text:
+        if (scope not in ("user", "project", "machine")
+                or action not in ("add", "replace") or not text):
             acct["malformed"] += 1
             continue
         if text.lower() in existing:
@@ -1819,6 +1840,14 @@ def stage_proposals(data: dict, slug: str, session_id: str,
             target, extra = resolve_project_subject(m.get("project"), slug)
             entry["project"] = target
             entry.update(extra)
+        # ISSUE #41: a machine fact derived from a session is about the box
+        # that session ran on -- this one. The deriver is deliberately given
+        # no way to name a DIFFERENT host: it reads a transcript, which is
+        # evidence about the machine it was recorded on, and letting a model
+        # attribute a quirk to a box it has never seen is a guess filed as a
+        # fact. Naming another host stays a human act (`--host`).
+        if scope == "machine":
+            entry["host"] = this_machine()
         # ISSUE #48: drop a proposal whose content an existing entry in the
         # SAME scope already carries. Measured on 1242 archived proposals from
         # a live store, this is a small win by design -- 10 of 1229 rejected,

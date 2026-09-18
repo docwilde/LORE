@@ -20,16 +20,19 @@ from pathlib import Path
 from .beliefs import belief_subject, interaction_model_lines
 from .config import (
     GRAPH_CONTEXT,
+    MACHINE_CAP,
     MEMORY_CAP,
     ROOT,
     USER_CAP,
     effective_scope,
+    known_machines,
     one_line,
     project_key,
     project_origin,
     project_slug,
     read_hook_input,
     stage_disabled,
+    this_machine,
 )
 from .deriver import learned_skills, load_skill_usage, skill_candidates
 from .filemap import filemap_entries
@@ -224,6 +227,34 @@ def build_context(cwd: str, scope: str = "all") -> str:
                 f"File map: {n_filemap} entr{'y' if n_filemap == 1 else 'ies'}"
                 " (path — purpose) — run `lore filemap show` before hunting"
                 " for files.",
+                "",
+            ]
+    # Machine memory (ISSUE #41): THIS host's facts only. The whole reason the
+    # scope exists is that a fact true of one box was being asserted on every
+    # box, so injecting another host's file here would be the original bug
+    # wearing a new label. Other hosts get one pointer line and are read on
+    # demand — the same pull-on-demand discipline as the file map.
+    #
+    # Rendered only when non-empty, unlike user/project, which always print
+    # their "(empty)". A store that never files a machine fact must pay
+    # nothing for the tier existing.
+    if scope in ("all", "machine"):
+        host = this_machine()
+        mach_entries = read_entries(memory_path("machine", host))
+        if mach_entries:
+            parts += [
+                f"## Machine memory ({usage_line(mach_entries, MACHINE_CAP)}) — {host}"
+                f"{provenance_tag('memory', memory_bucket('machine', host), mach_entries)}",
+                "True of THIS host only — never assert it of another machine.",
+                render_entries(mach_entries).rstrip(),
+                "",
+            ]
+        others = [m for m in known_machines() if m != host]
+        if others:
+            parts += [
+                f"Other machines on file: {', '.join(others)} — not loaded."
+                " `lore memory show --scope machine --host <name>` when a fact"
+                " about one of them is actually needed.",
                 "",
             ]
     if pending:

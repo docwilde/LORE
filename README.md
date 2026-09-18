@@ -42,7 +42,7 @@ Beliefs form a graph, and it is built for that bet rather than against it. An ed
 
 ## What you get
 
-- **Curated memory behind a cap and a gate.** `USER.md` (9000 chars, global) and `MEMORY.md` (8800 chars, per repo) inject at session start. You write them via `/lore:remember`; background review only proposes, and `/lore:approve` applies.
+- **Curated memory behind a cap and a gate.** `USER.md` (9000 chars, global), `MEMORY.md` (8800 chars, per repo) and `machines/<host>.md` (`LORE_MACHINE_CAP`, 4400 chars, per host — only the current host's injects, so one box's driver quirk is never asserted on another) inject at session start. You write them via `/lore:remember`; background review only proposes, and `/lore:approve` applies.
 - **A belief store with evidence trails.** Up to 10 confidence-weighted conclusions per session, each carrying its citations. Beliefs never enter context uninvited — read them through `/lore:ask`, or at decision time through `lore consult`.
 - **Typed relations between beliefs, and traversal over them.** Five declared verbs — `depends_on`, `specializes`, `explains`, `contradicts`, `applies_when` — emitted by the deriver alongside its conclusions, plus `supersedes` from the store's own history. `lore graph` walks them: neighbourhood, most-confident path, components, communities. A chain's confidence is the *product* of its hops, so a long chain of plausible steps is not a strong conclusion.
 - **Local full-text session search.** Every transcript indexed incrementally into SQLite FTS5. No embeddings, no API calls.

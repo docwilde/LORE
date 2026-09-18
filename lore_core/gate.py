@@ -257,11 +257,19 @@ def stage_write(item: dict) -> str:
 
 def pending_op_project_key(conn, item: dict) -> "str | None":
     """The wire `project_key` for a staged/resolved proposal (sync spec
-    PR 3): `None` for a user-scoped memory proposal (nothing to resolve --
-    user memory has no project dimension), the resolved key of
+    PR 3): `None` for a user- or machine-scoped memory proposal (nothing to
+    resolve -- neither has a project dimension), the resolved key of
     `item["project"]` for everything else (filemap/belief/skill proposals,
-    and project-scoped memory, all carry a "project" slug already)."""
-    if item.get("kind") == "memory" and item.get("scope") == "user":
+    and project-scoped memory, all carry a "project" slug already).
+
+    ISSUE #41: a machine-scoped proposal still carries the SESSION's project
+    slug in `item["project"]` (every staged item does, for display), so
+    without this arm it would be filed against a project it has nothing to do
+    with. Its own subject lives in `item["host"]`, which rides inside the
+    opaque `item` blob of the `pending`/`stage` payload -- so the proposal
+    reaches another machine naming the host it is about, and approving it
+    there files it under THAT host rather than the approver's."""
+    if item.get("kind") == "memory" and item.get("scope") in ("user", "machine"):
         return None
     slug = item.get("project")
     return resolve_project_key_for_slug(conn, slug) if slug else None

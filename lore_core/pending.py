@@ -13,7 +13,8 @@ import sys
 from pathlib import Path
 
 from .beliefs import belief_insert, belief_retract, belief_subject
-from .config import ROOT, SKILLS_DIR, SKILL_NAME_RE, project_slug, utcnow, valid_skill_name
+from .config import (ROOT, SKILLS_DIR, SKILL_NAME_RE, project_slug,
+                     resolve_machine_key, utcnow, valid_skill_name)
 from .filemap import filemap_add, filemap_remove, filemap_replace
 from .gate import pending_op_project_key
 from .memory import memory_add, memory_move, memory_remove, memory_replace
@@ -27,6 +28,8 @@ __all__ = [
     'cross_project_note',
     'archive',
     'apply_item',
+    'skill_frontmatter',
+    'skill_file_text',
     'resolve_ids',
     'cmd_approve',
     'cmd_reject',
@@ -159,6 +162,10 @@ def cluster_key(item: dict) -> tuple:
     """
     if item.get("scope") == "user":
         return ("user", None)
+    if item.get("scope") == "machine":
+        # ISSUE #41: machine rows block per HOST. Two boxes' quirks are not
+        # near-duplicates of each other just because they are both hardware.
+        return ("machine", item.get("host"))
     return (item.get("scope"), item.get("project"))
 
 
@@ -182,6 +189,9 @@ def cluster_label(item: dict, home_slug: "str | None" = None) -> str:
     """
     if item.get("scope") == "user":
         return "user"
+    if item.get("scope") == "machine":
+        # ISSUE #41: a machine row reads as the box, not as a repo path.
+        return f"machine/{item.get('host') or '?'}"
     slug = item.get("project") or ""
     home = (_home_slug() if home_slug is None else home_slug).rstrip("-") + "-"
     if slug.startswith(home):
@@ -570,19 +580,30 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
         conn.commit()
         return None
     if item.get("kind") == "memory":
-        slug = item.get("project") or project_slug(os.getcwd())
+        scope = item.get("scope")
+        # ISSUE #41: a machine-scoped proposal is addressed by the HOST it
+        # names, not by the project the session happened to run in -- and not
+        # by the host approving it either, which is what makes a proposal that
+        # crossed from another machine land under the box it is actually
+        # about. `resolve_machine_key` falls back to this host only when the
+        # item names none, which is the pre-#41-shaped item.
+        if scope == "machine":
+            slug = resolve_machine_key(item.get("host"))
+        else:
+            slug = item.get("project") or project_slug(os.getcwd())
         action = item.get("action")
         if action == "remove" and item.get("match"):
-            return memory_remove(item["scope"], slug, item["match"])
+            return memory_remove(scope, slug, item["match"])
         if action == "move" and item.get("match") and item.get("to"):
-            return memory_move(item["scope"], slug, item["match"], str(item["to"]))
+            return memory_move(scope, slug, item["match"], str(item["to"]),
+                               to_scope=item.get("to_scope") or scope)
         if action == "replace" and item.get("match"):
-            err = memory_replace(item["scope"], slug, item["match"], item["text"],
+            err = memory_replace(scope, slug, item["match"], item["text"],
                                  via="approved")
             if err and err.startswith("no entry matches"):
-                err = memory_add(item["scope"], slug, item["text"], via="approved")
+                err = memory_add(scope, slug, item["text"], via="approved")
         else:
-            err = memory_add(item["scope"], slug, item["text"], via="approved")
+            err = memory_add(scope, slug, item["text"], via="approved")
         return err
     # Everything else is a skill proposal. Its "name" is AUTHORED BY A MODEL
     # (deriver.stage_proposals) or by whatever else staged it, and approval
@@ -626,11 +647,7 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
         if not (overwritable or force):
             return f"skill {name} already exists at {target} (use --force to overwrite)"
     target.parent.mkdir(parents=True, exist_ok=True)
-    desc = (item.get("description") or name).replace('"', "'")
-    new = (
-        f'---\nname: {name}\ndescription: "{desc} (lore-learned)"\n---\n\n'
-        f'{item["body"]}\n'
-    )
+    new = skill_file_text(name, item.get("description"), item["body"])
     if old is not None:
         diff = list(difflib.unified_diff(
             old.splitlines(), new.splitlines(),
@@ -638,7 +655,10 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
         ))[:60]
         print("\n".join(diff))
     target.write_text(new, encoding="utf-8")
-    _append_skill_op("put", name, item["body"])
+    # ISSUE #73: the op carries the WHOLE FILE, not the bare body. What the
+    # receiver must be able to rebuild is this file, and the only way it can
+    # is if this is what crosses -- see skill_file_text.
+    _append_skill_op("put", name, new)
     return None
 
 
@@ -656,10 +676,65 @@ def _resolve_contained(base: Path, target: Path) -> Path:
     return resolved
 
 
+def skill_frontmatter(text: str) -> bool:
+    """True iff `text` already opens with a SKILL.md frontmatter block -- a
+    `---` fence, a `name:` key inside it, a closing `---` fence.
+
+    The `name:` key is what makes this a test rather than a guess: a prose
+    body may well open with a `---` rule, and a bare pair of fences is not a
+    frontmatter block either. Only the key that skill_file_text itself writes
+    counts as "this is already a whole file".
+    """
+    if not text.startswith("---\n"):
+        return False
+    end = text.find("\n---\n", 3)
+    if end == -1:
+        return False
+    return re.search(r"^name:\s*\S", text[4:end + 1], re.MULTILINE) is not None
+
+
+def skill_file_text(name: str, description: "str | None", body: str) -> str:
+    """THE bytes SKILLS_DIR/<name>/SKILL.md gets -- one definition, because
+    since ISSUE #73 this is also the wire format (see _append_skill_op).
+
+    IDEMPOTENT, and that is the load-bearing part. A `body` that is already a
+    complete SKILL.md is returned untouched instead of being wrapped a second
+    time. Two callers depend on it:
+
+    - sync_apply._apply_skill stages the LOSING body of a `put` conflict back
+      as a pending skill proposal. That body is now a whole file, so
+      approving it must not nest one frontmatter block inside another.
+    - An op written before #73 carries a bare body with no frontmatter. It
+      still wraps, exactly as it always did -- so an older op keeps producing
+      byte-for-byte the file it used to produce.
+    """
+    if skill_frontmatter(body):
+        return body
+    desc = (description or name).replace('"', "'")
+    return f'---\nname: {name}\ndescription: "{desc} (lore-learned)"\n---\n\n{body}\n'
+
+
 def _append_skill_op(op: str, name: str, body: "str | None") -> None:
     """`skill` `put`/`remove` (sync spec PR 3) -- skills are user-global
     (SKILLS_DIR, no project dimension), so project_key is always None.
-    Never raises, same house rule as append_pending_stage_op."""
+    Never raises, same house rule as append_pending_stage_op.
+
+    ISSUE #73: `body` on a `put` is the COMPLETE SKILL.md, frontmatter and
+    all, not the bare body apply_item was handed. The field keeps its name on
+    purpose -- the whole compatibility story rests on it. A receiver of any
+    version writes payload["body"] to disk verbatim, so widening what the
+    field HOLDS needs no receiver change and breaks nothing in either
+    direction: an old op's bare body still lands exactly as it used to, and a
+    new op's whole file lands byte-identical on an old receiver too. Renaming
+    it (to `text`, say) would instead have an old receiver read a missing key
+    and write an EMPTY SKILL.md -- silent data loss, which is why the name
+    stays and the docs carry the meaning.
+
+    Deliberately NOT a separate `description` field. The file is the unit that
+    has to round-trip; carrying the description beside a body that already
+    contains it would put the same fact on the wire twice and leave a receiver
+    to decide which copy wins when they disagree.
+    """
     try:
         conn = db_connect()
         payload = {"name": name} if op == "remove" else {"name": name, "body": body or ""}

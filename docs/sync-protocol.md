@@ -622,6 +622,28 @@ interpreting it. `via`/`writer` values are the existing provenance
 vocabulary (`docs/write-gate.md`): `approved` / `interactive` /
 `terminal` / `derived` / `dream`.
 
+**Evolving a payload field.** An op is durable: one written by an older
+version of this software MUST still apply, and one written by a newer
+version MUST still apply on an older receiver, because both live in the
+same log and a bootstrap replays the whole of it. That constrains how a
+field may change:
+
+- A field MAY be **widened** — hold more than it used to — when every
+  receiver, old and new, already does the right thing with the wider
+  value. `skill`/`put`'s `body` was widened this way (ISSUE #73): it
+  used to carry the bare skill body and now carries the complete
+  `SKILL.md`. Every receiver writes `body` to the skill file verbatim,
+  so both readings land correctly and no version flag is needed.
+- A field MUST NOT be **renamed**, even alongside the old name, when the
+  old name is load-bearing on a receiver. Renaming `body` to `text`
+  would have an older receiver read a missing key and write an empty
+  `SKILL.md` — silent data loss on a machine that never asked to be
+  upgraded.
+- A field MAY be **added**; §8 already requires receivers to ignore
+  unrecognised fields. An added field MUST NOT be the only way to
+  reconstruct what the op describes, or ops written before it become
+  unreconstructable.
+
 | Class | Verb | Payload fields |
 |---|---|---|
 | `memory` / `filemap` | `add` | `{text: string, via: string, writer: string}` |
@@ -637,7 +659,7 @@ vocabulary (`docs/write-gate.md`): `approved` / `interactive` /
 | `belief` | `dream_reviewed` | `{a_uid: string, b_uid: string}` |
 | `pending` | `stage` | `{uid: string, item: object}` |
 | `pending` | `resolve` | `{uid: string, status: string}` |
-| `skill` | `put` | `{name: string, body: string}` |
+| `skill` | `put` | `{name: string, body: string}` — `body` is the **complete `SKILL.md`**, frontmatter included, so a receiver reproduces the author's file byte for byte by writing it verbatim (ISSUE #73) |
 | `skill` | `remove` | `{name: string}` |
 | `session` | `upsert` | `{session_id: string, project_key: string\|null, machine_id: string, cwd: string, title: string, first_ts: string, last_ts: string, messages: integer}` |
 | `session` | `msgs` | `{session_id: string, rows: array}` |
