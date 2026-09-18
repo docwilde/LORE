@@ -45,6 +45,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 import uuid
 from argparse import Namespace
 from pathlib import Path
@@ -522,6 +523,18 @@ class TestCommandLine(unittest.TestCase):
 
     def setUp(self):
         _wipe()
+        # These tests call cmd_memory IN-PROCESS, so the write gate classifies
+        # the writer from this process's real environment. On a developer's
+        # machine that is an interactive session and the write applies; in CI
+        # there is no Claude Code in the environment and no tty, so the gate
+        # correctly classifies the call as DETACHED and stages the write --
+        # which is the gate doing its job, not a defect in machine scope. Pin
+        # the writer class so the assertions mean the same thing everywhere,
+        # the way tests/test_write_gate.py's AGENT_ENV does.
+        self._env = patch.dict(os.environ, {"AI_AGENT": "claude-code_test_agent",
+                                            "CLAUDECODE": "1"})
+        self._env.start()
+        self.addCleanup(self._env.stop)
 
     def test_add_and_show_route_through_the_host_flag(self):
         with quiet() as out:
