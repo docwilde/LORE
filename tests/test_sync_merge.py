@@ -141,6 +141,27 @@ def _entries(mod, scope="user", slug=""):
     return mod.read_entries(mod.memory_path(scope, slug))
 
 
+def _map_entries(mod, slug):
+    return mod.read_entries(mod.filemap_path(slug))
+
+
+def _align_project(mod, project_key: str, slug: str):
+    """Give `mod` the SAME slug for `project_key` the author uses.
+
+    Not a convenience: `entry_key` hashes `kind:bucket:text`, and for the file
+    map the bucket IS the slug (`project:<slug>` for project memory), so a
+    `remove`/`replace` key only matches on a receiver whose slug for that
+    project agrees with the author's. That is the ordinary case -- the slug is
+    a checkout path flattened, and two machines that keep the repository in the
+    same place produce the same one -- and it is what `record_project_identity`
+    records on first sight. Without it the receiver mints `sync-<key>` and
+    nothing keyed by the author's bucket can ever be found.
+    """
+    conn = mod.db_connect()
+    mod.record_project_identity(conn, project_key, slug)
+    conn.close()
+
+
 def _pending_items(root: Path) -> "dict[str, dict]":
     """{uid: item} for the pile that is still PENDING (archive excluded)."""
     out = {}
@@ -529,6 +550,174 @@ class TestMemoryMergeRules(unittest.TestCase):
             self.assertEqual(item["kind"], "memory")
             self.assertEqual(uid, n1.deterministic_uid(
                 next(o["op_id"] for o in ops if o["payload"].get("text") == item["text"])))
+
+
+class TestFilemapMergeRules(unittest.TestCase):
+    """The file map travels under the same three verbs as memory, and the one
+    with no coverage until now is `remove`. A file map row that outlives its
+    deletion is worse than a stale entry: `lore filemap` is the table an agent
+    is TOLD to trust, so a row naming a file that was deleted sends the next
+    session to read it."""
+
+    SLUG = "fmap-slug"
+
+    def setUp(self):
+        self.a_root, self.a = _machine("fmap-a", MACHINE_A)
+        self.a.filemap_add(self.SLUG, "lore_core/store.py", "schema + session index",
+                           via="direct")
+        self.a.filemap_add(self.SLUG, "lore_core/memory.py", "curated core memory",
+                           via="direct")
+        self.key = next(o["project_key"] for o in _read_ops(self.a)
+                        if o["class"] == "filemap")
+
+    def _receiver(self, label, machine_id=MACHINE_B):
+        _, node = _machine(label, machine_id)
+        _align_project(node, self.key, self.SLUG)
+        return node
+
+    def test_a_filemap_remove_drops_the_row_the_author_dropped(self):
+        """sync.md's memory/filemap verbs: `remove {key}`, where `key` is the
+        `entry_key` hash. Replaying the author's log must leave the receiver's
+        map equal to the author's -- the same property the whole design rests
+        on, for the one verb that only deletes."""
+        self.a.filemap_remove(self.SLUG, "lore_core/memory.py")
+        self.assertEqual(len(_map_entries(self.a, self.SLUG)), 1)
+
+        b = self._receiver("fmap-b")
+        report = _apply(b, _read_ops(self.a))
+        self.assertEqual(report["deferred"], 0)
+        self.assertEqual(_map_entries(b, self.SLUG), _map_entries(self.a, self.SLUG))
+        self.assertNotIn("lore_core/memory.py",
+                         "\n".join(_map_entries(b, self.SLUG)),
+                         "the deleted row must not survive the replay")
+
+    def test_a_filemap_remove_naming_a_row_this_store_does_not_hold_changes_nothing(self):
+        """sync.md: "`remove` of an absent key is a no-op." A no-op, and
+        specifically not a DEFERRAL: an entry key names a text, not a
+        dependency, so nothing will ever arrive to make it resolvable and an
+        op held at applied = 0 for it would be retried on every pull forever.
+        """
+        b = self._receiver("fmap-absent")
+        _apply(b, _read_ops(self.a))
+        before = _map_entries(b, self.SLUG)
+        self.assertEqual(len(before), 2)
+
+        ghost = _signed(
+            b, machine_id=MACHINE_A, machine_seq=90, lamport=90, cls="filemap",
+            verb="remove", project_key=self.key,
+            payload={"key": b.entry_key("filemap", self.SLUG,
+                                        "nothing/here.py — never added")})
+        report = _apply(b, [ghost])
+        self.assertEqual(report["applied"], 1)
+        self.assertEqual(report["deferred"], 0,
+                         "an absent key is settled, not waiting for anything")
+        self.assertEqual(_map_entries(b, self.SLUG), before)
+
+        conn = b.db_connect()
+        self.assertEqual(b.deferred_op_count(conn), 0)
+        conn.close()
+
+    def test_a_filemap_remove_is_idempotent_under_a_second_delivery(self):
+        """docs/sync-protocol.md S9 at the domain level: the second copy of a
+        `remove` must not take a DIFFERENT row with it. `filemap_remove`
+        matches on a substring, so a remove replayed against a map that no
+        longer holds its target is the moment a near-miss would bite."""
+        self.a.filemap_remove(self.SLUG, "lore_core/memory.py")
+        ops = _read_ops(self.a)
+        b = self._receiver("fmap-twice")
+        _apply(b, ops)
+        once = _map_entries(b, self.SLUG)
+
+        remove_op = next(o for o in ops if o["op"] == "remove")
+        again = _signed(b, machine_id=MACHINE_A, machine_seq=91, lamport=91,
+                        cls="filemap", verb="remove", project_key=self.key,
+                        payload=remove_op["payload"])
+        _apply(b, [again])
+        self.assertEqual(_map_entries(b, self.SLUG), once)
+
+
+class TestConflictsDropWhenOneSideIsRemovedByHand(unittest.TestCase):
+    """sync.md rule 1: "`lore sync status` lists the pair under conflicts
+    until one is removed by hand."
+
+    UNTIL is the word under test. There is no `sync resolve` command to run,
+    so the store itself has to be the record of what the human decided: a pair
+    whose two texts are no longer both present has been resolved, and a
+    conflicts list that keeps reporting it is a list nobody will read twice.
+    """
+
+    def test_a_memory_conflict_pair_drops_off_the_list_once_a_human_removes_one_side(self):
+        _, a = _machine("conf-mem-a", MACHINE_A)
+        _, b = _machine("conf-mem-b", MACHINE_B)
+        a.memory_add("user", "", "the shared wording", via="direct")
+        _apply(b, _read_ops(a))
+        a.memory_replace("user", "", "shared wording", "A's version", via="direct")
+        b.memory_replace("user", "", "shared wording", "B's version", via="direct")
+
+        _, c = _machine("conf-mem-c")
+        _apply(c, _read_ops(a) + _read_ops(b))
+        conn = c.db_connect()
+        self.assertEqual(len(c.conflict_rows(conn)), 1)
+        conn.close()
+
+        # The human picks one, the only way the design offers: by editing the
+        # file. Nothing tells sync about it.
+        c.memory_remove("user", "", "B's version")
+
+        conn = c.db_connect()
+        self.assertEqual(c.conflict_rows(conn), [],
+                         "a pair one side of which is gone is a pair the human"
+                         " already resolved")
+        self.assertEqual(
+            conn.execute("SELECT count(*) FROM sync_conflicts").fetchone()[0], 1,
+            "the row stays in the table -- it is the log of what happened;"
+            " conflict_rows is the view that drops it")
+        conn.close()
+
+        with quiet() as buf:
+            c.cmd_sync_status(type("A", (), {"cwd": None})())
+        out = buf.getvalue()
+        self.assertIn("conflicts:    none", out)
+        self.assertNotIn("A's version", out)
+
+    def test_a_filemap_conflict_pair_drops_off_the_list_once_a_human_removes_one_side(self):
+        """The same rule, on the file map -- whose bucket is the project slug
+        rather than the global `user`, so it exercises the other half of the
+        both-present check."""
+        slug = "conf-slug"
+        _, a = _machine("conf-map-a", MACHINE_A)
+        a.filemap_add(slug, "lore_core/store.py", "the schema", via="direct")
+        key = next(o["project_key"] for o in _read_ops(a) if o["class"] == "filemap")
+
+        _, b = _machine("conf-map-b", MACHINE_B)
+        _align_project(b, key, slug)
+        _apply(b, _read_ops(a))
+
+        # Two machines re-point the same row at DIFFERENT paths. A file map row
+        # is keyed by its path (`filemap_add` updates in place when the path
+        # matches), so this is the shape in which rule 1's "the file now has
+        # two entries" is actually observable.
+        a.filemap_replace(slug, "store.py", "lore_core/store.py",
+                          "schema, session index and the op log tables", via="direct")
+        b.filemap_replace(slug, "store.py", "lore_core/db.py",
+                          "everything sqlite touches", via="direct")
+
+        _, c = _machine("conf-map-c")
+        _align_project(c, key, slug)
+        _apply(c, _read_ops(a) + _read_ops(b))
+
+        conn = c.db_connect()
+        conflicts = c.conflict_rows(conn)
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0][0], "filemap")
+        conn.close()
+        self.assertEqual(len(_map_entries(c, slug)), 2,
+                         "both wordings are kept; nothing is auto-chosen")
+
+        c.filemap_remove(slug, "lore_core/db.py")
+        conn = c.db_connect()
+        self.assertEqual(c.conflict_rows(conn), [])
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
