@@ -150,7 +150,7 @@ can be checked against, is [`docs/sync-protocol.md`](docs/sync-protocol.md).
 
 ## DOXA — the native terminal
 
-LORE also powers [DOXA](https://github.com/docwilde/doxa), a standalone agent terminal (Claude Agent SDK + Textual): `lore_core` runs in-process there — same files, same SQLite store, byte-compatible with this plugin. `lore_core` also installs standalone as a library for any consumer that wants the memory model without Claude Code; see [`docs/manual.md`](docs/manual.md#lore_core-as-a-library).
+LORE also powers [DOXA](https://github.com/docwilde/doxa), a standalone agent terminal (Claude Agent SDK + Textual): `lore_core` runs in-process there — same files, same SQLite store, byte-compatible with this plugin. Sync reaches DOXA by the same door: it appends the same ops from the same write paths, carries a `⇅ sync` chip saying how stale this machine's copy is and how much failed its integrity check, and keys its own two record types — tab sets and worktree sidecars, both opt-in classes — by machine, so a record written on the workstation is never restored on the laptop as though it were local. `lore_core` also installs standalone as a library for any consumer that wants the memory model without Claude Code; see [`docs/manual.md`](docs/manual.md#lore_core-as-a-library).
 
 ## Reference
 
