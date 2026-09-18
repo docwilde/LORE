@@ -88,6 +88,12 @@ from .sync_client import (
     sync_timeout,
 )
 from .sync_oplog import get_or_create_machine, sync_disabled
+# `version` sits off the package's dependency graph (it imports nothing from
+# lore_core), so this is a plain top-level import and not a cycle waiting to
+# be discovered. It is here because `GET /health` reports a version by
+# contract (S6.6) and an operator debugging a peer wants to know which LORE
+# is on the other end.
+from .version import resolve_version
 
 
 __all__ = [
@@ -611,12 +617,7 @@ def cmd_sync_serve(args) -> int:
     port = getattr(args, "port", None)
     port = peer_port() if port is None else int(port)
     try:
-        from .version import resolve_version
-        version = resolve_version()
-    except Exception:
-        version = ""
-    try:
-        server = peer_server(bind=bind, port=port, version=version)
+        server = peer_server(bind=bind, port=port, version=resolve_version())
     except SyncError as exc:
         print(f"sync serve: {exc}", file=sys.stderr)
         return 1
@@ -633,7 +634,7 @@ def cmd_sync_serve(args) -> int:
           + (" (loopback)" if peer.loopback else " (PUBLIC LISTENER)"))
     if peer.loopback:
         print(f"  expose:   tailscale serve --bg {bound}")
-        print(f"  pull it:  LORE_SYNC_PEER=https://<this-host>.<tailnet>.ts.net")
+        print("  pull it:  LORE_SYNC_PEER=https://<this-host>.<tailnet>.ts.net")
     else:
         print(f"  pull it:  LORE_SYNC_PEER=<this-host>:{bound}")
     print("  pull side only — there is no push to a peer. Ctrl-C to stop.")

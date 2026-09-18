@@ -1011,7 +1011,7 @@ def main() -> int:
                      help="address to bind (default 127.0.0.1 — put"
                           " `tailscale serve` in front of it)")
     syp.add_argument("--port", type=int, default=None, metavar="N",
-                     help=f"port to bind (default LORE_SYNC_PEER_PORT or"
+                     help="port to bind (default LORE_SYNC_PEER_PORT or"
                           f" {DEFAULT_PEER_PORT})")
     syp.add_argument("--cwd")
     syp.set_defaults(fn=cmd_sync_serve, scmd="serve")
