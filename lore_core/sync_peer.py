@@ -637,6 +637,11 @@ def cmd_sync_serve(args) -> int:
     else:
         print(f"  pull it:  LORE_SYNC_PEER=<this-host>:{bound}")
     print("  pull side only — there is no push to a peer. Ctrl-C to stop.")
+    # Explicit, because `serve_forever` never returns: stdout to anything but
+    # a tty is block-buffered, so a peer started under nohup, systemd or a
+    # `| tee` would print its banner only once it had already stopped, which
+    # is the one moment it is no use.
+    sys.stdout.flush()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

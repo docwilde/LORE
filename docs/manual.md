@@ -219,6 +219,11 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_SYNC_PULL_AT_START` | `1` | detached pull at SessionStart; `0` turns it off |
 | `LORE_SYNC_PULL_SECS` | 120 | floor between those pulls, so a resume/clear/compact storm does not fan out |
 | `LORE_SYNC_PUSH_AFTER_REVIEW` | `1` | push when the review worker finishes; `0` turns it off |
+| `LORE_SYNC_PEER` | unset | Transport B: a comma list of tailnet nodes to pull from directly. A bare name (`workstation`) means `http://workstation:<port>`; a full URL is used as written, which is the `tailscale serve` form |
+| `LORE_SYNC_PEER_PORT` | 8765 | port `lore sync serve` binds and a bare peer name dials |
+| `LORE_SYNC_PEER_AUTH` | `tailscale` | how `lore sync serve` authenticates: the Tailscale identity header, or `none` — which is required, and must be typed, before it will bind anything but loopback |
+| `LORE_SYNC_PEER_ALLOW` | unset | comma list of tailnet logins `lore sync serve` will answer; unset means any identity `tailscale serve` vouched for |
+| `LORE_SYNC_PEER_LOG` | unset | `1` logs one line per served request to stderr |
 | `LORE_DISABLE_SYNC` | unset | stage kill switch: no op is appended and nothing syncs |
 | `LORE_SKIP` | unset | any value no-ops every hook — the master off-switch above all stage switches |
 
@@ -233,14 +238,37 @@ Off until `LORE_SYNC_URL` is set. With it set, every write to a synced class app
 | `lore sync` | pull, then push |
 | `lore sync status` | machine id and label, unpushed count, classes on/off, what is waiting or unverified, conflicts, peer cursors. No network call. |
 | `lore sync push` | send this machine's own ops from the peer cursor, page by page. `--from <seq>` re-sends from there instead (`--from 0` re-seeds a hub that lost its data). |
-| `lore sync pull` | drain everything past the cursor, sort into canonical order, apply, then advance the cursor |
-| `lore sync bootstrap` | fill a fresh `LORE_ROOT` from the hub. Refuses a populated one and says what is in it; `--merge` proceeds as an ordinary pull. |
+| `lore sync pull` | drain everything past the cursor — from the hub and from every configured peer — sort into canonical order, apply, then advance each cursor. `--peer <name>` pulls from that one peer alone. |
+| `lore sync bootstrap` | fill a fresh `LORE_ROOT` from the hub, or from `--peer <name>`. Refuses a populated one and says what is in it; `--merge` proceeds as an ordinary pull. |
+| `lore sync serve` | Transport B: serve this machine's op log to a peer. Pull side only, loopback unless told otherwise, and started by nothing but this command. |
 | `lore sync login <token>` | store this machine's bearer token in `settings.json` → `"env"`. The token is never echoed. |
 | `lore sync classes [+class\|-class]` | show or edit `LORE_SYNC_CLASSES` |
 
 A pull runs detached at SessionStart and never on the prompt loop; a push runs after the review worker finishes. Both are silent when the hub is unreachable — ops accumulate and the next push drains them — and an explicit `lore sync` prints the error. A `409` from the hub means the client's log has a gap: it is reported, never retried around, because a lost op means a store that is no longer a function of its log.
 
 Ops are signed with `LORE_SYNC_HMAC_KEY`, which every machine of one account holds and the hub never sees. An op whose MAC is missing or wrong is staged as a pending proposal tagged `unverified` and applied by nothing but a human — a memory entry reaches the model's context verbatim, so an op that could be forged is a prompt injection with a persistence layer.
+
+### Transport B — two machines, no hub
+
+The laptop and the workstation on one tailnet do not need a hub between them. Each runs `lore sync serve`, and each pulls from the other:
+
+```
+# on the workstation
+lore sync serve                     # loopback, port 8765
+tailscale serve --bg 8765           # tailscaled terminates TLS and injects the identity
+
+# on the laptop
+lore config set LORE_SYNC_PEER https://workstation.<tailnet>.ts.net
+lore sync pull
+```
+
+There is no push to a peer — both directions happen as each side pulls, so run the pull on whichever machine is behind (or let the detached pull at SessionStart do it). A peer serves its *whole* log, not only the ops it wrote, so a third machine learns from whichever peer happens to be up. `lore sync status` lists each peer's own cursor.
+
+The wire is the same wire: an op pulled from a peer and an op pulled from the hub are indistinguishable, they sort into the same `(lamport, machine_id, machine_seq)` order, and the same MAC rule applies to both. **A peer is not trusted because it is on the tailnet** — an op whose MAC does not verify is staged, whichever machine handed it over.
+
+Serving is opt-in and never on by default: nothing but `lore sync serve` binds a socket, it binds `127.0.0.1` unless `--bind` says otherwise, and a Tailscale identity header is trusted only on the loopback listener `tailscale serve` forwards to. A non-loopback bind therefore has nothing it could authenticate, and refuses to start until you say `LORE_SYNC_PEER_AUTH=none` in so many words.
+
+What Transport B does not do: a cloud sandbox is not a tailnet node and cannot pull from anything; a machine that is off holds its ops until it is on again; and a fresh machine has to be told which peer to start from (`lore sync bootstrap --peer <name>`). Those are the reasons the hub exists, not reasons not to use a peer.
 
 ## Hooks
 

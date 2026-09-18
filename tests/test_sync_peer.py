@@ -10,10 +10,23 @@ is worse than none."
 THE ONE THE TRANSPORT EXISTS FOR is
 test_two_roots_with_two_machine_ids_converge_with_no_hub: two LORE_ROOTs, two
 machine ids, each serving its own log to the other, and afterwards both stores
-pass the SAME identity check tests/test_sync_merge.py's
-test_store_is_a_function_of_its_log uses. If Transport B merged differently
-from Transport A -- a second ordering, a second dedup, a second anything --
-that is where it would show.
+pass the same identity check tests/test_sync_merge.py's
+test_store_is_a_function_of_its_log uses -- beliefs by uid, edges, the dreamed
+pairs, the outcomes ledger and the pending pile. If Transport B merged
+differently from Transport A -- a second ordering, a second dedup, a second
+anything -- that is where it would show.
+
+WITH ONE HONEST EXCEPTION ABOUT ORDER, and it is Transport A's too. A curated
+memory file is written in the order its entries arrived on THAT machine, so
+two machines that each wrote locally before they pulled converge as a set and
+not byte for byte -- which is why both of Transport A's convergence tests
+compare `sorted(...)` (tests/test_sync_client.py:601,
+tests/test_sync_hub.py:268). The byte-identical half of
+test_store_is_a_function_of_its_log is a property of REPLAY onto a store that
+did not author concurrently, and this file pins it exactly there:
+test_a_third_machine_pulling_from_either_peer_gets_the_same_bytes puts two
+fresh machines on opposite ends of a converged pair and requires identical
+bytes, which is the strongest form the claim actually takes.
 
 THE MOST IMPORTANT SINGLE BEHAVIOUR is
 test_a_forged_op_from_a_peer_is_staged_never_applied, and it is NON-VACUOUS IN
