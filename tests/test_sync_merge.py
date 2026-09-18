@@ -141,6 +141,27 @@ def _entries(mod, scope="user", slug=""):
     return mod.read_entries(mod.memory_path(scope, slug))
 
 
+def _map_entries(mod, slug):
+    return mod.read_entries(mod.filemap_path(slug))
+
+
+def _align_project(mod, project_key: str, slug: str):
+    """Give `mod` the SAME slug for `project_key` the author uses.
+
+    Not a convenience: `entry_key` hashes `kind:bucket:text`, and for the file
+    map the bucket IS the slug (`project:<slug>` for project memory), so a
+    `remove`/`replace` key only matches on a receiver whose slug for that
+    project agrees with the author's. That is the ordinary case -- the slug is
+    a checkout path flattened, and two machines that keep the repository in the
+    same place produce the same one -- and it is what `record_project_identity`
+    records on first sight. Without it the receiver mints `sync-<key>` and
+    nothing keyed by the author's bucket can ever be found.
+    """
+    conn = mod.db_connect()
+    mod.record_project_identity(conn, project_key, slug)
+    conn.close()
+
+
 def _pending_items(root: Path) -> "dict[str, dict]":
     """{uid: item} for the pile that is still PENDING (archive excluded)."""
     out = {}
@@ -531,6 +552,174 @@ class TestMemoryMergeRules(unittest.TestCase):
                 next(o["op_id"] for o in ops if o["payload"].get("text") == item["text"])))
 
 
+class TestFilemapMergeRules(unittest.TestCase):
+    """The file map travels under the same three verbs as memory, and the one
+    with no coverage until now is `remove`. A file map row that outlives its
+    deletion is worse than a stale entry: `lore filemap` is the table an agent
+    is TOLD to trust, so a row naming a file that was deleted sends the next
+    session to read it."""
+
+    SLUG = "fmap-slug"
+
+    def setUp(self):
+        self.a_root, self.a = _machine("fmap-a", MACHINE_A)
+        self.a.filemap_add(self.SLUG, "lore_core/store.py", "schema + session index",
+                           via="direct")
+        self.a.filemap_add(self.SLUG, "lore_core/memory.py", "curated core memory",
+                           via="direct")
+        self.key = next(o["project_key"] for o in _read_ops(self.a)
+                        if o["class"] == "filemap")
+
+    def _receiver(self, label, machine_id=MACHINE_B):
+        _, node = _machine(label, machine_id)
+        _align_project(node, self.key, self.SLUG)
+        return node
+
+    def test_a_filemap_remove_drops_the_row_the_author_dropped(self):
+        """sync.md's memory/filemap verbs: `remove {key}`, where `key` is the
+        `entry_key` hash. Replaying the author's log must leave the receiver's
+        map equal to the author's -- the same property the whole design rests
+        on, for the one verb that only deletes."""
+        self.a.filemap_remove(self.SLUG, "lore_core/memory.py")
+        self.assertEqual(len(_map_entries(self.a, self.SLUG)), 1)
+
+        b = self._receiver("fmap-b")
+        report = _apply(b, _read_ops(self.a))
+        self.assertEqual(report["deferred"], 0)
+        self.assertEqual(_map_entries(b, self.SLUG), _map_entries(self.a, self.SLUG))
+        self.assertNotIn("lore_core/memory.py",
+                         "\n".join(_map_entries(b, self.SLUG)),
+                         "the deleted row must not survive the replay")
+
+    def test_a_filemap_remove_naming_a_row_this_store_does_not_hold_changes_nothing(self):
+        """sync.md: "`remove` of an absent key is a no-op." A no-op, and
+        specifically not a DEFERRAL: an entry key names a text, not a
+        dependency, so nothing will ever arrive to make it resolvable and an
+        op held at applied = 0 for it would be retried on every pull forever.
+        """
+        b = self._receiver("fmap-absent")
+        _apply(b, _read_ops(self.a))
+        before = _map_entries(b, self.SLUG)
+        self.assertEqual(len(before), 2)
+
+        ghost = _signed(
+            b, machine_id=MACHINE_A, machine_seq=90, lamport=90, cls="filemap",
+            verb="remove", project_key=self.key,
+            payload={"key": b.entry_key("filemap", self.SLUG,
+                                        "nothing/here.py — never added")})
+        report = _apply(b, [ghost])
+        self.assertEqual(report["applied"], 1)
+        self.assertEqual(report["deferred"], 0,
+                         "an absent key is settled, not waiting for anything")
+        self.assertEqual(_map_entries(b, self.SLUG), before)
+
+        conn = b.db_connect()
+        self.assertEqual(b.deferred_op_count(conn), 0)
+        conn.close()
+
+    def test_a_filemap_remove_is_idempotent_under_a_second_delivery(self):
+        """docs/sync-protocol.md S9 at the domain level: the second copy of a
+        `remove` must not take a DIFFERENT row with it. `filemap_remove`
+        matches on a substring, so a remove replayed against a map that no
+        longer holds its target is the moment a near-miss would bite."""
+        self.a.filemap_remove(self.SLUG, "lore_core/memory.py")
+        ops = _read_ops(self.a)
+        b = self._receiver("fmap-twice")
+        _apply(b, ops)
+        once = _map_entries(b, self.SLUG)
+
+        remove_op = next(o for o in ops if o["op"] == "remove")
+        again = _signed(b, machine_id=MACHINE_A, machine_seq=91, lamport=91,
+                        cls="filemap", verb="remove", project_key=self.key,
+                        payload=remove_op["payload"])
+        _apply(b, [again])
+        self.assertEqual(_map_entries(b, self.SLUG), once)
+
+
+class TestConflictsDropWhenOneSideIsRemovedByHand(unittest.TestCase):
+    """sync.md rule 1: "`lore sync status` lists the pair under conflicts
+    until one is removed by hand."
+
+    UNTIL is the word under test. There is no `sync resolve` command to run,
+    so the store itself has to be the record of what the human decided: a pair
+    whose two texts are no longer both present has been resolved, and a
+    conflicts list that keeps reporting it is a list nobody will read twice.
+    """
+
+    def test_a_memory_conflict_pair_drops_off_the_list_once_a_human_removes_one_side(self):
+        _, a = _machine("conf-mem-a", MACHINE_A)
+        _, b = _machine("conf-mem-b", MACHINE_B)
+        a.memory_add("user", "", "the shared wording", via="direct")
+        _apply(b, _read_ops(a))
+        a.memory_replace("user", "", "shared wording", "A's version", via="direct")
+        b.memory_replace("user", "", "shared wording", "B's version", via="direct")
+
+        _, c = _machine("conf-mem-c")
+        _apply(c, _read_ops(a) + _read_ops(b))
+        conn = c.db_connect()
+        self.assertEqual(len(c.conflict_rows(conn)), 1)
+        conn.close()
+
+        # The human picks one, the only way the design offers: by editing the
+        # file. Nothing tells sync about it.
+        c.memory_remove("user", "", "B's version")
+
+        conn = c.db_connect()
+        self.assertEqual(c.conflict_rows(conn), [],
+                         "a pair one side of which is gone is a pair the human"
+                         " already resolved")
+        self.assertEqual(
+            conn.execute("SELECT count(*) FROM sync_conflicts").fetchone()[0], 1,
+            "the row stays in the table -- it is the log of what happened;"
+            " conflict_rows is the view that drops it")
+        conn.close()
+
+        with quiet() as buf:
+            c.cmd_sync_status(type("A", (), {"cwd": None})())
+        out = buf.getvalue()
+        self.assertIn("conflicts:    none", out)
+        self.assertNotIn("A's version", out)
+
+    def test_a_filemap_conflict_pair_drops_off_the_list_once_a_human_removes_one_side(self):
+        """The same rule, on the file map -- whose bucket is the project slug
+        rather than the global `user`, so it exercises the other half of the
+        both-present check."""
+        slug = "conf-slug"
+        _, a = _machine("conf-map-a", MACHINE_A)
+        a.filemap_add(slug, "lore_core/store.py", "the schema", via="direct")
+        key = next(o["project_key"] for o in _read_ops(a) if o["class"] == "filemap")
+
+        _, b = _machine("conf-map-b", MACHINE_B)
+        _align_project(b, key, slug)
+        _apply(b, _read_ops(a))
+
+        # Two machines re-point the same row at DIFFERENT paths. A file map row
+        # is keyed by its path (`filemap_add` updates in place when the path
+        # matches), so this is the shape in which rule 1's "the file now has
+        # two entries" is actually observable.
+        a.filemap_replace(slug, "store.py", "lore_core/store.py",
+                          "schema, session index and the op log tables", via="direct")
+        b.filemap_replace(slug, "store.py", "lore_core/db.py",
+                          "everything sqlite touches", via="direct")
+
+        _, c = _machine("conf-map-c")
+        _align_project(c, key, slug)
+        _apply(c, _read_ops(a) + _read_ops(b))
+
+        conn = c.db_connect()
+        conflicts = c.conflict_rows(conn)
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0][0], "filemap")
+        conn.close()
+        self.assertEqual(len(_map_entries(c, slug)), 2,
+                         "both wordings are kept; nothing is auto-chosen")
+
+        c.filemap_remove(slug, "lore_core/db.py")
+        conn = c.db_connect()
+        self.assertEqual(c.conflict_rows(conn), [])
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # D) belief merge rules
 # ---------------------------------------------------------------------------
@@ -707,6 +896,92 @@ class TestBeliefMergeRules(unittest.TestCase):
         conn.close()
 
 
+    def test_a_retract_reaches_every_machine_that_replays_the_log(self):
+        """sync.md's belief verbs include `retract {uid}`, and it is the one
+        that has to travel: a belief withdrawn on the laptop but still active
+        on the workstation is a claim the store keeps asserting after the user
+        took it back -- and `lore ask` reads the ACTIVE set, so the withdrawal
+        has to reach the status column, not merely the outcomes ledger.
+        """
+        _, a = _machine("retract-a", MACHINE_A)
+        conn = a.db_connect()
+        bid, _ = a.belief_insert(conn, "user", "a claim the user later withdrew",
+                                 0.6, "s1", None, None, via="direct")
+        conn.commit()
+        uid = conn.execute("SELECT uid FROM beliefs WHERE id = ?", (bid,)).fetchone()[0]
+        a.belief_retract(conn, bid, "withdrawn on machine A")
+        conn.commit()
+        conn.close()
+
+        _, b = _machine("retract-b", MACHINE_B)
+        report = _apply(b, _read_ops(a))
+        self.assertEqual(report["deferred"], 0)
+
+        conn = b.db_connect()
+        self.assertEqual(
+            conn.execute("SELECT status FROM beliefs WHERE uid = ?", (uid,)).fetchone()[0],
+            "retracted")
+        self.assertEqual(
+            conn.execute("SELECT count(*) FROM beliefs WHERE status = 'active'"
+                         ).fetchone()[0], 0,
+            "a retracted belief must leave the working set on the receiver too")
+        conn.close()
+
+        # A second retract op for the same belief -- a re-pulled page under a
+        # fresh op_id, so the store-level guard cannot be what saves it --
+        # changes nothing.
+        again = _signed(b, machine_id=MACHINE_A, machine_seq=80, lamport=80,
+                        cls="belief", verb="retract", payload={"uid": uid})
+        _apply(b, [again])
+        conn = b.db_connect()
+        self.assertEqual(
+            conn.execute("SELECT status FROM beliefs WHERE uid = ?", (uid,)).fetchone()[0],
+            "retracted")
+        conn.close()
+
+    def test_a_retract_naming_a_belief_that_has_not_arrived_waits_instead_of_vanishing(self):
+        """The dependency rule is not the edge verb's alone: every belief verb
+        that resolves a uid holds at `applied = 0` when it cannot. A retract
+        dropped because its belief had not been paged in yet would leave that
+        belief ACTIVE on this machine forever -- the withdrawal would be lost
+        silently, and the next pull would have nothing left to retry.
+        """
+        _, tgt = _machine("retract-late")
+        uid = str(uuid.uuid4())
+        retract = _signed(tgt, machine_id=MACHINE_A, machine_seq=2, lamport=20,
+                          cls="belief", verb="retract", payload={"uid": uid})
+        report = _apply(tgt, [retract])
+        self.assertEqual(report["deferred"], 1)
+        self.assertEqual(report["applied"], 0)
+
+        conn = tgt.db_connect()
+        self.assertEqual(tgt.deferred_op_count(conn), 1)
+        self.assertEqual(
+            conn.execute("SELECT applied FROM sync_ops WHERE op_id = ?",
+                         (retract["op_id"],)).fetchone()[0], 0)
+        conn.close()
+
+        arrival = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=19,
+                          cls="belief", verb="insert",
+                          payload={"uid": uid, "subject": "user",
+                                   "claim": "the belief that arrived after its own"
+                                            " retraction",
+                                   "confidence": 0.6, "via": "derived",
+                                   "writer": "derived",
+                                   "created": "2026-01-01T00:00:00Z",
+                                   "evidence": {"session_id": "s9",
+                                                "project_key": None, "note": None}})
+        _apply(tgt, [arrival])
+
+        conn = tgt.db_connect()
+        self.assertEqual(tgt.deferred_op_count(conn), 0)
+        self.assertEqual(
+            conn.execute("SELECT status FROM beliefs WHERE uid = ?", (uid,)).fetchone()[0],
+            "retracted",
+            "the held retraction must apply once its belief lands, not be dropped")
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # E) pending and skill
 # ---------------------------------------------------------------------------
@@ -792,9 +1067,562 @@ class TestPendingAndSkillRules(unittest.TestCase):
             self.assertEqual(staged[expected_uid]["body"], loser["payload"]["body"])
             self.assertEqual(staged[expected_uid]["kind"], "skill")
 
+    def test_a_skill_remove_deletes_the_skill_and_a_second_remove_changes_nothing(self):
+        """sync.md: "`remove` is idempotent."
+
+        Idempotent is the whole claim, and it is not free: the removal takes a
+        DIRECTORY, so a second delivery arriving against a tree that no longer
+        has it must be a quiet no-op rather than an error that fails the
+        drain and strands every op behind it in the same page.
+        """
+        _, a = _machine("skill-rm-a", MACHINE_A)
+        self.assertIsNone(a.apply_item("x", {"kind": "skill", "name": "doomed-skill",
+                                             "body": "a body that gets deleted",
+                                             "description": "from machine A"}, False))
+        _, b = _machine("skill-rm-b", MACHINE_B)
+        _apply(b, _read_ops(a))
+        installed = b.SKILLS_DIR / "doomed-skill" / "SKILL.md"
+        self.assertTrue(installed.exists(),
+                        "the put must land before the remove means anything")
+
+        # A neighbouring skill proves the removal is targeted, not a sweep.
+        keeper = b.SKILLS_DIR / "keeper-skill"
+        keeper.mkdir(parents=True, exist_ok=True)
+        (keeper / "SKILL.md").write_text("untouched", encoding="utf-8")
+
+        remove = _signed(b, machine_id=MACHINE_A, machine_seq=50, lamport=50,
+                         cls="skill", verb="remove", payload={"name": "doomed-skill"})
+        report = _apply(b, [remove])
+        self.assertEqual(report["applied"], 1)
+        self.assertFalse(installed.parent.exists(),
+                         "the skill directory, not merely SKILL.md, must go")
+        self.assertTrue((keeper / "SKILL.md").exists())
+
+        again = _signed(b, machine_id=MACHINE_A, machine_seq=51, lamport=51,
+                        cls="skill", verb="remove", payload={"name": "doomed-skill"})
+        report = _apply(b, [again])
+        self.assertEqual(report["applied"], 1,
+                         "a remove of what is already gone is settled, not deferred")
+        self.assertEqual(report["deferred"], 0)
+        self.assertTrue((keeper / "SKILL.md").exists())
+
+    def test_a_skill_remove_with_a_traversing_name_stays_inside_skills_dir(self):
+        """A skill name off the wire is as untrusted as one a model authored,
+        and more so: `remove` resolves to `rmtree`, so a name carrying `..`
+        is a DELETE of an attacker's choosing delivered by the sync courier.
+        `valid_skill_name` plus the resolve-and-contain check is what stops it,
+        and a refusal must be recorded as settled rather than retried forever.
+        """
+        _, node = _machine("skill-traverse")
+        victim = node.ROOT / "not-a-skill"
+        victim.mkdir(parents=True, exist_ok=True)
+        (victim / "SKILL.md").write_text("must survive", encoding="utf-8")
+
+        for n, name in enumerate(("../not-a-skill", "..", "sub/dir", "/etc"), start=60):
+            op = _signed(node, machine_id=MACHINE_A, machine_seq=n, lamport=n,
+                         cls="skill", verb="remove", payload={"name": name})
+            report = _apply(node, [op])
+            self.assertEqual(report["deferred"], 0, name)
+            self.assertTrue((victim / "SKILL.md").exists(),
+                            f"{name!r} must not reach outside SKILLS_DIR")
+        self.assertTrue(node.SKILLS_DIR.exists(), "the skills directory itself must survive")
+
 
 # ---------------------------------------------------------------------------
-# F) the containment the whole design rests on
+# F) session, transcript, and the records that are only shown
+# ---------------------------------------------------------------------------
+#
+# The three classes with no merge rule at all. sync.md gives each of them the
+# same reason -- "a session has exactly one author machine, so there is no
+# conflict", "append-only per session", "there is nothing to merge, only to
+# show" -- which makes them look like they need no tests, and is exactly why
+# they need them: a class with no arbitration has nothing to catch a verb
+# that quietly does the wrong thing.
+
+class TestSessionRules(unittest.TestCase):
+    """sync.md: "the author's latest upsert is authoritative, `msgs` replaces
+    by session id the way `index_sessions` already does"."""
+
+    PROJECT_KEY = "github.com/docwilde/lore"
+
+    def _upsert(self, mod, seq, lamport, **fields):
+        payload = {"session_id": "S-1", "project_key": self.PROJECT_KEY,
+                   "machine_id": MACHINE_A, "cwd": "/home/dev/lore",
+                   "title": "a session", "first_ts": "2026-01-01T00:00:00Z",
+                   "last_ts": "2026-01-01T00:10:00Z", "messages": 2}
+        payload.update(fields)
+        return _signed(mod, machine_id=MACHINE_A, machine_seq=seq, lamport=lamport,
+                       cls="session", verb="upsert", project_key=self.PROJECT_KEY,
+                       payload=payload)
+
+    def _msgs(self, mod, seq, lamport, rows, session_id="S-1"):
+        return _signed(mod, machine_id=MACHINE_A, machine_seq=seq, lamport=lamport,
+                       cls="session", verb="msgs", project_key=self.PROJECT_KEY,
+                       payload={"session_id": session_id, "rows": rows})
+
+    def test_a_second_upsert_replaces_the_session_row_rather_than_adding_a_second(self):
+        """One author machine means the LATEST upsert is the truth. Appending
+        instead would put two rows with one session_id in front of `lore
+        search`, which prints one hit per row -- the same session twice, with
+        the stale title winning whichever way the rows happen to sort."""
+        _, tgt = _machine("sess-upsert")
+        _apply(tgt, [self._upsert(tgt, 1, 1)])
+        _apply(tgt, [self._upsert(tgt, 2, 2, title="the session, renamed",
+                                  last_ts="2026-01-01T02:00:00Z", messages=9)])
+
+        conn = tgt.db_connect()
+        rows = conn.execute(
+            "SELECT session_id, title, last_ts, messages FROM sessions").fetchall()
+        conn.close()
+        self.assertEqual(rows, [("S-1", "the session, renamed",
+                                 "2026-01-01T02:00:00Z", 9)])
+
+    def test_a_session_lands_under_the_receivers_own_slug_not_the_authors(self):
+        """The same translation the belief subjects get: a slug is a checkout
+        path flattened and is legitimately different on every machine, so what
+        travels is the project_key. Carried over verbatim, the session would
+        be filed under a project this store has never heard of and `lore
+        search --project` would never find it."""
+        _, tgt = _machine("sess-slug")
+        _apply(tgt, [self._upsert(tgt, 1, 1)])
+
+        conn = tgt.db_connect()
+        expected = tgt.resolve_or_create_synthetic_slug(conn, self.PROJECT_KEY)
+        project = conn.execute(
+            "SELECT project FROM sessions WHERE session_id = ?", ("S-1",)).fetchone()[0]
+        conn.close()
+        self.assertEqual(project, expected)
+
+    def test_session_msgs_replace_the_indexed_rows_rather_than_appending_to_them(self):
+        """sync.md: "`msgs` replaces by session id". A re-sent chunk that
+        appended would double every message in the FTS index, and the index is
+        what `lore search` counts hits in -- the duplication would read as
+        the user having said the same thing twice."""
+        _, tgt = _machine("sess-msgs")
+        _apply(tgt, [self._upsert(tgt, 1, 1)])
+        # A second session's rows must survive the first session's replace.
+        _apply(tgt, [self._msgs(tgt, 2, 2, [{"ts": "t0", "role": "user",
+                                             "content": "another session entirely"}],
+                                session_id="S-2")])
+        _apply(tgt, [self._msgs(tgt, 3, 3, [
+            {"ts": "t1", "role": "user", "content": "the first delivery"},
+            {"ts": "t2", "role": "assistant", "content": "answered once"}])])
+
+        conn = tgt.db_connect()
+        self.assertEqual(
+            conn.execute("SELECT count(*) FROM msg WHERE session_id = 'S-1'"
+                         ).fetchone()[0], 2)
+        conn.close()
+
+        _apply(tgt, [self._msgs(tgt, 4, 4, [
+            {"ts": "t9", "role": "user", "content": "the only surviving row"}])])
+
+        conn = tgt.db_connect()
+        self.assertEqual(
+            conn.execute("SELECT ts, role, content FROM msg WHERE session_id = 'S-1'"
+                         ).fetchall(),
+            [("t9", "user", "the only surviving row")],
+            "the second delivery replaces the session's rows; it does not add to them")
+        self.assertEqual(
+            conn.execute("SELECT count(*) FROM msg WHERE session_id = 'S-2'"
+                         ).fetchone()[0], 1,
+            "a replace is scoped to ONE session id")
+        # And the rows are genuinely in the search index, not merely in a table.
+        self.assertEqual(
+            conn.execute("SELECT session_id FROM msg WHERE msg MATCH 'surviving'"
+                         ).fetchall(), [("S-1",)])
+        conn.close()
+
+    def test_a_session_op_with_no_session_id_is_settled_rather_than_written(self):
+        """A `msgs` op naming no session cannot be replaced by anything later,
+        so holding it would mean retrying it on every pull forever; writing it
+        would put rows under a NULL session id that `lore search` can neither
+        open nor attribute."""
+        _, tgt = _machine("sess-nosid")
+        op = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                     cls="session", verb="msgs", project_key=self.PROJECT_KEY,
+                     payload={"rows": [{"ts": "t", "role": "user", "content": "orphan"}]})
+        report = _apply(tgt, [op])
+        self.assertEqual(report["applied"], 1)
+        self.assertEqual(report["deferred"], 0)
+
+        conn = tgt.db_connect()
+        self.assertEqual(conn.execute("SELECT count(*) FROM msg").fetchone()[0], 0)
+        conn.close()
+
+
+class TestTranscriptChunks(unittest.TestCase):
+    """sync.md: "Append-only per session; a chunk already held is a no-op.
+    Written under `ROOT/transcripts/<project_key>/<session_id>.jsonl`"."""
+
+    KEY = "github.com/docwilde/lore"
+
+    def _chunk(self, mod, seq, lamport, from_line, to_line, lines,
+               session_id="T-1", project_key=KEY):
+        return _signed(mod, machine_id=MACHINE_A, machine_seq=seq, lamport=lamport,
+                       cls="transcript", verb="chunk", project_key=project_key,
+                       payload={"session_id": session_id, "from_line": from_line,
+                                "to_line": to_line, "lines": lines})
+
+    def _held(self, mod, session_id="T-1"):
+        paths = sorted((mod.ROOT / "transcripts").rglob(f"{session_id}.jsonl"))
+        self.assertEqual(len(paths), 1, f"expected exactly one file for {session_id}")
+        return paths[0].read_text(encoding="utf-8").splitlines()
+
+    def test_a_redelivered_chunk_is_not_appended_a_second_time(self):
+        """"A chunk already held is a no-op." Not a store-level no-op -- the
+        re-pull arrives under its own op_id here, so `op_id UNIQUE` cannot be
+        what saves it. Appending twice would duplicate every line of a
+        transcript `lore session` then prints back as the record of what
+        happened."""
+        _, tgt = _machine("chunk-twice")
+        _apply(tgt, [self._chunk(tgt, 1, 1, 1, 3, ["one", "two", "three"])])
+        _apply(tgt, [self._chunk(tgt, 2, 2, 4, 6, ["four", "five", "six"])])
+        self.assertEqual(self._held(tgt), ["one", "two", "three", "four", "five", "six"])
+
+        _apply(tgt, [self._chunk(tgt, 3, 3, 1, 3, ["one", "two", "three"])])
+        self.assertEqual(self._held(tgt),
+                         ["one", "two", "three", "four", "five", "six"],
+                         "a chunk this store already holds must add nothing")
+
+    def test_an_overlapping_chunk_appends_only_the_lines_not_already_held(self):
+        """A sender that re-sends from a line before its peer's high-water mark
+        -- the ordinary shape of a resumed push -- must not have its overlap
+        written twice. Append-only means the file grows by the NEW lines, and
+        by nothing else."""
+        _, tgt = _machine("chunk-overlap")
+        _apply(tgt, [self._chunk(tgt, 1, 1, 1, 3, ["one", "two", "three"])])
+        _apply(tgt, [self._chunk(tgt, 2, 2, 2, 5,
+                                 ["two", "three", "four", "five"])])
+        self.assertEqual(self._held(tgt),
+                         ["one", "two", "three", "four", "five"])
+
+    def test_a_transcript_is_never_written_into_claude_codes_own_projects_dir(self):
+        """sync.md is explicit about where these must NOT go: writing them
+        into Claude Code's own directory "would make `claude -r` half work on
+        a transcript whose tool results reference files that are not here"."""
+        _, tgt = _machine("chunk-place")
+        _apply(tgt, [self._chunk(tgt, 1, 1, 1, 1, ["only line"])])
+
+        self.assertEqual(sorted(tgt.PROJECTS_DIR.rglob("*")), [],
+                         "the transcript must not land in PROJECTS_DIR")
+        held = sorted((tgt.ROOT / "transcripts").rglob("*.jsonl"))
+        self.assertEqual(len(held), 1)
+        self.assertEqual(held[0].name, "T-1.jsonl")
+
+    def test_a_project_key_carrying_a_path_cannot_write_outside_the_transcripts_dir(self):
+        """A project_key is a remote URL off the wire, and it is used here as a
+        DIRECTORY NAME. Unflattened, `../../..` in that field is an arbitrary
+        file write delivered by the sync courier -- the same containment the
+        skill names get, for the same reason."""
+        _, tgt = _machine("chunk-traverse")
+        _apply(tgt, [self._chunk(tgt, 1, 1, 1, 1, ["hostile"],
+                                 session_id="T-9",
+                                 project_key="../../../../etc/lore-escape")])
+
+        transcripts = (tgt.ROOT / "transcripts").resolve()
+        written = sorted(p.resolve() for p in tgt.ROOT.rglob("T-9.jsonl"))
+        self.assertEqual(len(written), 1, "the chunk was written somewhere")
+        self.assertTrue(written[0].is_relative_to(transcripts),
+                        f"{written[0]} escaped {transcripts}")
+
+    def test_a_chunk_for_user_scope_is_filed_rather_than_dropped(self):
+        """`project_key` is null for anything outside a project -- the wire
+        spelling for user scope, not a missing field. A chunk dropped for want
+        of a project would silently lose every session held outside a
+        checkout."""
+        _, tgt = _machine("chunk-userscope")
+        _apply(tgt, [self._chunk(tgt, 1, 1, 1, 1, ["no project here"],
+                                 session_id="T-U", project_key=None)])
+        self.assertEqual(self._held(tgt, "T-U"), ["no project here"])
+
+
+class TestRemoteRecordRules(unittest.TestCase):
+    """sync.md, tabset / worktree: "Keyed by `(project_key, machine_id)`; a
+    machine only ever restores its own record and only ever writes its own.
+    There is nothing to merge, only to show."
+
+    The key is the whole rule. A store that keyed these by project alone would
+    have each machine's put erase the last one, and the sidebar these exist to
+    feed would show one machine's tabs labelled with another's name.
+    """
+
+    def _record(self, mod, seq, lamport, *, cls, verb="put", machine_id=MACHINE_A,
+                project_key="github.com/docwilde/lore", record=None):
+        payload = {"machine_id": machine_id, "project_key": project_key}
+        if record is not None:
+            payload["record"] = record
+        return _signed(mod, machine_id=machine_id, machine_seq=seq, lamport=lamport,
+                       cls=cls, verb=verb, project_key=project_key, payload=payload)
+
+    def _rows(self, mod):
+        conn = mod.db_connect()
+        rows = conn.execute(
+            "SELECT class, project_key, machine_id, record FROM sync_remote_records"
+            " ORDER BY class, project_key, machine_id").fetchall()
+        conn.close()
+        return rows
+
+    def test_two_machines_records_for_one_project_coexist_instead_of_overwriting(self):
+        _, tgt = _machine("rec-key")
+        _apply(tgt, [
+            self._record(tgt, 1, 1, cls="tabset", machine_id=MACHINE_A,
+                         record={"tabs": ["a.py"]}),
+            self._record(tgt, 1, 2, cls="tabset", machine_id=MACHINE_B,
+                         record={"tabs": ["b.py"]}),
+            self._record(tgt, 2, 3, cls="worktree", machine_id=MACHINE_A,
+                         record={"path": "/home/dev/lore"}),
+        ])
+        rows = self._rows(tgt)
+        self.assertEqual(len(rows), 3,
+                         "class, project and machine are all part of the key")
+        self.assertEqual(
+            {(cls, mid) for cls, _pk, mid, _rec in rows},
+            {("tabset", MACHINE_A), ("tabset", MACHINE_B), ("worktree", MACHINE_A)})
+
+    def test_a_second_put_from_one_machine_replaces_that_machines_record(self):
+        """"Only to show" means the newest snapshot, not a history: a put that
+        accumulated would leave the sidebar rendering a machine's tab list from
+        whichever old row it read first."""
+        _, tgt = _machine("rec-replace")
+        _apply(tgt, [self._record(tgt, 1, 1, cls="tabset", record={"tabs": ["old.py"]})])
+        _apply(tgt, [self._record(tgt, 2, 2, cls="tabset",
+                                  record={"tabs": ["old.py", "new.py"]})])
+        rows = self._rows(tgt)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(json.loads(rows[0][3]), {"tabs": ["old.py", "new.py"]})
+
+    def test_a_remove_drops_only_the_named_record_and_a_second_remove_changes_nothing(self):
+        _, tgt = _machine("rec-remove")
+        _apply(tgt, [
+            self._record(tgt, 1, 1, cls="tabset", machine_id=MACHINE_A,
+                         record={"tabs": ["a.py"]}),
+            self._record(tgt, 1, 2, cls="tabset", machine_id=MACHINE_B,
+                         record={"tabs": ["b.py"]}),
+            self._record(tgt, 2, 3, cls="worktree", machine_id=MACHINE_A,
+                         record={"path": "/home/dev/lore"}),
+        ])
+        _apply(tgt, [self._record(tgt, 3, 4, cls="tabset", verb="remove",
+                                  machine_id=MACHINE_A)])
+        self.assertEqual(
+            {(cls, mid) for cls, _pk, mid, _rec in self._rows(tgt)},
+            {("tabset", MACHINE_B), ("worktree", MACHINE_A)},
+            "a remove names one class, one project and one machine")
+
+        report = _apply(tgt, [self._record(tgt, 4, 5, cls="tabset", verb="remove",
+                                           machine_id=MACHINE_A)])
+        self.assertEqual(report["applied"], 1)
+        self.assertEqual(report["deferred"], 0)
+        self.assertEqual(len(self._rows(tgt)), 2)
+
+    def test_a_record_with_no_project_is_kept_and_removed_under_the_null_key(self):
+        """`project_key` NULL is user scope, not a missing field -- and SQL
+        equality never matches NULL, so a `DELETE ... project_key = ?` would
+        leave these rows behind forever while reporting success."""
+        _, tgt = _machine("rec-null")
+        _apply(tgt, [self._record(tgt, 1, 1, cls="worktree", project_key=None,
+                                  record={"path": "/tmp/scratch"})])
+        self.assertEqual([(c, pk, m) for c, pk, m, _r in self._rows(tgt)],
+                         [("worktree", None, MACHINE_A)])
+
+        _apply(tgt, [self._record(tgt, 2, 2, cls="worktree", verb="remove",
+                                  project_key=None)])
+        self.assertEqual(self._rows(tgt), [],
+                         "a null project key must be matched by IS, not by =")
+
+    def test_a_record_naming_no_machine_is_settled_rather_than_stored(self):
+        """Half the primary key missing is not a record that can be shown --
+        nothing could ever say which machine to label it with -- so it is
+        recorded and dropped rather than held for a dependency that has no
+        way to arrive."""
+        _, tgt = _machine("rec-nomachine")
+        op = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1, cls="tabset",
+                     verb="put", project_key="k", payload={"record": {"tabs": []}})
+        report = _apply(tgt, [op])
+        self.assertEqual(report["applied"], 1)
+        self.assertEqual(report["deferred"], 0)
+        self.assertEqual(self._rows(tgt), [])
+
+
+# ---------------------------------------------------------------------------
+# G) the deferral engine: retry to a fixpoint, not to a guess
+# ---------------------------------------------------------------------------
+
+class TestRetryReachesAFixpoint(unittest.TestCase):
+    """sync.md: "An edge whose endpoint uid is unknown is held in `sync_ops`
+    with `applied = 0` and retried after the next pull, since ops can arrive
+    out of dependency order across pages."
+
+    `retry_deferred` answers that with a LOOP -- "repeated until a pass lands
+    nothing, because one deferred op can unblock another" -- and a loop is a
+    different claim from a pass. One pass resolves any dependency that is one
+    hop deep, which is every case the belief verbs can build today (only
+    `insert` makes a uid resolvable, and `insert` never defers). So the loop's
+    own contract is only testable against a chain deeper than the verbs can
+    currently reach, with a stand-in applier registered under a known class:
+    what is under test is the ENGINE's fixpoint, not that class's rule.
+    """
+
+    def _chain(self, mod, needs: dict):
+        """Install a stand-in applier over `worktree` whose ops depend on each
+        other by name. Returns the list of dispatches, in order."""
+        globals_ = mod.apply_ops.__globals__
+        appliers = globals_["_APPLIERS"]
+        original = appliers["worktree"]
+        self.addCleanup(appliers.__setitem__, "worktree", original)
+        dispatched, landed = [], set()
+
+        def handler(conn, op):
+            name = op["payload"]["id"]
+            dispatched.append(name)
+            dep = needs.get(name)
+            if dep is not None and dep not in landed:
+                return False
+            landed.add(name)
+            return True
+
+        appliers["worktree"] = handler
+        return dispatched, landed
+
+    def _op(self, mod, name, lamport):
+        return _signed(mod, machine_id=MACHINE_A, machine_seq=lamport, lamport=lamport,
+                       cls="worktree", verb="put", payload={"id": name})
+
+    def test_a_three_deep_dependency_chain_lands_in_one_drain(self):
+        """The chain runs AGAINST canonical order on purpose: `first` sorts
+        earliest and depends on `second`, which depends on `third`. Each pass
+        therefore unblocks exactly one op, and a retry that ran once -- or
+        twice -- would leave the tail held at `applied = 0` and report it as
+        waiting for a dependency that has, in fact, already arrived. The
+        operator would then be told to pull again for something no pull can
+        fix.
+        """
+        _, tgt = _machine("fixpoint")
+        dispatched, landed = self._chain(
+            tgt, {"first": "second", "second": "third", "third": None})
+        ops = [self._op(tgt, "first", 1), self._op(tgt, "second", 2),
+               self._op(tgt, "third", 3)]
+
+        report = _apply(tgt, list(reversed(ops)))
+
+        self.assertEqual(landed, {"first", "second", "third"})
+        self.assertEqual(report["applied"], 3,
+                         "a single-pass retry lands only two of the three")
+        self.assertEqual(report["deferred"], 0)
+        self.assertGreaterEqual(
+            dispatched.count("first"), 3,
+            "the deepest op must be retried after EACH of the two passes that"
+            " unblock it -- fewer means the loop is not a fixpoint")
+
+        conn = tgt.db_connect()
+        self.assertEqual(tgt.deferred_op_count(conn), 0)
+        self.assertEqual(
+            conn.execute("SELECT count(*) FROM sync_ops WHERE applied = 1"
+                         ).fetchone()[0], 3)
+        conn.close()
+
+    def test_the_loop_stops_at_a_fixpoint_instead_of_spinning_on_what_can_never_land(self):
+        """The other half of "until a pass lands nothing": an op whose
+        dependency will never arrive must leave the drain, not hold it. A loop
+        that re-ran while anything was still deferred would hang the pull --
+        and a pull is what the SessionStart hook waits on."""
+        _, tgt = _machine("fixpoint-stall")
+        dispatched, landed = self._chain(tgt, {"stranded": "never-arrives"})
+
+        report = _apply(tgt, [self._op(tgt, "stranded", 1)])
+
+        self.assertEqual(landed, set())
+        self.assertEqual(report["deferred"], 1)
+        self.assertEqual(report["applied"], 0)
+        self.assertLessEqual(
+            len(dispatched), 3,
+            "one attempt in the main pass and one confirming retry is enough;"
+            " more means the loop re-ran with no progress to justify it")
+
+        conn = tgt.db_connect()
+        self.assertEqual(tgt.deferred_op_count(conn), 1,
+                         "it stays HELD, for the pull that brings what it needs")
+        conn.close()
+
+    def test_every_belief_verb_that_names_a_missing_belief_waits_and_then_lands(self):
+        """The real-verb half of the same rule. `edge` is the case sync.md
+        names, but five verbs resolve a uid, and one of them dropping its op
+        instead of holding it would be invisible: the store would read as
+        complete and simply say less than the log does.
+        """
+        _, tgt = _machine("defer-breadth")
+        conn = tgt.db_connect()
+        anchor_id, _ = tgt.belief_insert(conn, "user", "the belief already here",
+                                         0.4, "s0", None, None, via="direct")
+        conn.commit()
+        anchor = conn.execute("SELECT uid FROM beliefs WHERE id = ?",
+                              (anchor_id,)).fetchone()[0]
+        conn.close()
+
+        late = str(uuid.uuid4())
+        outcome_uid = str(uuid.uuid4())
+        held = [
+            _signed(tgt, machine_id=MACHINE_A, machine_seq=10, lamport=10, cls="belief",
+                    verb="reinforce",
+                    payload={"uid": late, "confidence": 0.95,
+                             "evidence": {"session_id": "s1", "project_key": None,
+                                          "note": "said again elsewhere"}}),
+            _signed(tgt, machine_id=MACHINE_A, machine_seq=11, lamport=11, cls="belief",
+                    verb="edge",
+                    payload={"src_uid": anchor, "dst_uid": late, "rel": "explains",
+                             "source": "derived", "session_id": "s1", "note": None}),
+            _signed(tgt, machine_id=MACHINE_A, machine_seq=12, lamport=12, cls="belief",
+                    verb="outcome",
+                    payload={"uid": outcome_uid, "belief_uid": late,
+                             "event": "confirmed", "source": "audit",
+                             "session_id": "s1", "agent": "tests", "note": None}),
+            _signed(tgt, machine_id=MACHINE_A, machine_seq=13, lamport=13, cls="belief",
+                    verb="dream_reviewed",
+                    payload={"a_uid": anchor, "b_uid": late}),
+            _signed(tgt, machine_id=MACHINE_A, machine_seq=14, lamport=14, cls="belief",
+                    verb="status", payload={"uid": late, "status": "dormant"}),
+        ]
+        report = _apply(tgt, held)
+        self.assertEqual(report["deferred"], len(held),
+                         "every verb that resolves a uid must hold, not drop")
+        self.assertEqual(report["applied"], 0)
+
+        conn = tgt.db_connect()
+        self.assertEqual(tgt.deferred_op_count(conn), len(held))
+        conn.close()
+
+        _apply(tgt, [_signed(tgt, machine_id=MACHINE_A, machine_seq=9, lamport=9,
+                             cls="belief", verb="insert",
+                             payload={"uid": late, "subject": "user",
+                                      "claim": "the belief that arrived last",
+                                      "confidence": 0.5, "via": "derived",
+                                      "writer": "derived",
+                                      "created": "2026-01-01T00:00:00Z",
+                                      "evidence": {"session_id": "s1",
+                                                   "project_key": None,
+                                                   "note": None}})])
+
+        conn = tgt.db_connect()
+        self.assertEqual(tgt.deferred_op_count(conn), 0,
+                         "one arrival releases every op that was waiting on it")
+        bid, confidence, status = conn.execute(
+            "SELECT id, confidence, status FROM beliefs WHERE uid = ?", (late,)).fetchone()
+        self.assertAlmostEqual(confidence, 0.95, msg="the held reinforce applied")
+        self.assertEqual(status, "dormant", "the held status op applied")
+        self.assertEqual(
+            conn.execute("SELECT count(*) FROM belief_edges WHERE dst = ?",
+                         (bid,)).fetchone()[0], 1)
+        self.assertEqual(
+            conn.execute("SELECT belief_id FROM belief_outcomes WHERE uid = ?",
+                         (outcome_uid,)).fetchone()[0], bid)
+        self.assertEqual(
+            conn.execute("SELECT count(*) FROM dream_reviewed WHERE a = ? OR b = ?",
+                         (bid, bid)).fetchone()[0], 1)
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# H) the containment the whole design rests on
 # ---------------------------------------------------------------------------
 
 class TestMacVerification(unittest.TestCase):
@@ -932,7 +1760,7 @@ class TestMacVerification(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# G) applying must not author
+# I) applying must not author
 # ---------------------------------------------------------------------------
 
 class TestApplyingDoesNotAppend(unittest.TestCase):
