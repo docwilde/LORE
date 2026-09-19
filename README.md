@@ -15,8 +15,8 @@
 **Persistent memory for Claude Code that nothing writes to without your approval.** Curated memory stays hard-capped and human-directed. A derived belief store keeps everything the agent concluded on its own — and reaches the agent only when you ask for it.
 
 > [!WARNING]
-> **Beta.** LORE is `0.x` and still moves fast: 77 releases took it from `0.6.0`
-> to `0.55.0` between 21 August and 17 September 2026. Config keys, command
+> **Beta.** LORE is `0.x` and still moves fast: 78 releases took it from `0.6.0`
+> to `0.56.0` between 21 August and 18 September 2026. Config keys, command
 > surfaces and the curated-memory caps can still change between releases — the
 > SQLite store migrates itself additively, nothing else promises to.
 >
@@ -52,7 +52,7 @@ Beliefs form a graph, and it is built for that bet rather than against it. An ed
 
 ## How it works
 
-- **Five stores**, three capped and write-gated (user memory, project memory, file map), two ungated on write but gated on read (belief store, session index).
+- **Six stores**, four capped and write-gated (user memory, project memory, machine memory, file map), two ungated on write but gated on read (belief store, session index).
 - **Session end** runs a deriver → dreamer pipeline that proposes memory, file-map and skill entries into `pending/` — nothing applies until `/lore:approve`.
 - **Every CLI write is classified by caller**: the agent's own tool calls and a human terminal apply directly; a hook or a detached script stages instead. The gate (`LORE_WRITE_GATE`) is advisory, not a security boundary.
 - **Beliefs surface only on demand**, or as a labeled, uncalibrated section of the snapshot — never as an unreviewed steer.
@@ -89,11 +89,13 @@ The local half runs either way, and is the part worth understanding first.
 Every write to a synced class appends one op to a log in `state.db`, so the
 store becomes a function of that log whether or not anything ever reads it —
 which is what lets a second machine be replayed into the same state rather than
-merged towards it. Six classes are logged by default: curated memory, the file
-map, beliefs, staged proposals, skills and the session index, each individually
-switchable, because carrying a session transcript is a different
-confidentiality decision from carrying a file-map row. (`LORE_DISABLE_SYNC`
-stops the log itself, not just the sending.) For a database mutation the op is
+merged towards it. Six classes are logged by default: curated memory (the
+user and project scopes — machine memory stays local, since the wire has no
+way yet to address a single host), the file map, beliefs, staged proposals,
+skills and the session index, each individually switchable, because carrying
+a session transcript is a different confidentiality decision from carrying a
+file-map row. (`LORE_DISABLE_SYNC` stops the log itself, not just the
+sending.) For a database mutation the op is
 written in the same transaction as the mutation, so a crash loses both or
 neither; for a file write it is appended immediately afterwards, since there is
 no shared transaction to be inside.
@@ -149,7 +151,7 @@ can be checked against, is [`docs/sync-protocol.md`](docs/sync-protocol.md).
 - **Indexing and search never leave the machine.** No embeddings, no API calls, no network.
 - **Review sends a digest to the same endpoint the session already used** — the Anthropic API via the `claude` CLI. LORE scrubs likely secrets on the way in and out, before anything reaches disk or network.
 - **Beliefs are ungated on write by the deriver** — LORE's largest hallucination surface. The read-side gate mitigates it, not fixes it; see [`docs/manual.md`](docs/manual.md#the-belief-gate-sits-on-read-not-on-write).
-- **Sync is off until configured, and is the only thing that sends memory anywhere.** With `LORE_SYNC_URL` or `LORE_SYNC_PEER` set, curated memory, file maps, beliefs, staged proposals, skill bodies and scrubbed session text leave this machine. Scrubbing removes credential *shapes*, not substance — a hub's disk says what you work on and what you concluded, so treat it as you treat `~/.claude/lore`.
+- **Sync is off until configured, and is the only thing that sends memory anywhere.** With `LORE_SYNC_URL` or `LORE_SYNC_PEER` set, curated memory (user and project scope — machine memory stays local), file maps, beliefs, staged proposals, skill bodies and scrubbed session text leave this machine. Scrubbing removes credential *shapes*, not substance — a hub's disk says what you work on and what you concluded, so treat it as you treat `~/.claude/lore`.
 - **`/lore:setup` edits `~/.claude/settings.json`**, each change behind its own confirmation. `lore teardown` reverses it.
 - **Cost:** one haiku call per qualifying session end, plus one sonnet call when beliefs need reconciling.
 
