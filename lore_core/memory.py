@@ -18,6 +18,7 @@ from .config import (
     project_slug,
     resolve_machine_key,
     resolve_subject_slug,
+    valid_slug,
 )
 from .gate import (
     entry_key,
@@ -51,9 +52,23 @@ __all__ = [
 
 def memory_path(scope: str, slug: str) -> Path:
     """`slug` is the scope's KEY: a project slug for "project", a host key for
-    "machine" (ISSUE #41), and ignored for "user", which is global."""
+    "machine" (ISSUE #41), and ignored for "user", which is global.
+
+    THE KEY IS CHECKED HERE, not only where it came from. A `pending/*.json`
+    carries `project`/`host` a model wrote and a peer may have relayed, and
+    `apply_item` handed it straight to this function: `"project":
+    "../../escaped"` wrote a MEMORY.md outside ROOT. `valid_slug` is applied
+    at the path functions themselves so a future caller inherits the refusal
+    instead of having to remember it. Callers on a hook path must treat
+    ValueError the way they already treat OSError: no pointer line, never a
+    failed hook.
+    """
     if scope == "user":
         return ROOT / "USER.md"
+    if not valid_slug(slug):
+        raise ValueError(
+            f"{slug!r} is not a usable {scope} key -- it must be one path"
+            " component with no separator and no '..'")
     if scope == "machine":
         return ROOT / "machines" / f"{slug}.md"
     return ROOT / "projects" / slug / "MEMORY.md"

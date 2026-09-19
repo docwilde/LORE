@@ -14,8 +14,8 @@ decisions were made, see [`user-model-channel-separation.md`](user-model-channel
 | `/lore:remember <fact>` | Stores a fact now — picks the scope, condenses to one line, writes through the cap. |
 | `/lore:context` | The exact entries in context right now, verbatim, as one table per scope. |
 | `/lore:filemap [path "purpose"]` | No args prints the file map; args add or update a row. |
-| `/lore:pending` | Lists staged proposals grouped by kind, each with its origin session and a keep/reject/merge judgment. Decides nothing. Clusters piles over ~50. |
-| `/lore:approve <id\|all>` | Applies proposals: memory writes cap-enforced, skill updates diffed before overwriting, retires moved to `skills-retired/`. |
+| `/lore:pending` | Lists staged proposals grouped by kind, each with its origin session and a keep/reject/merge judgment — a staged skill shows its body, truncated, not only its description. Decides nothing. Clusters piles over ~50. |
+| `/lore:approve <id\|all>` | Applies proposals: memory writes cap-enforced, every skill install diffed first (a first install against nothing), retires moved to `skills-retired/`. A proposal whose file changed since it was listed is refused and re-shown — approval is consent to a text, not to an id. |
 | `/lore:reject <id\|all>` | Archives proposals unapplied, verdict recorded in `pending/archive/`. |
 | `/lore:review` | Reviews the current session now instead of waiting for session end. Runs as a TUI-visible background task. `--dry-run` prints the prompt and spends nothing. |
 | `/lore:backfill [full\|project\|<path>]` | Pages a *whole* transcript through the deriver window by window, not just the newest window. Empty or `full` takes the current session, `project` every transcript of this project, or name a path. Reports the window count before spending. |
@@ -100,7 +100,7 @@ Four rules keep the loop honest:
 - **Silence is not an outcome.** A run counts as success or failure only when the digest shows the result — the user confirmed it, tests passed, an error traced. Abandonment records nothing, so the track record never fills with noise.
 - **Drift ≠ rot.** Every outcome carries the repo HEAD it happened at. When a skill starts failing, a HEAD that moved between the successes and the failures says *the codebase changed*, not *the recipe is wrong* — and the gate reads that trail before it proposes anything.
 
-`/lore:status` prints each learned skill with its record. Approve an `update` and the new body is diffed before overwriting; approve a `retire` and it moves to `skills-retired/` rather than vanishing.
+`/lore:status` prints each learned skill with its record. Every install is diffed before it is written — an `update` against the installed file, a first install against nothing, because that is the case where the whole file is about to become instructions a future session runs. Approve a `retire` and it moves to `skills-retired/` rather than vanishing.
 
 ## The belief gate sits on read, not on write
 

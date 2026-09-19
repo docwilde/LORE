@@ -39,6 +39,7 @@ __all__ = [
     'SKILLS_DIR',
     'SKILL_NAME_RE',
     'valid_skill_name',
+    'valid_slug',
     'PROJECTS_DIR',
     'MSG_TRUNC',
     'DIGEST_MSG_TRUNC',
@@ -152,6 +153,30 @@ def valid_skill_name(name: object) -> bool:
     planted inside SKILLS_DIR itself.
     """
     return isinstance(name, str) and bool(SKILL_NAME_RE.fullmatch(name))
+
+
+def valid_slug(slug: object) -> bool:
+    """True iff `slug` is safe to interpolate as ONE path component under
+    ROOT -- a project slug, a machine key, a file-map name.
+
+    Every producer in the tree already flattens to `[A-Za-z0-9-]`
+    (project_slug, machine_slug, store.resolve_or_create_synthetic_slug), so
+    this refuses nothing a caller of this package legitimately builds. What it
+    refuses is the OTHER source of a slug: `item["project"]` out of a
+    `pending/*.json`, which is written by a model, may have crossed a machine,
+    and reached `memory_path` and `filemap_path` unchecked -- `../../escaped`
+    there wrote a MEMORY.md and a file map outside ROOT entirely.
+
+    Checked rather than sanitised, and checked at the path functions
+    themselves rather than only at the caller: a silent flattening would file
+    a fact under a slug nobody can find again, and a check only at the caller
+    is one the next caller does not have.
+    """
+    if not isinstance(slug, str) or not slug or len(slug) > 255:
+        return False
+    if slug in (".", ".."):
+        return False
+    return not any(c in slug for c in ("/", "\\", "\0")) and ".." not in slug
 
 
 MSG_TRUNC = 4000          # chars kept per indexed message
