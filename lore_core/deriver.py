@@ -1768,7 +1768,17 @@ def stage_proposals(data: dict, slug: str, session_id: str,
     _live: dict[tuple[str, str], list[str]] = {}
 
     def live_entries(scope: str, target: str) -> list[str]:
-        key = (scope, target if scope == "project" else "")
+        # MACHINE SCOPE HAS A KEY TOO (ISSUE #41), and this collapsed it to
+        # "" with the user scope -- so `ROOT/machines/.md` was read, which is
+        # a file that never exists, and every machine-scope proposal was
+        # measured for coverage against an empty pool. `memory_path` refuses
+        # an empty key outright now, which is what surfaced it.
+        if scope == "project":
+            key = (scope, target)
+        elif scope == "machine":
+            key = (scope, this_machine())
+        else:
+            key = (scope, "")
         if key not in _live:
             _live[key] = read_entries(memory_path(scope, key[1]))
         return _live[key]
