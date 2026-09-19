@@ -36,7 +36,12 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("openrouter", re.compile(r"sk-or-v1-[a-f0-9]+")),
     # stripe/openai-style live/test secret + restricted keys (underscore form)
     ("provider-secret", re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}")),
-    ("api-key", re.compile(r"sk-[A-Za-z0-9-]{16,}")),
+    # `_` as well as `-`: OpenAI's project keys spell themselves `sk-proj_...`,
+    # and a class that stopped at the underscore matched only `sk-proj`, which
+    # is too short to trip the {16,} floor. The key then fell through to the
+    # base64 rule, which redacted the body and left `sk-proj_` standing --
+    # and, under 40 characters of body, left the whole key standing.
+    ("api-key", re.compile(r"sk-[A-Za-z0-9_-]{16,}")),
     ("aws", re.compile(r"AKIA[A-Z0-9]{16}")),
     ("github", re.compile(r"gh[posru]_[A-Za-z0-9]{36,}")),
     ("gcp", re.compile(r"AIza[A-Za-z0-9_-]{35}")),
@@ -50,10 +55,34 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
 ]
 
 
+# `<key-ish name> = <value>` in any of the spellings a transcript actually
+# carries. Three things this has to get right, each of which it used to get
+# wrong and each of which left a real credential standing:
+#
+#   * THE NAME MAY CONTINUE PAST THE KEYWORD. `\w*` on the LEFT only meant the
+#     keyword had to be the last thing before the separator, so `AWS_SECRET_
+#     ACCESS_KEY=`, `secret_key:` and `api_key_prod=` all missed. `\w*` on both
+#     sides fixes every one of them.
+#   * `_key` IS ITS OWN KEYWORD, so `AWS_KEY=` and `LORE_SYNC_HMAC_KEY=` match.
+#     Deliberately `_key` and not `key`: the underscore is what makes it a
+#     config variable rather than `monkey`, `hotkey` or `keyboard`.
+#   * THE PAIR MAY BE QUOTED. `{"password": "hunter2hunter2hunter2"}` is the
+#     shape a pasted JSON body has, and a separator group that allowed no
+#     quotes could not reach the value at all. The quotes are captured into
+#     the separator and the value's own trailing punctuation is handed back by
+#     `_kv_sub`, so the surrounding JSON still parses after redaction.
 KV_SECRET = re.compile(
-    r"\b(\w*(?:password|passwd|secret|token|api_key|apikey))(\s*[=:]\s*)(\S{8,})",
+    r"\b(\w*(?:password|passwd|secret|token|credential|api_key|apikey|_key)\w*)"
+    r"([\"']?\s*[=:]\s*[\"']?)"
+    r"(\S{8,})",
     re.IGNORECASE,
 )
+
+# Trailing characters a value picked up from the text around it rather than
+# from the secret: the closing quote of a JSON string, a comma, a closing
+# brace. Stripped before the reference-shape test and handed back after the
+# redaction, so `{"password": "..."}` stays a JSON object.
+_VALUE_TRAILERS = "\"'`,;)]}>"
 
 # Value shapes that are a POINTER to a secret, not the secret material —
 # resolving one back into material needs the vault/keyring/shell it names,
@@ -82,24 +111,60 @@ REFERENCE_SHAPES: list[re.Pattern] = [
     re.compile(r"\A<[^<>\s]+>\Z"),                          # <placeholder> in example commands
 ]
 
+# The longest a `/`-delimited part of a run may be for the whole run to still
+# read as a path rather than as material. Measured against what each side
+# actually looks like: the parts of a path or a URL are words a human typed
+# (`storage`, `contents`, `documentstore`), while base64 material has no word
+# boundaries in it at all.
+_PATH_SEGMENT_MAX = 16
+
 HEX_RUN = re.compile(r"\b[a-fA-F0-9]{40,}\b")
-BASE64_RUN = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])")
+# The lookbehind no longer excludes `=`. It did, and so `AWS_KEY=<40 chars of
+# base64>` -- the single most ordinary way a key appears in a shell line --
+# was skipped for being preceded by the very character that introduced it.
+# Padding of a preceding run is not a reason to skip: that run consumed its
+# own `={0,2}` already.
+BASE64_RUN = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])")
 
 
 def _kv_sub(m: re.Match) -> str:
     key, sep, value = m.group(1), m.group(2), m.group(3)
+    # The WHOLE value first: `${MY_TOKEN}` and `<your-key-here>` end in a
+    # character `_VALUE_TRAILERS` would otherwise eat, and a pointer with its
+    # closing brace removed is no longer a recognisable pointer.
     if any(pat.match(value) for pat in REFERENCE_SHAPES):
         return m.group(0)
-    return f"{key}{sep}[REDACTED:value]"
+    trail = ""
+    while value and value[-1] in _VALUE_TRAILERS:
+        trail, value = value[-1] + trail, value[:-1]
+    if not value or any(pat.match(value) for pat in REFERENCE_SHAPES):
+        return m.group(0)
+    return f"{key}{sep}[REDACTED:value]{trail}"
 
 
 def _base64_sub(m: re.Match) -> str:
     run = m.group(0)
     # A long absolute path is a 40+ run over the same alphabet ("/" is base64).
-    # Digests are full of them via Bash/Read tool lines; redacting paths would
-    # gut the index's main value. Slashes with neither "+" nor "=" anywhere in
-    # the run is path shape, not credential shape — keep it.
-    if "/" in run and "+" not in run and "=" not in run:
+    # Digests are full of them via Bash/Read tool lines and via URLs, and
+    # redacting paths would gut the index's main value — so a run that STARTS
+    # with "/" and carries neither "+" nor "=" is kept.
+    #
+    # "Contains a slash" alone was not path shape. It let
+    # `abcdefghij/klmnopqrstuvwxyz0123456789ABCDEFGHIJ` through untouched, and
+    # it let an AWS secret access key through too -- a base64 body whose
+    # alphabet happens to include the separator is not a path, and nothing
+    # about it said it was. Two things say it: a path begins at a slash, and
+    # the parts of a path and of a URL are WORDS. A secret is one long
+    # unbroken stretch, so a run whose longest run between slashes is 16
+    # characters or more is treated as material even when it has slashes in
+    # it. A directory with a very long name is redacted by that; the costs are
+    # not symmetric (see scrub_secrets' own docstring) and this is the cheap
+    # side.
+    if "+" in run or "=" in run:
+        return "[REDACTED:base64]"
+    if run.startswith("/"):
+        return run
+    if "/" in run and max(len(part) for part in run.split("/")) < _PATH_SEGMENT_MAX:
         return run
     return "[REDACTED:base64]"
 

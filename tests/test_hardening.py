@@ -160,6 +160,96 @@ class TestScrubSecrets(unittest.TestCase):
                 "and check state.db counts.")
         self.assertEqual(lore.scrub_secrets(text), text)
 
+
+class TestScrubCredentialsThatUsedToSurvive(unittest.TestCase):
+    """One test per credential shape that reached the FTS index and a model
+    prompt intact. Each string is the literal one that was observed passing
+    through unchanged, not a paraphrase of it."""
+
+    def assertRedacted(self, text: str, leak: str):
+        out = lore.scrub_secrets(text)
+        self.assertNotIn(leak, out, f"{leak!r} survived scrubbing in {out!r}")
+        self.assertIn("[REDACTED:", out)
+
+    def test_key_name_ending_in_key_with_a_base64_value(self):
+        """`AWS_KEY=` matched no keyword (the name had to END at one), and the
+        base64 rule skipped the value for being preceded by `=` -- the very
+        character that introduced it."""
+        self.assertRedacted(
+            "AWS_KEY=QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5QUJDREVGR0hJSg",
+            "QUJDREVGR0hJSktMTU5P")
+
+    def test_aws_secret_access_key(self):
+        """The canonical AWS example key. `secret` is in the keyword list, but
+        `_ACCESS_KEY` came after it and the separator had to follow the
+        keyword immediately."""
+        self.assertRedacted(
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "wJalrXUtnFEMI")
+
+    def test_secret_key_in_yaml(self):
+        """32 hex characters is under HEX_RUN's 40, so the key name was the
+        only thing that could catch this -- and `secret_key` did not match."""
+        self.assertRedacted("secret_key: 9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+                            "9f8e7d6c5b4a")
+
+    def test_quoted_json_password(self):
+        out = lore.scrub_secrets('{"password": "hunter2hunter2hunter2"}')
+        self.assertNotIn("hunter2hunter2hunter2", out)
+        self.assertEqual(out, '{"password": "[REDACTED:value]"}',
+                         "the surrounding JSON must still parse")
+
+    def test_base64_body_containing_a_slash_is_not_a_path(self):
+        """The path carve-out asked only whether a slash was present, so any
+        base64 body over an alphabet that includes `/` walked through it."""
+        self.assertRedacted(
+            "blob abcdefghij/klmnopqrstuvwxyz0123456789ABCDEFGHIJ",
+            "klmnopqrstuvwxyz0123456789")
+
+    def test_a_bare_aws_secret_with_slashes_is_not_a_path_either(self):
+        self.assertRedacted("creds wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY ok",
+                            "wJalrXUtnFEMI")
+
+    def test_openai_project_key_keeps_none_of_itself(self):
+        """`sk-proj_...` lost only its body to the base64 rule, leaving
+        `sk-proj_` standing -- and, with a body under 40 characters, leaving
+        the whole key standing."""
+        out = lore.scrub_secrets(
+            "token sk-proj_abcdefghijklmnopqrstuvwxyz0123456789ABCD")
+        self.assertNotIn("sk-proj_", out)
+        self.assertIn("[REDACTED:api-key]", out)
+
+
+class TestScrubLeavesOrdinaryProseAlone(unittest.TestCase):
+    """The other half of the bar: a scrubber that redacts English is a
+    scrubber whose output nobody can review. Each of these is a shape that
+    appears in almost every transcript."""
+
+    def assertUntouched(self, text: str):
+        self.assertEqual(lore.scrub_secrets(text), text)
+
+    def test_a_sentence_mentioning_a_password(self):
+        self.assertUntouched(
+            "Reset your password if you forget it, then tell the team.")
+
+    def test_an_abbreviated_git_sha(self):
+        """The abbreviated form is what a transcript actually carries. A FULL
+        40-character SHA is still redacted by HEX_RUN, deliberately -- see
+        test_hex_run, which has said so since the rule was written."""
+        self.assertUntouched("see commit 6e2db5f for the diff")
+
+    def test_a_uuid(self):
+        self.assertUntouched(
+            "run id 3d0e4e9f-1111-4222-8333-444455556666 finished")
+
+    def test_a_url_path(self):
+        self.assertUntouched(
+            "see https://example.com/repos/owner/name/contents/deep/path/here/file")
+
+    def test_an_absolute_path(self):
+        self.assertUntouched(
+            "Read(/home/docwilde/repo/docwilde/LORE/lore/core/storage/documentstore)")
+
     def test_build_digest_scrubs(self):
         digest = lore.build_digest([("", "user", "my api_key=sk-" + "x1" * 12)])
         self.assertNotIn("sk-x1", digest)
