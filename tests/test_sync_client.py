@@ -933,5 +933,276 @@ class OversizedOpNeverReachesDisk(unittest.TestCase):
         self.assertEqual(staged, [], "nothing that large may reach disk")
 
 
+# ---------------------------------------------------------------------------
+# lore-hub 0.2.0: four conditions v1 did not describe
+# (lore-hub docs/protocol-deltas.md; docs/sync-protocol.md S6, S6.2, S6.6,
+# S8, S9)
+# ---------------------------------------------------------------------------
+
+class _ScriptedHub:
+    """A hub that answers a fixed script, one entry per request.
+
+    Deliberately not `_StubHub`: these tests are about what the CLIENT does
+    with an answer, and the answers are ones no correct hub produces twice in
+    a row -- a `503` that clears, a `409` that rolls back, a `413`.
+    """
+
+    def __init__(self, script: "list[tuple[int, dict]]", *, limits=None):
+        self.script = list(script)
+        self.limits = limits
+        self.seen: "list[dict]" = []
+        self.at = 0
+
+    def answer(self, body) -> "tuple[int, dict]":
+        self.seen.append(body)
+        if self.at < len(self.script):
+            status, payload = self.script[self.at]
+            self.at += 1
+            return status, payload
+        return 200, {"accepted": len(body.get("ops") or []), "duplicate": 0,
+                     "hub_seq_max": 1}
+
+
+def _scripted_handler(hub: "_ScriptedHub"):
+    class Handler(BaseHTTPRequestHandler):
+        def _reply(self, status, payload):
+            data = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if urlsplit(self.path).path.endswith("/health"):
+                body = {"ok": True, "version": "scripted"}
+                if hub.limits is not None:
+                    body["limits"] = hub.limits
+                return self._reply(200, body)
+            return self._reply(200, {"ops": [], "next": None})
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length)
+            hub.last_body_bytes = len(raw)
+            status, payload = hub.answer(json.loads(raw.decode("utf-8")))
+            self._reply(status, payload)
+
+        def log_message(self, *a):
+            pass
+
+    return Handler
+
+
+@contextlib.contextmanager
+def _scripted(hub: "_ScriptedHub"):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _scripted_handler(hub))
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _op(machine_id: str, seq: int, payload_bytes: int = 32) -> dict:
+    return {"seq": seq, "op_id": str(uuid.uuid4()), "machine_id": machine_id,
+            "machine_seq": seq, "lamport": seq, "class": "memory", "op": "add",
+            "project_key": None,
+            "payload": {"text": "x" * payload_bytes, "via": "direct",
+                        "writer": "terminal"},
+            "mac": None, "created": "2026-09-17T00:00:00Z"}
+
+
+class HubBusyIsRetried(unittest.TestCase):
+    """`503 busy` means another push holds this account's lock. It is the one
+    refusal that is neither this client's fault nor durable, and a client that
+    treated it as fatal would simply stop syncing."""
+
+    def test_two_busy_answers_then_a_200_is_a_successful_push(self):
+        import lore_core.sync_client as sc
+
+        hub = _ScriptedHub([(503, {"error": "busy", "message": "locked"}),
+                            (503, {"error": "busy", "message": "locked"})])
+        with _scripted(hub) as url:
+            client = sc.HubClient(url, token="t", auth="token", timeout=5)
+            answer = client.push(MACHINE_A, [_op(MACHINE_A, 1)])
+
+        self.assertEqual(answer["accepted"], 1)
+        self.assertEqual(len(hub.seen), 3, "the two 503s must have been retried")
+
+    def test_busy_all_the_way_through_is_a_typed_error_that_says_so(self):
+        import lore_core.sync_client as sc
+
+        busy = [(503, {"error": "busy", "message": "locked"})] * 12
+        hub = _ScriptedHub(busy)
+        with _scripted(hub) as url:
+            client = sc.HubClient(url, token="t", auth="token", timeout=5)
+            with self.assertRaises(sc.SyncBusy) as caught:
+                client.push(MACHINE_A, [_op(MACHINE_A, 1)])
+
+        self.assertIn("busy", str(caught.exception))
+        self.assertEqual(len(hub.seen), len(sc.BUSY_RETRY_DELAYS) + 1)
+
+    def test_a_busy_hub_advances_no_cursor(self):
+        # `mod.SyncBusy`, not the one in this process's `lore_core`: every
+        # machine here is its own freshly-executed instance (see `_exec_lore`),
+        # so the two class objects are different and `assertRaises` on the
+        # wrong one never matches.
+        _root, mod = _machine("busy-cursor", MACHINE_A)
+        mod.memory_add("user", "", "an op to push", via="direct")
+        hub = _ScriptedHub([(503, {"error": "busy"})] * 12)
+        with _scripted(hub) as url:
+            conn = mod.db_connect()
+            try:
+                with self.assertRaises(mod.SyncBusy):
+                    mod.push_ops(conn, mod.HubClient(url, token="t"),
+                                 machine_id=MACHINE_A)
+                pushed_seq, _cursor = mod.peer_state(conn, mod.HUB_PEER)
+            finally:
+                conn.commit()
+                conn.close()
+        self.assertEqual(pushed_seq, 0, "nothing was sent, so nothing advanced")
+
+
+class OpIdConflictRollsTheWholePushBack(unittest.TestCase):
+    """`409 op_id_conflict`: an `op_id` this account already holds, claimed by
+    a different machine or a different `machine_seq`. Unlike the machine_seq
+    409s it keeps nothing, so nothing may advance -- and an op_id is the
+    identifier every idempotence rule in the protocol rests on (S9), so it is
+    a thing to look at, never a thing to push over."""
+
+    BODY = {"error": "op_id_conflict", "message": "op_id already stored",
+            "accepted": 0, "duplicate": 0, "op_id": "the-colliding-op-id",
+            "machine_id": MACHINE_A, "machine_seq": 1,
+            "stored_machine_id": MACHINE_B, "stored_machine_seq": 7}
+
+    def test_it_is_its_own_error_type_carrying_what_the_hub_holds(self):
+        import lore_core.sync_client as sc
+
+        hub = _ScriptedHub([(409, self.BODY)])
+        with _scripted(hub) as url:
+            client = sc.HubClient(url, token="t", auth="token", timeout=5)
+            with self.assertRaises(sc.SyncOpIdConflict) as caught:
+                client.push(MACHINE_A, [_op(MACHINE_A, 1)])
+
+        exc = caught.exception
+        self.assertEqual(exc.op_id, "the-colliding-op-id")
+        self.assertEqual(exc.stored_machine_id, MACHINE_B)
+        self.assertEqual(exc.stored_machine_seq, 7)
+        self.assertIsInstance(exc, sc.SyncConflict, "it is still a 409")
+
+    def test_nothing_advances_and_the_peer_row_records_it(self):
+        _root, mod = _machine("opid-conflict", MACHINE_A)
+        mod.memory_add("user", "", "an op to push", via="direct")
+        hub = _ScriptedHub([(409, self.BODY)])
+        with _scripted(hub) as url:
+            conn = mod.db_connect()
+            try:
+                with self.assertRaises(mod.SyncOpIdConflict):
+                    mod.push_ops(conn, mod.HubClient(url, token="t"),
+                                 machine_id=MACHINE_A)
+                pushed_seq, _cursor = mod.peer_state(conn, mod.HUB_PEER)
+                error = conn.execute(
+                    "SELECT last_error FROM sync_peers WHERE peer = ?",
+                    (mod.HUB_PEER,)).fetchone()[0]
+            finally:
+                conn.commit()
+                conn.close()
+
+        self.assertEqual(pushed_seq, 0, "the whole push rolled back")
+        self.assertIn("op_id_conflict", error or "")
+
+    def test_the_report_a_human_reads_names_both_sides(self):
+        mod = _exec_lore(Path(tempfile.mkdtemp(prefix="lore-test-report-")))
+        exc = mod.SyncOpIdConflict("refused", status=409, code="op_id_conflict",
+                                   body=self.BODY)
+        text = mod.conflict_report(exc, MACHINE_A)
+        self.assertIn("op_id_conflict", text)
+        self.assertIn("the-colliding-op-id", text)
+        self.assertIn(MACHINE_B, text)
+        self.assertNotIn("bootstrap --merge", text,
+                         "that is the machine_seq_gap instruction, not this one")
+
+
+class PushesAreSizedToWhatTheHubAccepts(unittest.TestCase):
+    """`413 payload_too_large` and the new 400s exist because a hub bounds a
+    push. A client that discovers the ceiling by being refused at it makes no
+    progress; one that reads `GET /health`'s `limits` never reaches it."""
+
+    def test_limits_from_health_size_the_batches(self):
+        import lore_core.sync_client as sc
+
+        hub = _ScriptedHub([], limits={"max_ops_per_push": 3,
+                                       "max_body_bytes": 4 * 1024 * 1024})
+        with _scripted(hub) as url:
+            client = sc.HubClient(url, token="t", auth="token", timeout=5)
+            client.read_limits()
+            batches = client.split_batch(
+                MACHINE_A, [_op(MACHINE_A, i) for i in range(1, 8)])
+
+        self.assertEqual(client.max_ops_per_push, 3)
+        self.assertEqual([len(b) for b in batches], [3, 3, 1])
+
+    def test_a_hub_that_publishes_nothing_keeps_the_conservative_defaults(self):
+        import lore_core.sync_client as sc
+
+        hub = _ScriptedHub([])
+        with _scripted(hub) as url:
+            client = sc.HubClient(url, token="t", auth="token", timeout=5)
+            client.read_limits()
+        self.assertEqual(client.max_ops_per_push, sc.MAX_OPS_PER_PUSH)
+        self.assertEqual(client.max_body_bytes, sc.MAX_PUSH_BYTES)
+
+    def test_a_batch_is_split_by_bytes_as_well_as_by_count(self):
+        """The two ceilings are independent: 1000 memory ops are kilobytes,
+        one skill op carrying a whole SKILL.md is not."""
+        import lore_core.sync_client as sc
+
+        client = sc.HubClient("http://127.0.0.1:1", token="t", auth="token")
+        client.max_body_bytes = 4096
+        batches = client.split_batch(
+            MACHINE_A, [_op(MACHINE_A, i, payload_bytes=1500) for i in range(1, 7)])
+        self.assertGreater(len(batches), 1)
+        for batch in batches:
+            body = json.dumps({"machine_id": MACHINE_A,
+                               "ops": [client._wire_op(o, MACHINE_A) for o in batch]})
+            self.assertLessEqual(len(body.encode("utf-8")), client.max_body_bytes)
+
+    def test_a_413_is_its_own_typed_error(self):
+        import lore_core.sync_client as sc
+
+        hub = _ScriptedHub([(413, {"error": "payload_too_large",
+                                   "message": "over 4 MiB"})])
+        with _scripted(hub) as url:
+            client = sc.HubClient(url, token="t", auth="token", timeout=5)
+            with self.assertRaises(sc.SyncPayloadTooLarge) as caught:
+                client.push(MACHINE_A, [_op(MACHINE_A, 1)])
+        self.assertIn("split the batch", str(caught.exception))
+
+    def test_created_always_leaves_with_a_trailing_z(self):
+        """S3 has always fixed `created` as UTC with a trailing `Z`, but the
+        log holds rows written by older builds and rows that came off a wire,
+        and lore-hub 0.2.0 refuses a naive one with a 400 -- which would
+        strand them unpushable. `created` is outside the signed tuple (S4), so
+        normalising it on the way out cannot invalidate a mac."""
+        import lore_core.sync_client as sc
+
+        hub = _ScriptedHub([])
+        naive = _op(MACHINE_A, 1) | {"created": "2026-09-17 00:00:00"}
+        dateonly = _op(MACHINE_A, 2) | {"created": "2026-09-17"}
+        offset = _op(MACHINE_A, 3) | {"created": "2026-09-17T02:00:00+02:00"}
+        with _scripted(hub) as url:
+            client = sc.HubClient(url, token="t", auth="token", timeout=5)
+            client.push(MACHINE_A, [naive, dateonly, offset])
+
+        sent = hub.seen[0]["ops"]
+        self.assertEqual([o["created"] for o in sent],
+                         ["2026-09-17T00:00:00Z", "2026-09-17T00:00:00Z",
+                          "2026-09-17T00:00:00Z"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

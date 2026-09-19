@@ -46,6 +46,7 @@ from .sync_client import (
     SyncConflict,
     SyncError,
     SyncNotConfigured,
+    SyncOpIdConflict,
     hub_client,
 )
 from .sync_peer import peer_clients, peer_label, peer_specs
@@ -187,52 +188,92 @@ def push_ops(conn: sqlite3.Connection, client, *, machine_id: "str | None" = Non
         pushed_seq = max(0, int(since))
     report = {"sent": 0, "accepted": 0, "duplicate": 0, "pages": 0,
               "hub_seq_max": None, "pushed_seq": pushed_seq}
+    # Ask the hub what it will accept before offering it anything (lore-hub
+    # 0.2.0 publishes `max_ops_per_push` and `max_body_bytes` under
+    # `GET /health`). Best effort: a hub that does not answer leaves the
+    # client's own conservative fallbacks standing, and the push proceeds.
+    read_limits = getattr(client, "read_limits", None)
+    if callable(read_limits):
+        read_limits()
+    page = min(page, getattr(client, "max_ops_per_push", page))
 
     while True:
-        batch = own_ops_after(conn, machine_id, report["pushed_seq"], page)
-        if not batch:
+        window = own_ops_after(conn, machine_id, report["pushed_seq"], page)
+        if not window:
             break
-        try:
-            answer = client.push(machine_id, batch)
-        except SyncConflict as exc:
-            # S6.2: `accepted`/`duplicate` in a 409 body count only what was
-            # processed before the gap was hit. Banking them means the
-            # re-send after a human has fixed the cause starts where the hub
-            # stopped, not at the beginning of history.
-            settled = min(exc.accepted + exc.duplicate, len(batch))
-            if settled:
-                report["accepted"] += exc.accepted
-                report["duplicate"] += exc.duplicate
-                report["sent"] += settled
-                report["pushed_seq"] = batch[settled - 1]["seq"]
-            _note(conn, peer, pushed_seq=report["pushed_seq"], when_push=True,
-                  error=str(exc))
-            raise
-        except SyncError as exc:
-            _note(conn, peer, error=str(exc))
-            raise
-
-        accepted = answer.get("accepted") or 0
-        duplicate = answer.get("duplicate") or 0
-        settled = min(accepted + duplicate, len(batch))
-        report["pages"] += 1
-        report["accepted"] += accepted
-        report["duplicate"] += duplicate
-        report["hub_seq_max"] = answer.get("hub_seq_max", report["hub_seq_max"])
-        if settled <= 0:
-            # A 200 that settled nothing (S6.2 says this cannot happen for a
-            # non-empty batch). Advancing would lose ops and retrying would
-            # spin, so stop and say so.
-            _note(conn, peer, when_push=True,
-                  error=f"hub answered 200 but settled 0 of {len(batch)} op(s)")
-            break
-        report["sent"] += settled
-        report["pushed_seq"] = batch[settled - 1]["seq"]
-        _note(conn, peer, pushed_seq=report["pushed_seq"], when_push=True,
-              error=None)
-        if settled < len(batch) or len(batch) < page:
+        # ONE PAGE MAY BE SEVERAL BATCHES. The two ceilings are independent:
+        # 1000 memory ops are kilobytes and one skill op carrying a whole
+        # SKILL.md is not, so a page inside the op-count limit can still be
+        # over the body limit. Splitting here rather than reacting to a 413
+        # keeps the cursor arithmetic below unchanged -- each batch is settled
+        # and banked in turn, exactly as a page used to be.
+        split = getattr(client, "split_batch", None)
+        batches = split(machine_id, window) if callable(split) else [window]
+        stop = False
+        for batch in batches:
+            stop = _push_one(conn, client, machine_id, peer, batch, report)
+            if stop:
+                break
+        if stop or len(window) < page:
             break
     return report
+
+
+def _push_one(conn: sqlite3.Connection, client, machine_id: str, peer: str,
+              batch: "list[dict]", report: dict) -> bool:
+    """Send ONE batch and bank what it settled; True when the drain must stop.
+
+    Split out of `push_ops` when a page became several batches, so the cursor
+    arithmetic -- advance to the last op the hub SETTLED, never to the last
+    one sent -- has exactly one implementation.
+    """
+    try:
+        answer = client.push(machine_id, batch)
+    except SyncOpIdConflict as exc:
+        # lore-hub 0.2.0: unlike the machine_seq 409s, this one rolls the
+        # WHOLE push back -- `accepted: 0, duplicate: 0` -- so nothing was
+        # settled and nothing may advance. One op_id naming two different
+        # ops is a bug somewhere, never normal operation, so it is recorded
+        # for `lore sync status` and raised, never retried around.
+        _note(conn, peer, when_push=True, error=str(exc))
+        raise
+    except SyncConflict as exc:
+        # S6.2: `accepted`/`duplicate` in a 409 body count only what was
+        # processed before the gap was hit. Banking them means the re-send
+        # after a human has fixed the cause starts where the hub stopped, not
+        # at the beginning of history.
+        settled = min(exc.accepted + exc.duplicate, len(batch))
+        if settled:
+            report["accepted"] += exc.accepted
+            report["duplicate"] += exc.duplicate
+            report["sent"] += settled
+            report["pushed_seq"] = batch[settled - 1]["seq"]
+        _note(conn, peer, pushed_seq=report["pushed_seq"], when_push=True,
+              error=str(exc))
+        raise
+    except SyncError as exc:
+        _note(conn, peer, error=str(exc))
+        raise
+
+    accepted = answer.get("accepted") or 0
+    duplicate = answer.get("duplicate") or 0
+    settled = min(accepted + duplicate, len(batch))
+    report["pages"] += 1
+    report["accepted"] += accepted
+    report["duplicate"] += duplicate
+    report["hub_seq_max"] = answer.get("hub_seq_max", report["hub_seq_max"])
+    if settled <= 0:
+        # A 200 that settled nothing (S6.2 says this cannot happen for a
+        # non-empty batch). Advancing would lose ops and retrying would
+        # spin, so stop and say so.
+        _note(conn, peer, when_push=True,
+              error=f"hub answered 200 but settled 0 of {len(batch)} op(s)")
+        return True
+    report["sent"] += settled
+    report["pushed_seq"] = batch[settled - 1]["seq"]
+    _note(conn, peer, pushed_seq=report["pushed_seq"], when_push=True,
+          error=None)
+    return settled < len(batch)
 
 
 def conflict_report(exc: SyncConflict, machine_id: str) -> str:
@@ -243,6 +284,26 @@ def conflict_report(exc: SyncConflict, machine_id: str) -> str:
     log whose middle is missing and call it success.
     """
     who = exc.machine_id or machine_id
+    if isinstance(exc, SyncOpIdConflict):
+        # lore-hub 0.2.0. A DIFFERENT failure from a machine_seq gap and a
+        # different instruction: the whole push rolled back, so there is no
+        # partial state to reconcile and nothing to resume from -- but an
+        # op_id naming two different ops is a collision in the one identifier
+        # every idempotence rule in the protocol rests on (S9), so it is a
+        # thing to look at, never a thing to re-push over.
+        stored_seq = exc.stored_machine_seq
+        return "\n".join([
+            f"sync push refused by the hub — op_id_conflict on {who}",
+            f"  op_id {exc.op_id or '?'} is already stored for this account",
+            f"  here: machine {who} seq {exc.got if exc.got is not None else '?'}"
+            f"  |  hub: machine {exc.stored_machine_id or '?'} seq"
+            f" {stored_seq if stored_seq is not None else '?'}",
+            "The WHOLE push was rolled back — nothing was accepted, and the",
+            "push cursor did not move, so no op has been lost.",
+            "  next: `lore sync status`, and report it. An op_id is a uuid4 and",
+            "  the idempotence of every transport rests on it being unique; two",
+            "  ops sharing one is a bug, not something to push over.",
+        ])
     expected, got = exc.expected, exc.got
     lines = [f"sync push refused by the hub — {exc.code or 'machine_seq'} on {who}"]
     if expected is not None and got is not None:

@@ -49,9 +49,11 @@ import it without a cycle, and a test can drive it against a stub HTTP server
 with no LORE_ROOT in existence at all.
 """
 
+import datetime
 import http.client
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -61,6 +63,9 @@ __all__ = [
     'DEFAULT_TIMEOUT',
     'DEFAULT_PAGE',
     'MAX_RESPONSE_BYTES',
+    'MAX_OPS_PER_PUSH',
+    'MAX_PUSH_BYTES',
+    'BUSY_RETRY_DELAYS',
     'SyncError',
     'SyncNotConfigured',
     'SyncUnreachable',
@@ -68,8 +73,12 @@ __all__ = [
     'SyncAuthError',
     'SyncForbidden',
     'SyncConflict',
+    'SyncOpIdConflict',
+    'SyncPayloadTooLarge',
+    'SyncBusy',
     'SyncProtocolError',
     'HubClient',
+    'normalise_created',
     'hub_url',
     'hub_client',
     'sync_timeout',
@@ -94,6 +103,23 @@ DEFAULT_PAGE = 500
 # filemap and belief ops is tens of kilobytes -- and far below the size at
 # which "the machine stopped" is the symptom.
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
+# What a push may weigh, until a hub says otherwise. lore-hub 0.2.0 refuses a
+# body over 4 MiB with `413 payload_too_large` and a batch of more than 1000
+# ops with a `400 bad_request`, and publishes both under `limits` in
+# `GET /health` -- so a client can size its batches from what the server says
+# instead of discovering the ceiling by being refused at it. These are the
+# fallbacks for a hub that does not publish them.
+MAX_OPS_PER_PUSH = 1000
+MAX_PUSH_BYTES = 4 * 1024 * 1024
+
+# `503 busy` means another push holds this account's lock, or the pool is
+# saturated. It is the one refusal that is neither the client's fault nor
+# durable, and a client that treats it as fatal stops syncing -- so it is the
+# one refusal that is retried, three times, with the delays below between
+# attempts. Short, because an interactive push waits on this and the lock it
+# is waiting for is held by another push of the same account, not by a human.
+BUSY_RETRY_DELAYS = (0.2, 0.5, 1.0)
 
 
 class SyncError(Exception):
@@ -167,6 +193,49 @@ class SyncConflict(SyncHTTPError):
         return value if isinstance(value, str) else ""
 
 
+class SyncOpIdConflict(SyncConflict):
+    """409 `op_id_conflict` (lore-hub 0.2.0): an `op_id` this account already
+    holds, claimed by a different `machine_id` or a different `machine_seq`.
+
+    A DIFFERENT 409 FROM THE machine_seq PAIR, and the difference is what a
+    caller must do about it. `machine_seq_gap`/`machine_seq_conflict` keep
+    what landed before them, so a re-send resumes from there; this one rolls
+    the WHOLE push back (`accepted: 0, duplicate: 0`), so nothing advanced and
+    the corrected batch is re-sent whole. Neither is retried automatically:
+    one op_id naming two different ops is a bug somewhere, and re-pushing over
+    it would pick a winner nobody chose.
+    """
+
+    @property
+    def op_id(self) -> str:
+        value = self.body.get("op_id")
+        return value if isinstance(value, str) else ""
+
+    @property
+    def stored_machine_id(self) -> str:
+        value = self.body.get("stored_machine_id")
+        return value if isinstance(value, str) else ""
+
+    @property
+    def stored_machine_seq(self) -> "int | None":
+        value = self.body.get("stored_machine_seq")
+        return value if isinstance(value, int) else None
+
+
+class SyncPayloadTooLarge(SyncHTTPError):
+    """413 `payload_too_large`: the request body is over the hub's cap. A
+    client that sized its batches from `GET /health`'s `limits` should never
+    see this; one that does splits the batch and re-sends."""
+
+
+class SyncBusy(SyncHTTPError):
+    """503 `busy`: another push holds this account's lock, or the pool is
+    saturated. Transient by construction, and RETRIED by `_request` before it
+    is ever raised -- what reaches a caller is "still busy after every
+    retry", which is a reason to push again later, never a failed push and
+    never a cursor that may advance."""
+
+
 class SyncProtocolError(SyncHTTPError):
     """The answer was not what S6 says it is: an unexpected status, a body
     that is not JSON, JSON that is not an object, a body past
@@ -209,6 +278,35 @@ class _NoCrossHostRedirect(urllib.request.HTTPRedirectHandler):
         if new is not None:
             new.remove_header("Authorization")
         return new
+
+
+def normalise_created(value: object) -> str:
+    """`created` as S3 fixes it: RFC 3339, UTC, trailing `Z`.
+
+    ON THE WAY OUT, not at the point it was minted, and that is the whole
+    reason this exists. `config.utcnow` has always produced the right shape,
+    but `sync_ops` also holds rows written by older builds and rows whose
+    `created` came off a wire, and lore-hub 0.2.0 refuses a naive or
+    date-only `created` with a `400` -- which would strand those rows in the
+    log forever, unpushable, with no way to fix them but a hand-edit of the
+    store. Normalising here fixes them at the moment they are sent and
+    changes nothing else, because `created` is display-only and explicitly
+    OUTSIDE the signed tuple (S3/S4): rewriting it cannot invalidate a `mac`.
+
+    An unparseable value becomes this moment. It is display-only, the row
+    still has to travel, and a wrong-but-well-formed timestamp orders nothing.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if isinstance(value, str) and value.strip():
+        text = value.strip()
+        try:
+            parsed = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = now
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        now = parsed.astimezone(datetime.timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def sync_timeout() -> float:
@@ -286,6 +384,12 @@ class HubClient:
         self.token = token
         self.auth = auth
         self.timeout = timeout
+        # What a push may weigh. The fallbacks until `read_limits` has asked
+        # the hub (lore-hub 0.2.0 publishes both under `GET /health`'s
+        # `limits`); a hub that publishes neither leaves these standing.
+        self.max_ops_per_push = MAX_OPS_PER_PUSH
+        self.max_body_bytes = MAX_PUSH_BYTES
+        self._limits_read = False
 
     def __repr__(self) -> str:
         # No token, ever: this repr lands in `lore doctor` output and in a
@@ -297,6 +401,64 @@ class HubClient:
         call that answers for a machine with no credential at all, which is
         what makes it usable as a reachability probe."""
         return self._request("GET", "/health", auth=False)
+
+    def read_limits(self) -> None:
+        """Take this hub's own `limits` from `GET /health`, once per client.
+
+        BEST EFFORT, AND SILENT. A hub that does not publish them, or is not
+        reachable this second, must not turn a push into a failure before the
+        push has been tried -- the fallbacks are the conservative side of
+        every limit lore-hub 0.2.0 actually enforces, so the worst case of
+        not reading them is a batch smaller than it had to be.
+        """
+        if self._limits_read:
+            return
+        self._limits_read = True
+        try:
+            limits = self.health().get("limits")
+        except SyncError:
+            return
+        if not isinstance(limits, dict):
+            return
+        for field, attr in (("max_ops_per_push", "max_ops_per_push"),
+                            ("max_body_bytes", "max_body_bytes")):
+            value = limits.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                setattr(self, attr, value)
+
+    def split_batch(self, machine_id: str, ops: "list[dict]") -> "list[list[dict]]":
+        """`ops` cut into batches that fit this hub's limits, in order.
+
+        BY BYTES AS WELL AS BY COUNT, because the two ceilings are
+        independent: 1000 memory ops are kilobytes, and a single skill op
+        carrying a whole SKILL.md is not. Measured on the encoded request body
+        this client would actually send, not on a guess about it -- the
+        envelope, the stripped `machine_id` and the JSON separators are the
+        difference between "just under 4 MiB" and a `413`.
+
+        An op that cannot fit alone is still returned alone: refusing it here
+        would strand it forever with no diagnosis, and the hub's own 413 says
+        exactly what is wrong.
+        """
+        batches, current, size = [], [], 0
+        for op in ops:
+            weight = len(json.dumps(self._wire_op(op, machine_id),
+                                    ensure_ascii=False).encode("utf-8")) + 1
+            too_many = len(current) >= self.max_ops_per_push
+            too_big = current and size + weight > self._body_budget()
+            if too_many or too_big:
+                batches.append(current)
+                current, size = [], 0
+            current.append(op)
+            size += weight
+        if current:
+            batches.append(current)
+        return batches
+
+    def _body_budget(self) -> int:
+        """The op-array budget: the cap less what the envelope around it
+        costs (`{"machine_id": "<uuid>", "ops": []}` plus room to spare)."""
+        return max(1, self.max_body_bytes - 256)
 
     def whoami(self) -> dict:
         """GET /whoami (S6.7): {"account", "machine_id", "auth"}. `machine_id`
@@ -318,18 +480,21 @@ class HubClient:
         bug, not something to quietly send: it would be stored under the
         wrong author.
         """
-        wire = []
-        for op in ops:
-            own = op.get("machine_id")
-            if own is not None and own != machine_id:
-                raise SyncError(
-                    f"refusing to push op {op.get('op_id')} authored by"
-                    f" {own!r} in a batch declared as {machine_id!r} —"
-                    " one machine per batch (docs/sync-protocol.md S6.2)")
-            wire.append({k: v for k, v in op.items()
-                         if k not in ("machine_id", "hub_seq", "seq", "applied")})
+        wire = [self._wire_op(op, machine_id) for op in ops]
         return self._request("POST", "/ops",
                              body={"machine_id": machine_id, "ops": wire})
+
+    def _wire_op(self, op: dict, machine_id: str) -> dict:
+        own = op.get("machine_id")
+        if own is not None and own != machine_id:
+            raise SyncError(
+                f"refusing to push op {op.get('op_id')} authored by"
+                f" {own!r} in a batch declared as {machine_id!r} —"
+                " one machine per batch (docs/sync-protocol.md S6.2)")
+        wire = {k: v for k, v in op.items()
+                if k not in ("machine_id", "hub_seq", "seq", "applied")}
+        wire["created"] = normalise_created(wire.get("created"))
+        return wire
 
     def pull(self, since: int = 0, *, limit: int = DEFAULT_PAGE,
              exclude: "str | None" = None) -> dict:
@@ -378,6 +543,22 @@ class HubClient:
         # forgery the hub refuses on its public listener.
         request = urllib.request.Request(url, data=data, headers=headers,
                                          method=method)
+        # `503 busy` is the one refusal that is neither this client's fault
+        # nor durable, and treating it as fatal stops a machine syncing
+        # altogether. Retried here rather than by every caller, so a busy hub
+        # is invisible to `push_ops`' cursor arithmetic: either a later
+        # attempt answers, or `SyncBusy` reaches the caller having sent
+        # nothing and settled nothing.
+        for delay in (*BUSY_RETRY_DELAYS, None):
+            try:
+                return self._attempt(request, url)
+            except SyncBusy:
+                if delay is None:
+                    raise
+                time.sleep(delay)
+        raise SyncBusy(f"{self.WHO} is busy", status=503, code="busy")
+
+    def _attempt(self, request: urllib.request.Request, url: str) -> dict:
         try:
             with self._opener().open(request, timeout=self.timeout) as response:
                 raw = self._read_capped(response, url)
@@ -484,9 +665,26 @@ class HubClient:
                 f"{self.WHO} refused this request ({said}) — {self.FORBIDDEN_ADVICE}",
                 status=403, code=code, body=body)
         if exc.code == 409:
+            # Two different 409s, and the difference is what the caller must
+            # do: a machine_seq gap/conflict keeps what landed before it, an
+            # op_id_conflict rolls the whole push back (lore-hub 0.2.0).
+            if code == "op_id_conflict":
+                return SyncOpIdConflict(
+                    f"hub refused the whole batch ({said})", status=409,
+                    code=code, body=body)
             return SyncConflict(
                 f"hub refused the batch ({said})", status=409, code=code,
                 body=body)
+        if exc.code == 413:
+            return SyncPayloadTooLarge(
+                f"{self.WHO} refused the request as too large ({said}) — split"
+                " the batch; `GET /health` publishes the caps under `limits`",
+                status=413, code=code, body=body)
+        if exc.code == 503:
+            return SyncBusy(
+                f"{self.WHO} is busy ({said}) — another push holds this"
+                " account's lock; nothing was sent and nothing advanced",
+                status=503, code=code, body=body)
         return SyncProtocolError(
             f"{url} answered {exc.code} ({said})", status=exc.code, code=code,
             body=body)
