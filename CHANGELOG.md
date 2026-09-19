@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.57.0 — 2026-09-20
+
+**The sync receiver verifies before it records, and nothing outside LORE_ROOT is ever written.**
+
+- **`sync_apply.apply_ops`** verifies the MAC before an op takes a `(machine_id, machine_seq)` slot or bumps the clock; an unverified op sits under a partial index so the genuine op still lands. A keyless peer could shadow any machine.
+- The page is validated before it is sorted, `lamport`/`machine_seq` are bounded to int64, and one op's exception lands as `applied = 4` (`failed`) instead of aborting every later pull. `unknown = 3` marks a class with no handler.
+- A transcript op's `session_id` and project key are allow-listed and resolved under `ROOT/transcripts`; `LORE_SYNC_CLASSES` now gates receive as well as send (`skipped` in the report).
+
+**Secrets stop at the scrubber, credentials stop at the hub's door.**
+
+- **`scrub.py`** now redacts `KEY=<base64>`, `AWS_SECRET_ACCESS_KEY=…`, `secret_key:`, quoted `"password"`, base64 runs with `/` only and `sk-…` with underscores; prose, a short sha, a UUID and a URL path survive. Each string is a test.
+- **`sync_client.py`** refuses cross-host redirects and strips `Authorization` otherwise, caps a response at 32 MiB and an op at 1 MiB, retries the hub's `503 busy`, stops on `409 op_id_conflict`, sizes batches from `/health`.
+- `lore sync serve` says in its banner and `/v1/whoami` that loopback trust is same-user trust; optional **`LORE_SYNC_PEER_SECRET`** is a shared bearer required beside the identity header. A bad `Content-Length` is a 400.
+
+**Approval means the text the human saw.**
+
+- **`pending.apply_item`** validates the slug before any path (`memory_path`/`filemap_path` refuse `/`, `..`), lists a staged skill's body and diffs every install, and refuses an item whose bytes changed since `lore pending` listed it.
+- Files are private: `umask 077` at every entry point, `ROOT`, `pending/`, `state.db` and `settings.json` at 0700/0600. The graph export escapes claim text; the dream and derive prompts carry the untrusted-data note the deriver had.
+- Fix: `deriver.live_entries` keyed machine scope as `""`, so coverage was measured against a file that never exists.
+
+**Docs and tests.** `docs/sync-protocol.md` §5.2, §5.5 (new), §6, §6.2, §6.6, §7, §8, §9; `docs/manual.md` for `LORE_SYNC_CLASSES`, `LORE_SYNC_PEER_SECRET` and the pending rows. 67 new tests, each failing on 0.56.0; 752 green, 14 pre-existing environmental failures on the author's box that CI does not see.
+
 ## 0.56.0 — 2026-09-18
 
 - New **`lore_core/sync_peer.py`**: `lore sync serve` and the peer client, so two machines converge with **no hub**. `pull_targets` hands hub and peers to the same `pull_ops`: one drain, one canonical order, one MAC check, one apply engine.

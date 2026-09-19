@@ -6,6 +6,7 @@ them.
 """
 
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -13,8 +14,9 @@ import sys
 from pathlib import Path
 
 from .beliefs import belief_insert, belief_retract, belief_subject
-from .config import (ROOT, SKILLS_DIR, SKILL_NAME_RE, project_slug,
-                     resolve_machine_key, utcnow, valid_skill_name)
+from .config import (ROOT, SKILLS_DIR, SKILL_NAME_RE, private_dir,
+                     project_slug, resolve_machine_key, utcnow,
+                     valid_skill_name, valid_slug)
 from .filemap import filemap_add, filemap_remove, filemap_replace
 from .gate import pending_op_project_key
 from .memory import memory_add, memory_move, memory_remove, memory_replace
@@ -24,6 +26,14 @@ from .sync_oplog import append_op
 
 __all__ = [
     'load_pending',
+    'item_digest',
+    'record_listing',
+    'forget_listing',
+    'changed_since_listing',
+    'listed_digests',
+    'SKILL_PREVIEW_LINES',
+    'SKILL_PREVIEW_CHARS',
+    'skill_body_preview',
     'cmd_pending',
     'cross_project_note',
     'archive',
@@ -259,6 +269,129 @@ def cross_project_note(item: dict) -> "str | None":
                 f" and re-file manually")
     return None
 
+# WHAT WAS LISTED, so `lore approve` can tell whether it is applying THAT.
+# Outside pending/ on purpose: everything in there is a proposal, and
+# `load_pending` and `sync_apply._uid_already_staged` both glob it.
+#: Lives INSIDE the pile it describes, deliberately: a pile wiped by hand
+#: (`rm -rf pending/`, a test's reset) takes its listing with it, so an id
+#: that comes round again under the same second-stamped name is a fresh
+#: proposal and not "the listed file rewritten". No `.json` suffix, so
+#: `load_pending`'s glob never mistakes it for a proposal.
+LISTED_DIGESTS = ".listed"
+
+
+def item_digest(pid: str) -> "str | None":
+    """sha256 of the bytes of `pending/<pid>.json`, or None when it is gone.
+
+    The FILE's bytes, not the parsed item's: what a human reviewed is what was
+    on disk, and two dicts that compare equal can have been written by
+    different processes with different intent.
+    """
+    try:
+        return hashlib.sha256(
+            (ROOT / "pending" / f"{pid}.json").read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _item_inode(pid: str) -> "int | None":
+    """The inode of `pending/<pid>.json`, or None when it is gone. Recorded
+    beside the digest so a NEW file under a reused id (the pile wiped by
+    hand, or a name that came round again in the same second) is not
+    mistaken for the listed file rewritten in place: a rewrite keeps its
+    inode, a replacement does not."""
+    try:
+        return (ROOT / "pending" / f"{pid}.json").stat().st_ino
+    except OSError:
+        return None
+
+
+def _listed_entry(known: dict, pid: str) -> "tuple[str | None, int | None]":
+    """(digest, inode) as recorded, tolerating the bare-digest shape an
+    earlier build wrote."""
+    was = known.get(pid)
+    if isinstance(was, dict):
+        return was.get("sha256"), was.get("ino")
+    if isinstance(was, str):
+        return was, None
+    return None, None
+
+
+def _listed_path() -> Path:
+    return ROOT / "pending" / LISTED_DIGESTS
+
+
+def record_listing(pids: "list[str]", *, refresh: bool = False) -> None:
+    """Record the bytes of each proposal, so `approve` can tell whether it is
+    applying what was read.
+
+    THE GAP THIS CLOSES. The pile is read and shown; `lore approve <id>`
+    re-reads the same file some seconds later and applies whatever is in it
+    NOW. Nothing bound the two, so a proposal rewritten in between -- by
+    another process running as this user, which the trust model already treats
+    as untrusted for this directory -- was applied verbatim with a human's
+    approval attached to text they never saw.
+
+    TWO MODES, and the difference is what makes this usable rather than a
+    trap. A plain call FILLS IN what is missing and leaves every existing
+    digest alone: `load_pending` is a read, and a read must not quietly
+    re-bless a file that changed since the last one. `refresh=True` recomputes
+    them, and only `lore pending` passes it -- that IS a human reading the
+    pile again, which is the one event that may re-bless it. A proposal edited
+    by hand is therefore refused by `approve` until it has been listed again.
+
+    Never raises: a pile that cannot be recorded must still be listable.
+    """
+    known = listed_digests()
+    for pid in pids:
+        _was, ino = _listed_entry(known, pid)
+        if not refresh and pid in known and ino == _item_inode(pid):
+            continue
+        digest = item_digest(pid)
+        if digest is not None:
+            known[pid] = {"sha256": digest, "ino": _item_inode(pid)}
+    _write_listing(known)
+
+
+def forget_listing(pid: str) -> None:
+    """Drop one proposal's digest -- it has been archived, and an id that
+    comes round again is a different proposal."""
+    known = listed_digests()
+    if known.pop(pid, None) is not None:
+        _write_listing(known)
+
+
+def changed_since_listing(pid: str) -> bool:
+    """Whether this proposal's bytes differ from the ones that were recorded.
+
+    False when nothing was ever recorded for it: there is then nothing to
+    compare against, and refusing every unrecorded proposal would make the
+    first approval on a fresh ROOT impossible.
+    """
+    was, ino = _listed_entry(listed_digests(), pid)
+    if not was:
+        return False
+    if ino is not None and ino != _item_inode(pid):
+        return False  # a different file under the same id, never this one rewritten
+    return was != item_digest(pid)
+
+
+def _write_listing(known: dict) -> None:
+    try:
+        _listed_path().parent.mkdir(parents=True, exist_ok=True)
+        _listed_path().write_text(json.dumps(known, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def listed_digests() -> dict:
+    try:
+        data = json.loads(_listed_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def load_pending() -> list[tuple[str, dict]]:
     pdir = ROOT / "pending"
     if not pdir.exists():
@@ -269,6 +402,11 @@ def load_pending() -> list[tuple[str, dict]]:
             items.append((f.stem, json.loads(f.read_text(encoding="utf-8"))))
         except (json.JSONDecodeError, OSError):
             continue
+    # Every read of the pile records the bytes of anything not recorded yet,
+    # and re-records nothing -- see record_listing. This is what `approve` has
+    # to compare against, and a proposal first seen by the SessionStart
+    # snapshot is as reviewed as one first seen by `lore pending`.
+    record_listing([pid for pid, _ in items])
     return items
 
 
@@ -380,6 +518,57 @@ def _cluster_pending(items) -> int:
     return 0
 
 
+def _print_item(pid: str, item: dict) -> None:
+    """One proposal as `lore pending` shows it.
+
+    A function rather than a loop body because `lore approve` shows it too,
+    when a proposal changed on disk since it was listed: re-listing it there
+    in a different shape would be a second thing to keep in step.
+    """
+    if item.get("kind") == "memory":
+        act = item["action"] + (f" (match: {item['match']!r})" if item.get("match") else "")
+        print(f"{pid}  memory/{item['scope']}  {act}")
+        print(f"    {item['text']}")
+    elif item.get("kind") == "filemap":
+        print(f"{pid}  filemap  {item.get('action') or 'add'}")
+        print(f"    {item.get('path')} — {item.get('purpose')}")
+    elif item.get("kind") == "belief":
+        print(f"{pid}  belief/{item.get('subject', '?')}  {item.get('action', 'add')}")
+        print(f"    {item.get('claim') or 'id ' + str(item.get('id'))}")
+    elif item.get("kind") == "sync":
+        # docs/sync-protocol.md S5.2: an op that did not verify is visible
+        # here or it is nowhere. Say plainly that it was NOT applied and
+        # why -- an unverified op is the one thing in this pile that could
+        # be an attacker's, and the tag is the whole containment.
+        op = item.get("op") or {}
+        print(f"{pid}  sync/UNVERIFIED  {op.get('class', '?')}/{op.get('op', '?')}")
+        print(f"    !! not applied: {item.get('reason', 'mac did not verify')}")
+        print(f"    from machine {op.get('machine_id', '?')}")
+    else:
+        print(f"{pid}  skill/{item.get('action', 'add')}  {item.get('name')}")
+        print(f"    {item.get('description')}")
+        # THE BODY, NOT JUST THE DESCRIPTION. A skill's body is
+        # instructions a future session executes, and the description is
+        # written by the same model that wrote the body -- so listing only
+        # the description showed the approver the reassuring half of a
+        # proposal whose other half was the payload. Truncated because a
+        # pile of skills must stay readable; `lore pending <id>` is not a
+        # command, so the full text is the file itself, named here.
+        for line in skill_body_preview(item.get("body")):
+            print(f"    {line}")
+    by = item.get("derived_by")
+    print(f"    from session {item.get('session_id')} [{item.get('project')}]"
+          + (f" [by {by}]" if by else ""))
+    # ISSUE #43: a proposal that came from the write gate says which
+    # untrusted context wrote it, and on what evidence.
+    if item.get("writer"):
+        print(f"    !! staged by the write gate: {item['writer']} context"
+              f" ({item.get('writer_evidence', 'no evidence recorded')})")
+    note = cross_project_note(item)
+    if note:
+        print(f"    !! {note}")
+
+
 def cmd_pending(args) -> int:
     items = load_pending()
     if not items:
@@ -391,41 +580,46 @@ def cmd_pending(args) -> int:
         print(f"{len(items)} pending -- large pile. `lore pending --cluster` "
               "groups them by theme; `--all` lists every row anyway.")
     for pid, item in items:
-        if item.get("kind") == "memory":
-            act = item["action"] + (f" (match: {item['match']!r})" if item.get("match") else "")
-            print(f"{pid}  memory/{item['scope']}  {act}")
-            print(f"    {item['text']}")
-        elif item.get("kind") == "filemap":
-            print(f"{pid}  filemap  {item.get('action') or 'add'}")
-            print(f"    {item.get('path')} — {item.get('purpose')}")
-        elif item.get("kind") == "belief":
-            print(f"{pid}  belief/{item.get('subject', '?')}  {item.get('action', 'add')}")
-            print(f"    {item.get('claim') or 'id ' + str(item.get('id'))}")
-        elif item.get("kind") == "sync":
-            # docs/sync-protocol.md S5.2: an op that did not verify is visible
-            # here or it is nowhere. Say plainly that it was NOT applied and
-            # why -- an unverified op is the one thing in this pile that could
-            # be an attacker's, and the tag is the whole containment.
-            op = item.get("op") or {}
-            print(f"{pid}  sync/UNVERIFIED  {op.get('class', '?')}/{op.get('op', '?')}")
-            print(f"    !! not applied: {item.get('reason', 'mac did not verify')}")
-            print(f"    from machine {op.get('machine_id', '?')}")
-        else:
-            print(f"{pid}  skill/{item.get('action', 'add')}  {item.get('name')}")
-            print(f"    {item.get('description')}")
-        by = item.get("derived_by")
-        print(f"    from session {item.get('session_id')} [{item.get('project')}]"
-              + (f" [by {by}]" if by else ""))
-        # ISSUE #43: a proposal that came from the write gate says which
-        # untrusted context wrote it, and on what evidence.
-        if item.get("writer"):
-            print(f"    !! staged by the write gate: {item['writer']} context"
-                  f" ({item.get('writer_evidence', 'no evidence recorded')})")
-        note = cross_project_note(item)
-        if note:
-            print(f"    !! {note}")
+        _print_item(pid, item)
+    # Record what was just shown, by digest, so `lore approve` can tell
+    # whether it is applying the text this listing put in front of a human.
+    record_listing([pid for pid, _ in items], refresh=True)
     print(f"\n{len(items)} pending. approve: lore approve <id>|all   reject: lore reject <id>|all")
     return 0
+
+
+# How much of a staged skill body `lore pending` shows before it says how much
+# more there is. Enough to read what a recipe actually does -- the exfiltration
+# line in a hostile one is not usually on line 40 -- and short enough that a
+# backfill pile of twenty is still one screen each.
+SKILL_PREVIEW_LINES = 24
+SKILL_PREVIEW_CHARS = 1600
+
+
+def skill_body_preview(body: object) -> "list[str]":
+    """The lines `lore pending` prints for a staged skill body, truncated with
+    a line saying what was cut and where the rest is."""
+    if not isinstance(body, str) or not body.strip():
+        return ["!! this proposal carries no body"]
+    lines = body.splitlines()
+    shown, cut = lines[:SKILL_PREVIEW_LINES], len(lines) - SKILL_PREVIEW_LINES
+    out, budget = [], SKILL_PREVIEW_CHARS
+    for line in shown:
+        if budget <= 0:
+            cut = len(lines) - len(out)
+            break
+        out.append(f"| {line[:budget]}")
+        budget -= len(line)
+    if cut > 0:
+        out.append(f"| ... {cut} more line(s) — read the whole body in"
+                   f" {ROOT / 'pending'}/<id>.json before approving")
+    return out
+
+
+def _forget_after_archive(pid: str) -> None:
+    """Called once a proposal has left pending/: an id that comes round again
+    names a different proposal, and a stale digest would refuse it."""
+    forget_listing(pid)
 
 
 def archive(pid: str, status: str) -> None:
@@ -458,15 +652,15 @@ def archive(pid: str, status: str) -> None:
         item = json.loads(raw)
     except json.JSONDecodeError as exc:
         _quarantine_corrupt(pid, src, raw, exc)
+        _forget_after_archive(pid)
         return
     item["status"] = status
     item["resolved"] = utcnow()
 
-    dst_dir = ROOT / "pending" / "archive"
+    dst_dir = private_dir(ROOT / "pending" / "archive")
     dst = dst_dir / f"{pid}.json"
     tmp = dst.with_name(dst.name + ".tmp")
     try:
-        dst_dir.mkdir(parents=True, exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(item, indent=2))
             fh.flush()
@@ -478,6 +672,7 @@ def archive(pid: str, status: str) -> None:
 
     # Only now -- the archive copy is confirmed on disk -- may the source go.
     src.unlink()
+    _forget_after_archive(pid)
 
     # sync spec PR 3 ("pending" verb `resolve {uid, status}"): the archive
     # IS the resolution, whether approved or rejected -- appended right
@@ -523,6 +718,30 @@ def _quarantine_corrupt(pid: str, src: Path, raw: str, exc: json.JSONDecodeError
 
 
 def apply_item(pid: str, item: dict, force: bool) -> str | None:
+    # THE SAME PREDICATE `cmd_approve` uses, here as well as there, because
+    # this is the function every OTHER caller reaches -- the TUI, a future
+    # daemon, a test. `cmd_approve` checks first only so it can re-list the
+    # proposal it is refusing; this is what makes the refusal true for
+    # everyone.
+    if changed_since_listing(pid):
+        return ("this proposal changed on disk since it was listed — refusing"
+                " to apply text that was never reviewed. Run `lore pending` to"
+                " read it as it stands now, then approve it again")
+    # ONE SLUG CHECK, IN FRONT OF EVERY BRANCH. `item["project"]` is written
+    # by a model, may have crossed a machine, and used to reach `memory_path`
+    # AND `filemap_path` unchecked -- two sinks for one tainted field, so
+    # fixing either branch alone would have left an arbitrary-path write
+    # behind under the other command. The path functions refuse it as well
+    # (defence in depth's inner layer); this outer one turns the refusal into
+    # a message and leaves the proposal pending instead of raising out of
+    # `lore approve`.
+    for field in ("project", "host"):
+        value = item.get(field)
+        if value is not None and not valid_slug(value):
+            return (f"proposal names an unusable {field} ({value!r}) -- it must"
+                    " be one path component with no separator and no '..';"
+                    " refusing to touch the filesystem for it (the proposal"
+                    " stays pending)")
     if item.get("kind") == "sync":
         # An op whose MAC was missing or wrong (docs/sync-protocol.md S5.2):
         # staged, never applied, until a human says so -- and this is the
@@ -648,12 +867,17 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
             return f"skill {name} already exists at {target} (use --force to overwrite)"
     target.parent.mkdir(parents=True, exist_ok=True)
     new = skill_file_text(name, item.get("description"), item["body"])
-    if old is not None:
-        diff = list(difflib.unified_diff(
-            old.splitlines(), new.splitlines(),
-            fromfile=f"{name} (installed)", tofile=f"{name} (update)", lineterm="",
-        ))[:60]
-        print("\n".join(diff))
+    # A FIRST INSTALL IS DIFFED TOO, against nothing. Only an UPDATE printed
+    # one, so the case where every line is new -- the case where the whole
+    # file is about to become instructions a future session executes, and the
+    # one an attacker would choose -- was the case that showed the approver
+    # nothing at all.
+    diff = list(difflib.unified_diff(
+        (old or "").splitlines(), new.splitlines(),
+        fromfile=f"{name} ({'installed' if old is not None else 'not installed'})",
+        tofile=f"{name} ({'update' if old is not None else 'new'})", lineterm="",
+    ))[:60]
+    print("\n".join(diff))
     target.write_text(new, encoding="utf-8")
     # ISSUE #73: the op carries the WHOLE FILE, not the bare body. What the
     # receiver must be able to rebuild is this file, and the only way it can
@@ -758,9 +982,29 @@ def cmd_approve(args) -> int:
     if not ids:
         print("nothing matched.", file=sys.stderr)
         return 1
+    # BEFORE load_pending, which fills in digests for anything not recorded:
+    # what matters here is what was recorded before this command started.
+    changed_ids = {pid for pid in ids if changed_since_listing(pid)}
     items = dict(load_pending())
     failures = 0
     for pid in ids:
+        changed = pid in changed_ids
+        # THE ONE THING THAT BINDS THIS APPROVAL TO WHAT WAS REVIEWED. A
+        # proposal whose bytes changed since `lore pending` showed them is
+        # re-listed and refused rather than applied: approval is consent to a
+        # text, not to an id. A proposal with no recorded digest was never
+        # listed by this ROOT (a fresh clone, a pile from a `--cluster` run,
+        # an id typed from a notification) and keeps the old behaviour --
+        # there is nothing to compare it against, and refusing everything
+        # unlisted would make the first approval after any `lore reset`
+        # impossible.
+        if changed:
+            failures += 1
+            print(f"{pid}: NOT applied — this proposal changed on disk since"
+                  f" `lore pending` listed it. Here it is as it stands now;"
+                  f" run `lore pending` and read it again before approving.")
+            _print_item(pid, items[pid])
+            continue
         err = apply_item(pid, items[pid], args.force)
         if err:
             failures += 1

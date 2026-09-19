@@ -56,6 +56,7 @@ from .config import (
     GRAPH_CONTEXT_CAP,
     GRAPH_CONTEXT_HOPS,
     ROOT,
+    UNTRUSTED_DATA_NOTE,
     one_line,
     project_slug,
 )
@@ -473,15 +474,29 @@ _HTML = """<!doctype html>
  // A FETCH THAT HANGS is the case a try/catch misses: no error is ever thrown
  // and the page sits showing raw mermaid source, which reads as a broken
  // export rather than a missing network. This timer states the real reason.
+ // ESCAPED, because `d.textContent` is the mermaid source and the mermaid
+ // source is belief CLAIMS -- text a model wrote from a transcript that may
+ // itself have been pasted from anywhere. Interpolating it into `outerHTML`
+ // made every stalled render (no network, file:// origin) parse those claims
+ // as markup, so a claim containing a <script> or an <img onerror=...> ran in
+ // the page. The page has no credentials of its own, but it is opened from a
+ // file:// URL by the person whose store it is, and "only on failure" is not
+ // a mitigation for something a failure is the normal way to reach.
+ function esc(t) {
+   return String(t).replace(/[&<>"']/g, function (c) {
+     return { "&": "&amp;", "<": "&lt;", ">": "&gt;",
+              '"': "&quot;", "'": "&#39;" }[c];
+   });
+ }
  function stalled(why) {
    var d = document.getElementById("d");
    if (!d || d.querySelector("svg")) return;
-   d.outerHTML = '<div class="err">The diagram did not render.\\n\\n' + why
+   d.outerHTML = '<div class="err">The diagram did not render.\\n\\n' + esc(why)
      + '\\n\\nMermaid loads from cdn.jsdelivr.net, so this page needs network the'
      + ' first time it is opened. If the URL bar shows file://, a browser may also'
      + ' refuse the module fetch from a null origin — serve the file over http'
      + ' instead. The mermaid source is below; it is valid input for any mermaid'
-     + ' renderer.\\n\\n' + d.textContent + '</div>';
+     + ' renderer.\\n\\n' + esc(d.textContent) + '</div>';
  }
  setTimeout(function () { stalled("Timed out after 8s waiting for mermaid."); }, 8000);
 </script>
@@ -806,6 +821,8 @@ _SKILLS_HEAD = ("Learned recipes, ranked by track record and filled only from th
 DERIVE_SESSION = "graph-derive"
 
 DERIVE_PROMPT = """You are given every active belief in a memory store, one per line, as `id | claim`.
+
+""" + UNTRUSTED_DATA_NOTE.format(what="claim list") + """
 
 Your only job is to name RELATIONS BETWEEN THESE CLAIMS. Do not restate a claim, do not \
 propose a new one, do not judge whether one is true. The five relations, from the claim on the \

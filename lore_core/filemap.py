@@ -38,7 +38,8 @@ pointer line when the map is non-empty).
 import os
 import sys
 
-from .config import FILEMAP_CAP, ROOT, one_line, project_root, project_slug
+from .config import (FILEMAP_CAP, ROOT, one_line, project_root, project_slug,
+                     valid_slug)
 from .gate import entry_key, forget_entry, gate_write, provenance_tag, record_entry, writer_class
 from .memory import match_entries, read_entries, render_entries, usage_line
 from .scrub import scrub_secrets
@@ -64,6 +65,17 @@ SEP = " — "
 
 
 def filemap_path(slug: str) -> "os.PathLike[str]":
+    """The map file for one project slug.
+
+    Checked, for the same reason `memory.memory_path` is: `item["project"]`
+    out of a staged proposal reached here unvalidated too, and it is the
+    SECOND sink for the same tainted field -- fixing only the first would have
+    left an arbitrary-path write behind under a different command.
+    """
+    if not valid_slug(slug):
+        raise ValueError(
+            f"{slug!r} is not a usable project slug -- it must be one path"
+            " component with no separator and no '..'")
     return ROOT / "filemap" / f"{slug}.md"
 
 
@@ -75,7 +87,10 @@ def filemap_entries(slug: str) -> list[tuple[str, str]]:
     line, never a failed hook (house rule)."""
     try:
         raw = read_entries(filemap_path(slug))
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError joins OSError here for the same reason OSError is caught
+        # at all: this sits on the hook path, and an unusable slug must cost a
+        # missing pointer line, never a failed hook (house rule).
         return []
     out = []
     for e in raw:

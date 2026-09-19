@@ -77,7 +77,7 @@ sockets (`$XDG_RUNTIME_DIR/doxa/registry/`, `doxa/peers.py:13-32`),
 | `LORE_SYNC_TOKEN` | unset | bearer token for this machine; the only mode a sandbox can use |
 | `LORE_SYNC_HMAC_KEY` | unset | shared integrity key, set on every machine, never sent (see Security) |
 | `LORE_MACHINE_ID` | persisted uuid4 | this machine's identity in the op log; the hostname is a *label*, not the id |
-| `LORE_SYNC_CLASSES` | `memory,filemap,beliefs,pending,skills,sessions` | comma list; `transcripts`, `tabsets`, `worktrees`, `skill_usage` are opt-in |
+| `LORE_SYNC_CLASSES` | `memory,filemap,beliefs,pending,skills,sessions` | comma list of the classes this machine sends **and applies**; a class left out is neither appended here nor applied from a peer. `transcripts`, `tabsets`, `worktrees`, `skill_usage` are opt-in |
 | `LORE_SYNC_PULL_AT_START` | `1` | detached pull at SessionStart |
 | `LORE_SYNC_PUSH_AFTER_REVIEW` | `1` | push when the review worker finishes |
 | `LORE_SYNC_PEER` | unset | Transport B: a tailnet peer to pull from directly |
@@ -223,10 +223,15 @@ CREATE TABLE IF NOT EXISTS sync_ops(
     payload     TEXT NOT NULL,         -- JSON, scrubbed before it is written here
     mac         TEXT,                  -- HMAC-SHA256 over the canonical bytes, see Security
     created     TEXT NOT NULL,         -- wall clock, DISPLAY ONLY
-    applied     INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(machine_id, machine_seq)
+    applied     INTEGER NOT NULL DEFAULT 0  -- 0 held, 1 applied, 2 unverified, 3 unknown class, 4 failed
 );
 CREATE INDEX IF NOT EXISTS sync_ops_order ON sync_ops(lamport, machine_id, machine_seq);
+-- The slot is unique over ops this store ACCEPTED, and only those. An op
+-- staged unverified (applied = 2) is one anybody could have written, so it
+-- must not hold the slot the real author's op needs — it is stored, and
+-- relayed, beside it.
+CREATE UNIQUE INDEX IF NOT EXISTS sync_ops_slot
+    ON sync_ops(machine_id, machine_seq) WHERE applied != 2;
 
 CREATE TABLE IF NOT EXISTS sync_machine(
     machine_id TEXT NOT NULL,          -- this machine
@@ -318,6 +323,11 @@ inserts through `edge_insert`, whose per-session assertion table already
 makes a restatement a no-op (`store.py:148-158`). An edge whose endpoint
 uid is unknown is held in `sync_ops` with `applied = 0` and retried after
 the next pull, since ops can arrive out of dependency order across pages.
+`applied = 0` means that and only that: an op of a class this build does
+not implement is recorded `applied = 3` and an op whose applier refused or
+raised is recorded `applied = 4`, because the retry pass deliberately does
+not re-verify a MAC and so must never be handed a row that was not verified
+and dispatched already.
 
 The competing-dreamer case deserves its own line: two machines that both
 run `dream_run` over the same reconciled store will supersede the same

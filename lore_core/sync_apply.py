@@ -59,6 +59,7 @@ import hmac
 import json
 import shutil
 import sqlite3
+import sys
 from pathlib import Path
 
 from .beliefs import (
@@ -70,7 +71,7 @@ from .beliefs import (
     record_dream_reviewed,
     record_outcome,
 )
-from .config import ROOT, SKILLS_DIR, utcnow, valid_skill_name
+from .config import ROOT, SKILLS_DIR, private_dir, utcnow, valid_skill_name
 from .filemap import SEP, filemap_add, filemap_path, filemap_remove, filemap_replace
 from .gate import entry_key
 from .memory import (
@@ -92,6 +93,8 @@ from .memory import (
 from .pending import archive
 from .store import db_connect, resolve_or_create_synthetic_slug
 from .sync_oplog import (
+    CLASS_CONFIG_NAMES,
+    class_enabled,
     compute_mac,
     get_or_create_machine,
     hmac_key,
@@ -104,6 +107,11 @@ __all__ = [
     'APPLIED_NO',
     'APPLIED_YES',
     'APPLIED_UNVERIFIED',
+    'APPLIED_UNKNOWN',
+    'APPLIED_FAILED',
+    'MAX_SIGNED_64',
+    'MAX_OP_BYTES',
+    'InvalidOp',
     'canonical_key',
     'canonical_order',
     'verify_mac',
@@ -114,19 +122,57 @@ __all__ = [
     'conflict_rows',
     'deferred_op_count',
     'unverified_op_count',
+    'failed_op_count',
 ]
 
 
-# `sync_ops.applied`, three states rather than the schema's implied two.
+# `sync_ops.applied`, five states rather than the schema's implied two.
 # sync.md fixes the meaning of 0 and 1 ("an edge whose endpoint uid is unknown
 # is held in sync_ops with applied = 0 and retried after the next pull"), and
 # an op staged as unverified is neither: it must never be retried by the
-# dependency path, and it must never read as applied. A third INTEGER value
-# says so without a schema migration -- `applied` is already `INTEGER NOT
+# dependency path, and it must never read as applied. Further INTEGER values
+# say so without a schema migration -- `applied` is already `INTEGER NOT
 # NULL DEFAULT 0` and nothing in PR 3 compares it to anything but 0/1.
+#
+# 3 and 4 exist because 0 was carrying two other meanings it could not hold.
+# An op of an UNKNOWN class was recorded at 0, and `retry_deferred` -- which
+# deliberately does not re-verify -- then marked it applied without ever
+# dispatching it; an op whose applier RAISED never got a state at all, because
+# the exception left `apply_ops` entirely. Both are terminal, neither is
+# retried, and `lore sync status` names them.
 APPLIED_NO = 0          # accepted, verified, not yet applicable (missing dependency)
 APPLIED_YES = 1         # applied to the local store
 APPLIED_UNVERIFIED = 2  # MAC missing or wrong: staged as a proposal, never applied
+APPLIED_UNKNOWN = 3     # verified, but of a class this build does not implement
+APPLIED_FAILED = 4      # verified and known, but applying it was refused or raised
+
+# The receiver's bound on the two integers of the canonical key. SQLite stores
+# an INTEGER in at most 8 bytes, so a `lamport` of 2**63 is not a large clock,
+# it is an OverflowError inside `_record` that used to take the whole page
+# down with it (and, before that, a clock this machine could never catch up
+# with). Rejected at validation, where a wire value that cannot be stored
+# belongs, rather than clamped: a clamp would silently reorder the log.
+MAX_SIGNED_64 = 2 ** 63
+
+# The most one op's payload may weigh. A cap belongs HERE and not only in the
+# transport, because "before staging" is the line that matters: an unverified
+# op is written whole into `pending/` so a human can review the very bytes
+# that arrived, and an unattended SessionStart pull therefore turned an
+# oversized payload into a file on disk that nothing ever cleans up. 1 MiB is
+# far above every class that has a writer -- a memory entry is capped at
+# thousands of characters and a skill is a SKILL.md -- and far below the size
+# at which a pull is an attack.
+MAX_OP_BYTES = 1024 * 1024
+
+
+class InvalidOp(ValueError):
+    """An applier's refusal of a payload it will not act on -- a transcript
+    whose `session_id` would write outside ROOT, a session `msgs` whose rows
+    are not rows. Distinct from an ordinary exception only in what it says: the
+    op is not a victim of a bug here, it is malformed, and either way
+    `_dispatch_isolated` marks THAT op failed and the rest of the page applies.
+    """
+
 
 # A payload shape the engine does not recognise is recorded and left alone
 # rather than refused -- docs/sync-protocol.md S3/S8 require a future class to
@@ -147,11 +193,34 @@ def canonical_key(op: dict) -> tuple:
     return (op["lamport"], op["machine_id"], op["machine_seq"])
 
 
+def _order_key(op: object) -> tuple:
+    """`canonical_key` for an op that IS one, and a deterministic floor for
+    anything that is not.
+
+    The sort runs BEFORE validation -- it has to, since `apply_ops` and
+    `sync_cmds.pull_ops` both order a whole page before looking at any of it --
+    so `canonical_key` applied directly would raise `KeyError` on a page
+    containing a non-dict and `TypeError` on one whose `lamport` is a string,
+    and a page that cannot be sorted is a page that can never be applied: every
+    later pull re-fetches it and aborts on the same op. Anything unusable sorts
+    first, under a fourth tuple element, and is dropped by `_envelope_error` a
+    moment later with its reason logged.
+    """
+    if isinstance(op, dict):
+        lamport, machine_seq = op.get("lamport"), op.get("machine_seq")
+        machine_id = op.get("machine_id")
+        if (isinstance(lamport, int) and not isinstance(lamport, bool)
+                and isinstance(machine_seq, int) and not isinstance(machine_seq, bool)
+                and isinstance(machine_id, str)):
+            return (0, lamport, machine_id, machine_seq)
+    return (-1, 0, "", 0)
+
+
 def canonical_order(ops: "list[dict]") -> "list[dict]":
     """`ops` sorted into canonical order. Stable and total: two ops cannot
     share a `(machine_id, machine_seq)` pair, since the authoring machine
     alone advances that counter."""
-    return sorted(ops, key=canonical_key)
+    return sorted(ops, key=_order_key)
 
 
 def verify_mac(op: dict, key: "str | None") -> bool:
@@ -191,6 +260,20 @@ def deterministic_uid(op_id: str) -> str:
     of a skill put, and an unverified op.
     """
     return hashlib.sha256(op_id.encode("utf-8")).hexdigest()
+
+
+def _path_component(raw: str) -> str:
+    """One wire string flattened into ONE filesystem name: alphanumerics, `-`
+    and `_` survive, everything else becomes `-`.
+
+    The allow-list `_apply_transcript` already gave the project key, lifted out
+    so the session id gets the identical one -- a separator, a `.`, a NUL or a
+    drive letter cannot survive it, so the result can only ever name a child of
+    the directory it is joined to. Empty in means `-` out, never "" (which
+    would resolve to the parent directory itself).
+    """
+    cleaned = "".join(c if c.isalnum() or c in "-_" else "-" for c in raw)
+    return cleaned or "-"
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +366,7 @@ def _stage(item: dict, uid: str) -> "str | None":
     """
     if _uid_already_staged(uid):
         return None
-    pdir = ROOT / "pending"
-    pdir.mkdir(parents=True, exist_ok=True)
+    pdir = private_dir(ROOT / "pending")
     stamp = utcnow().replace("-", "").replace(":", "").replace("T", "").rstrip("Z")
     payload = dict(item) | {"uid": uid}
     payload.setdefault("created", utcnow())
@@ -826,11 +908,22 @@ def _apply_session(conn: sqlite3.Connection, op: dict) -> bool:
         rows = payload.get("rows")
         if not isinstance(rows, list):
             return True
+        # VALIDATE THE WHOLE BATCH BEFORE DELETING ANYTHING. "Replaces by
+        # session id" is a replace, not a truncate: the DELETE used to run
+        # first and the INSERT then skipped every row that was not a dict, so
+        # a verified op carrying `rows: ["nonsense"]` erased this machine's
+        # copy of a session's history and put nothing back. One bad row now
+        # refuses the op (and `_dispatch_isolated` records it failed) with the
+        # local history untouched.
+        if not all(isinstance(r, dict) for r in rows):
+            raise InvalidOp(
+                f"session {session_id} msgs carries a row that is not an"
+                " object; refusing to replace local history with it")
         conn.execute("DELETE FROM msg WHERE session_id = ?", (session_id,))
         conn.executemany(
             "INSERT INTO msg(session_id, project, ts, role, content) VALUES(?,?,?,?,?)",
             [(session_id, slug, r.get("ts") or "", r.get("role") or "",
-              r.get("content") or "") for r in rows if isinstance(r, dict)],
+              r.get("content") or "") for r in rows],
         )
         return True
 
@@ -848,11 +941,34 @@ def _apply_transcript(conn: sqlite3.Connection, op: dict) -> bool:
     lines = payload.get("lines")
     if op["op"] != "chunk" or not session_id or not isinstance(lines, list):
         return True
-    key = op["project_key"] or "user"
-    directory = ROOT / "transcripts" / "".join(
-        c if c.isalnum() or c in "-_" else "-" for c in key)
-    directory.mkdir(parents=True, exist_ok=True)
+    # BOTH HALVES OF THE PATH ARE WIRE DATA, so both get the same allow-list.
+    # `session_id` used to be interpolated raw, and a `session_id` of
+    # `../../escaped` wrote ROOT/escaped.jsonl -- an arbitrary-path write from
+    # any op that verifies, which is to say from any machine that holds the
+    # shared key or from anyone at all once a human approves one staged
+    # proposal. The resolve check below is the second, independent layer, the
+    # same pairing pending._resolved_contained uses for skill names: the
+    # allow-list catches the spelling, the resolve catches what a spelling
+    # cannot (a symlink planted inside `transcripts/` itself).
+    base = ROOT / "transcripts"
+    # The project key is FLATTENED (it is a remote URL shape, so it has always
+    # needed to be); the session id is REFUSED, because a session id that needs
+    # flattening is not a session id. Flattening it instead would also let two
+    # remote sessions collide onto one local file, which an append-only writer
+    # would then interleave.
+    if _path_component(str(session_id)) != str(session_id):
+        raise InvalidOp(
+            f"transcript session_id {session_id!r} is not a bare name"
+            " ([A-Za-z0-9-_]); refusing to build a path from it")
+    directory = base / _path_component(op["project_key"] or "user")
     path = directory / f"{session_id}.jsonl"
+    try:
+        path.resolve().relative_to(base.resolve())
+    except ValueError as exc:
+        raise InvalidOp(
+            f"transcript chunk for session {session_id!r} resolves outside"
+            f" {base}; refusing to write it") from exc
+    directory.mkdir(parents=True, exist_ok=True)
     held = 0
     if path.exists():
         held = sum(1 for _ in path.open(encoding="utf-8"))
@@ -923,20 +1039,56 @@ def _dispatch(conn: sqlite3.Connection, op: dict) -> bool:
         return handler(conn, op)
 
 
+def _dispatch_isolated(conn: sqlite3.Connection, op: dict) -> "bool | str":
+    """`_dispatch`, with one op's failure contained to that op: True when it
+    landed, False when it is waiting on a dependency, and the reason as a
+    STRING when applying it raised.
+
+    PER-OP ISOLATION IS THE PROPERTY. A page is applied inside one loop, and
+    without this an exception from any applier propagated out of `apply_ops`
+    to the caller -- so a single op whose payload the engine mishandles (a
+    belief `confidence` of `"not-a-number"`, which `float()` refuses) aborted
+    the whole page, AND every later pull of it, forever: the cursor never
+    advances past a page that cannot be applied, so the same op is re-fetched
+    and re-raised on every session start. One op is now recorded
+    `APPLIED_FAILED`, surfaced by `lore sync status`, and the rest of the page
+    lands.
+
+    Deliberately catches `Exception`, not a list of the exceptions seen so far:
+    the set of things an applier can raise is the set of things every write
+    path under it can raise, which is not a list this module can hold correct.
+    `BaseException` is NOT caught -- a KeyboardInterrupt or a SystemExit during
+    a pull must still stop it.
+    """
+    try:
+        return _dispatch(conn, op)
+    except InvalidOp as exc:
+        return str(exc)
+    except Exception as exc:                                    # noqa: BLE001
+        return f"{exc.__class__.__name__}: {exc}"
+
+
 # ---------------------------------------------------------------------------
 # the engine
 # ---------------------------------------------------------------------------
 
-def _record(conn: sqlite3.Connection, op: dict) -> bool:
-    """Claim this op's slot in `sync_ops` BEFORE applying it; False when the
-    store already holds it.
+def _record(conn: sqlite3.Connection, op: dict, state: int = APPLIED_NO) -> bool:
+    """Record this op in `sync_ops` BEFORE applying it, in the state its
+    verification earned it; False when the store already holds it.
 
     Recording first is what makes the UNIQUE constraints do the idempotence
-    work: `op_id` UNIQUE catches a re-pulled page, and `(machine_id,
-    machine_seq)` UNIQUE catches two different ops claiming one slot from one
-    machine -- which docs/sync-protocol.md S6.2 calls a client bug and which a
-    receiver must not resolve by applying both. Applying first and recording
-    after would mean a crash in between re-applies the op on the next pull.
+    work: `op_id` UNIQUE catches a re-pulled page, and the partial index
+    `sync_ops_slot` catches two different VERIFIED ops claiming one
+    `(machine_id, machine_seq)` slot from one machine -- which
+    docs/sync-protocol.md S6.2 calls a client bug and which a receiver must not
+    resolve by applying both. Applying first and recording after would mean a
+    crash in between re-applies the op on the next pull.
+
+    `state` is why that index is partial (store.py). An op recorded
+    `APPLIED_UNVERIFIED` is one this machine could not verify and will never
+    apply on its own, so it must NOT hold the slot: holding it is how a forged
+    op used to make the real author's op read as a `duplicate` and vanish.
+    Every other state is an op this store accepted, and those hold the slot.
     """
     try:
         conn.execute(
@@ -945,7 +1097,7 @@ def _record(conn: sqlite3.Connection, op: dict) -> bool:
             (op["op_id"], op["machine_id"], op["machine_seq"], op["lamport"],
              op["class"], op["op"], op["project_key"],
              json.dumps(op["payload"], sort_keys=True), op.get("mac"),
-             op.get("created") or utcnow(), APPLIED_NO),
+             op.get("created") or utcnow(), state),
         )
     except sqlite3.IntegrityError:
         return False
@@ -972,64 +1124,179 @@ def apply_ops(conn: sqlite3.Connection, ops: "list[dict]", *,
     writer on the same state.db -- sync.md's own instruction is that apply is
     "kept short, and never held across a network call".
 
-    Returns {"applied", "deferred", "unverified", "duplicate", "unknown"}.
+    THE ORDER OF THE CHECKS IS THE CONTAINMENT. Every op is VALIDATED, then
+    checked against this machine's class allow-list, then VERIFIED, and only
+    then recorded and applied. Verification used to run last, after the op had
+    already taken its `(machine_id, machine_seq)` slot in `sync_ops` and bumped
+    this machine's Lamport clock -- so an op anyone could forge evicted the
+    genuine op for that slot (which then read as a `duplicate` and was dropped
+    for good) and could push this machine's clock to any value it liked. An op
+    that does not verify is somebody's guess about who wrote it; it earns a
+    pending proposal and nothing else, and in particular it earns no place in
+    the log's ordering.
+
+    Returns {"applied", "deferred", "unverified", "duplicate", "unknown",
+    "failed", "skipped"}.
     """
     key = hmac_key() if key is None else key
-    report = {"applied": 0, "deferred": 0, "unverified": 0,
-              "duplicate": 0, "unknown": 0}
+    report = {"applied": 0, "deferred": 0, "unverified": 0, "duplicate": 0,
+              "unknown": 0, "failed": 0, "skipped": 0}
     machine_id, _label = get_or_create_machine(conn)
+    deferred_ids: "set[str]" = set()
 
     for op in canonical_order(ops):
-        if not _valid_envelope(op):
+        # Validate
+        problem = _envelope_error(op)
+        if problem:
+            _log_refusal("dropped an op that is not one", problem)
             report["unknown"] += 1
             continue
-        if not _record(conn, op):
+        if _class_disabled(op["class"]):
+            # LORE_SYNC_CLASSES is an allow-list on BOTH sides (sync.md's
+            # Configuration table). Counted, not staged: a class this machine
+            # opted out of is not a proposal for a human to consider, it is
+            # traffic the operator already declined.
+            report["skipped"] += 1
+            continue
+
+        # Verify, then record in the state that verification earned
+        verified = verify_mac(op, key)
+        if verified:
+            state = (APPLIED_NO if op["class"] in _KNOWN_CLASSES
+                     else APPLIED_UNKNOWN)
+        else:
+            state = APPLIED_UNVERIFIED
+        if not _record(conn, op, state):
             report["duplicate"] += 1
             conn.commit()
             continue
-        # sync.md "Ordering": the receiver bumps its own clock past every op
-        # it sees, so the next locally authored write sorts after all of them.
-        observe_lamport(conn, machine_id, op["lamport"])
-        if op["class"] not in _KNOWN_CLASSES:
-            report["unknown"] += 1
-            conn.commit()
-            continue
-        if not verify_mac(op, key):
+        if not verified:
             reason = ("no LORE_SYNC_HMAC_KEY configured on this machine"
                       if not key else
                       "mac missing" if not op.get("mac") else "mac does not verify")
             with suppress_append():
                 _stage_unverified(op, reason)
-            _mark(conn, op["op_id"], APPLIED_UNVERIFIED)
             report["unverified"] += 1
             conn.commit()
             continue
-        if _dispatch(conn, op):
+        # sync.md "Ordering": the receiver bumps its own clock past every op
+        # it ACCEPTS, so the next locally authored write sorts after all of
+        # them. Never past one it could not verify -- that is an unauthenticated
+        # write to this machine's clock.
+        observe_lamport(conn, machine_id, op["lamport"])
+        if state == APPLIED_UNKNOWN:
+            # S3/S8 forward compatibility: recorded and relayed, never applied
+            # and -- unlike before, when it sat at `applied = 0` for
+            # `retry_deferred` to mark applied without ever dispatching it --
+            # never picked up by the retry path either.
+            report["unknown"] += 1
+            conn.commit()
+            continue
+
+        # Apply
+        outcome = _dispatch_isolated(conn, op)
+        if outcome is True:
             _mark(conn, op["op_id"], APPLIED_YES)
             report["applied"] += 1
-        else:
+        elif outcome is False:
+            deferred_ids.add(op["op_id"])
             report["deferred"] += 1
+        else:
+            _log_refusal(f"op {op['op_id']} ({op['class']}/{op['op']}) failed",
+                         outcome)
+            _mark(conn, op["op_id"], APPLIED_FAILED)
+            report["failed"] += 1
         conn.commit()
 
     if retry:
-        landed = retry_deferred(conn, key=key)
-        report["applied"] += landed
-        report["deferred"] -= landed
+        retry_deferred(conn, key=key)
+        # Counted from THIS page's own held ops rather than from what the retry
+        # loop happened to land: the loop also drains ops held by earlier
+        # pulls, and subtracting that total from this page's `deferred` is what
+        # used to make a pull report `deferred: -1`.
+        still = _still_deferred(conn, deferred_ids)
+        report["applied"] += report["deferred"] - still
+        report["deferred"] = still
     return report
 
 
-def _valid_envelope(op: object) -> bool:
-    """Structural check only (docs/sync-protocol.md S3's types). An op missing
-    a signed field cannot be verified and cannot be ordered, so there is
-    nothing to stage and nothing to hold -- it is not an op."""
+def _still_deferred(conn: sqlite3.Connection, op_ids: "set[str]") -> int:
+    """How many of `op_ids` are still held at `applied = 0`."""
+    if not op_ids:
+        return 0
+    held = 0
+    for op_id in op_ids:
+        row = conn.execute("SELECT applied FROM sync_ops WHERE op_id = ?",
+                           (op_id,)).fetchone()
+        if row and row[0] == APPLIED_NO:
+            held += 1
+    return held
+
+
+def _log_refusal(what: str, why: str) -> None:
+    """One line on stderr per op this engine would not apply.
+
+    stderr, and nothing else: a pull runs detached from a SessionStart hook,
+    whose stdout is the session's context. Counted in the report either way --
+    this is the reason a human can read once the count has told them to look.
+    """
+    print(f"sync apply: {what} — {why}", file=sys.stderr)
+
+
+def _class_disabled(class_: str) -> bool:
+    """Whether this machine has opted OUT of receiving this wire class.
+
+    `class_enabled` guarded only the append side, so a machine that had
+    switched `sessions` off still applied every peer's session ops -- an
+    allow-list that governs what leaves but not what lands is not an
+    allow-list. Limited to the classes `LORE_SYNC_CLASSES` actually names
+    today (`sync_oplog.CLASS_CONFIG_NAMES`, the six on-by-default ones): the
+    four opt-in classes of sync.md's Configuration table have no write path in
+    lore_core and no agreed config spelling on the receive side yet, and
+    reading their absence from the default set as "refuse them" would silently
+    turn off `tabset`/`worktree`/`transcript` delivery, which is a different
+    change from the one this fixes.
+    """
+    return class_ in CLASS_CONFIG_NAMES and not class_enabled(class_)
+
+
+def _envelope_error(op: object) -> "str | None":
+    """Why this is not an op, or None when it is (docs/sync-protocol.md S3's
+    types). An op missing a signed field cannot be verified and cannot be
+    ordered, so there is nothing to stage and nothing to hold.
+
+    The two integers are also BOUNDED, which S3's "integer" leaves to the
+    implementation and SQLite does not: a `lamport` of `2**63` raised
+    `OverflowError` out of the INSERT and took every op on the page with it,
+    and a value merely near the ceiling would have left this machine's clock
+    somewhere it could never write past.
+    """
     if not isinstance(op, dict):
-        return False
+        return f"not a JSON object but a {type(op).__name__}"
     for field, typ in (("op_id", str), ("machine_id", str), ("machine_seq", int),
                        ("lamport", int), ("class", str), ("op", str)):
         value = op.get(field)
         if not isinstance(value, typ) or isinstance(value, bool):
-            return False
-    return isinstance(op.get("payload"), dict)
+            return (f"{field} is {type(value).__name__},"
+                    f" not {typ.__name__} (docs/sync-protocol.md S3)")
+    for field in ("machine_seq", "lamport"):
+        if not 0 <= op[field] < MAX_SIGNED_64:
+            return f"{field} = {op[field]} is outside 0 .. 2**63 - 1"
+    if not isinstance(op.get("payload"), dict):
+        return (f"payload is {type(op.get('payload')).__name__},"
+                " not an object (docs/sync-protocol.md S3)")
+    try:
+        size = len(json.dumps(op["payload"], sort_keys=True).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        return f"payload does not encode as JSON ({exc})"
+    if size > MAX_OP_BYTES:
+        return f"payload is {size} bytes, over the {MAX_OP_BYTES}-byte cap"
+    return None
+
+
+def _valid_envelope(op: object) -> bool:
+    """`_envelope_error` as a predicate, for the callers that only branch."""
+    return _envelope_error(op) is None
 
 
 def retry_deferred(conn: sqlite3.Connection, *, key: "str | None" = None) -> int:
@@ -1046,6 +1313,13 @@ def retry_deferred(conn: sqlite3.Connection, *, key: "str | None" = None) -> int
     op as unverified on a machine whose key was unset between pulls -- a
     containment failure in the false-positive direction, which is noise, not
     safety.
+
+    That invariant is why `applied = 0` had to stop meaning two things. An op
+    of an unrecognised class used to be recorded at 0 having SKIPPED the MAC
+    check entirely (the class test ran first), and this loop -- which does not
+    re-verify, by the paragraph above -- then marked it applied. Unknown now
+    means `APPLIED_UNKNOWN`, which this query never selects, and the class test
+    runs after verification, so everything at 0 is verified again.
     """
     del key  # see the docstring: a held op was verified when it was recorded
     landed = 0
@@ -1067,13 +1341,26 @@ def retry_deferred(conn: sqlite3.Connection, *, key: "str | None" = None) -> int
                 "class": r[4], "op": r[5], "project_key": r[6], "payload": payload,
                 "mac": r[8], "created": r[9],
             })
-        progress = 0
+        progress, applied = 0, 0
         for op in canonical_order(pending_ops):
-            if _dispatch(conn, op):
+            outcome = _dispatch_isolated(conn, op)
+            if outcome is True:
                 _mark(conn, op["op_id"], APPLIED_YES)
                 progress += 1
+                applied += 1
+            elif outcome is not False:
+                # Terminal, and counted as progress so the loop re-runs: an op
+                # that just left `applied = 0` may be what another held op was
+                # waiting to be told about. Without the isolation this raised
+                # straight out of the pull, which put a held op that can never
+                # land in front of every op behind it, on every pull, forever.
+                _log_refusal(
+                    f"held op {op['op_id']} ({op['class']}/{op['op']}) failed",
+                    outcome)
+                _mark(conn, op["op_id"], APPLIED_FAILED)
+                progress += 1
             conn.commit()
-        landed += progress
+        landed += applied
         if not progress:
             return landed
 
@@ -1090,17 +1377,42 @@ def apply_op_after_approval(op: dict) -> "str | None":
 
     Returns None on success or a message for `lore approve` to print.
     """
-    if not _valid_envelope(op):
-        return "the staged proposal does not carry a usable op envelope"
+    problem = _envelope_error(op)
+    if problem:
+        return f"the staged proposal does not carry a usable op envelope: {problem}"
     conn = db_connect()
     try:
+        # The slot may have been filled since this was staged -- by the op the
+        # forged one was impersonating, which is exactly the case the partial
+        # index exists to let happen. Two different ops cannot both hold one
+        # machine's `machine_seq` (S6.2), and the one already applied is the
+        # one that verified, so this is refused rather than applied beside it.
+        held = conn.execute(
+            "SELECT op_id FROM sync_ops WHERE machine_id = ? AND machine_seq = ?"
+            " AND applied != ?",
+            (op["machine_id"], op["machine_seq"], APPLIED_UNVERIFIED)).fetchone()
+        if held and held[0] != op["op_id"]:
+            return (f"another op ({held[0]}) from machine {op['machine_id']}"
+                    f" already holds machine_seq {op['machine_seq']}; this"
+                    " proposal contradicts the log and was NOT applied —"
+                    " reject it, or investigate which of the two is genuine")
         if not conn.execute(
                 "SELECT 1 FROM sync_ops WHERE op_id = ?", (op["op_id"],)).fetchone():
             _record(conn, op)
-        if not _dispatch(conn, op):
+        outcome = _dispatch_isolated(conn, op)
+        if outcome is False:
+            # APPLIED_NO, not the `applied = 2` this row was staged at: 2 is
+            # the one state `retry_deferred` never selects, so the promise this
+            # message makes -- "it will apply after the next pull" -- was one
+            # nothing in the engine could keep.
+            _mark(conn, op["op_id"], APPLIED_NO)
             conn.commit()
             return ("the op depends on something this store does not have yet;"
                     " it stays recorded and will apply after the next pull")
+        if outcome is not True:
+            _mark(conn, op["op_id"], APPLIED_FAILED)
+            conn.commit()
+            return f"the op could not be applied: {outcome}"
         _mark(conn, op["op_id"], APPLIED_YES)
         conn.commit()
     finally:
@@ -1153,3 +1465,15 @@ def unverified_op_count(conn: sqlite3.Connection) -> int:
     return conn.execute(
         "SELECT count(*) FROM sync_ops WHERE applied = ?",
         (APPLIED_UNVERIFIED,)).fetchone()[0]
+
+
+def failed_op_count(conn: sqlite3.Connection) -> int:
+    """Ops this store verified, recognised and then could not apply -- the
+    terminal state per-op isolation writes. Reported by `lore sync status`
+    because nothing else will ever look at them again: unlike `applied = 0`
+    they are not retried, and unlike `applied = 2` they are not in the pending
+    pile. A non-zero count is a bug in an applier or a peer sending payloads
+    that do not match their class."""
+    return conn.execute(
+        "SELECT count(*) FROM sync_ops WHERE applied = ?",
+        (APPLIED_FAILED,)).fetchone()[0]

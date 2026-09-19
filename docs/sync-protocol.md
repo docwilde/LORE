@@ -265,6 +265,58 @@ downgrade a hub or a malicious peer could induce by stripping the field,
 and the contract exists to make that induce a pending review, not a
 silent apply.
 
+**Verification comes before the receiver commits anything to the op.** A
+receiver MUST check the `mac` *before* it claims the op's `(machine_id,
+machine_seq)` slot in its own log and *before* it advances its Lamport
+clock past the op's. An op that does not verify is one anybody could have
+written, so it earns a place in the pending pile and nowhere else: in
+particular it MUST NOT occupy the slot the genuine author's op needs
+(which would make that op arrive as a duplicate and be dropped) and it
+MUST NOT move the receiver's clock (which would let anyone set it).
+
+A receiver still STORES the op it could not verify, and still relays it
+onward — the courier property of §7 does not exempt mail this machine
+cannot read. It stores it in a way that leaves the slot free: `lore`
+records it in `sync_ops` with `applied = 2` and excludes exactly that
+state from its `(machine_id, machine_seq)` unique index, so a verified op
+for the same slot can land beside it afterwards. When a human later
+approves the staged proposal and the slot has since been filled by a
+different `op_id`, the approval is refused rather than applied beside it:
+two ops cannot both hold one machine's `machine_seq` (§6.2), and the one
+already applied is the one that verified.
+
+### 5.5 Ops a receiver accepts but does not apply
+
+Verification decides whether an op is *this account's*; it does not
+decide whether this build can act on it. Three outcomes are neither
+"applied" nor "staged", and a receiver MUST keep them apart from both:
+
+- **Unknown `class` or `op`.** Recorded, relayed, never applied, and —
+  this is the part that matters — never picked up by the dependency-retry
+  path either. A receiver MUST NOT record an unrecognised op in the same
+  state it records one that is merely waiting on a dependency: a retry
+  pass that does not re-verify (it must not; see §5.2) would otherwise
+  mark it applied without ever having applied it. §8's
+  forward-compatibility rule is what it stays recorded FOR.
+- **Structurally invalid.** An op missing a signed field of §3, carrying
+  one of the wrong JSON type, or carrying a `machine_seq`/`lamport`
+  outside `0 .. 2**63 - 1` is not an op: it cannot be verified and cannot
+  be ordered. It is counted and dropped, with the reason reported. §3
+  says "integer"; the bound is what an implementation MUST enforce to
+  keep one wire value from being unstorable.
+- **Refused or failed on apply.** A verified op of a known class whose
+  payload the applier will not act on (a path that would escape the
+  store's own directory, a batch of rows that are not rows) or which
+  raises. A receiver MUST contain that to the one op: the rest of the
+  page MUST still apply, and the op MUST reach a terminal state that a
+  status command reports. A page that aborts is a page that is re-fetched
+  and aborts again on the next pull, forever.
+
+A receiver MAY additionally decline a whole class it has been configured
+not to hold (`LORE_SYNC_CLASSES`). A declined class is counted and
+dropped, not staged: an operator who switched a class off has already
+answered the question staging would ask.
+
 ### 5.3 When the receiver has no key configured
 
 A machine that has not set `LORE_SYNC_HMAC_KEY` locally cannot perform
@@ -298,6 +350,38 @@ body is:
 possibly with additional fields, noted per status code below. `error` is
 normative and MUST be one of the exact strings given; `message` is for a
 human and a server MAY phrase it however it likes.
+
+**A server MUST NOT answer any of these endpoints with a redirect**, and a
+client MUST NOT follow one to another origin. `urllib`-shaped clients
+re-send the original headers to whatever `Location` names, so following a
+cross-origin redirect hands the machine's bearer token to whoever issued
+it; a client refuses it and reports the hub as misconfigured. A
+same-origin redirect, if a client follows one at all, MUST be followed
+without the credential.
+
+**The closed set of `error` strings.** `error` MUST be one of the exact
+strings this document gives. Four of them describe conditions v1 did not:
+
+| Status | `error` | Raised when |
+|---|---|---|
+| 409 | `op_id_conflict` | an `op_id` the account already holds is claimed by a different `machine_id` or a different `machine_seq` (§6.2, §9) |
+| 413 | `payload_too_large` | the request body is over the server's cap (§6.2, §6.6) |
+| 503 | `busy` | another push holds this account's lock, or the server's pool is saturated. A client MUST retry it — treating it as fatal stops that machine syncing |
+| 500 | `internal_error` | anything unforeseen, in the body shape above rather than as a text/plain traceback |
+
+A client that does not recognise a string still handles the status class:
+a 409 is never retried unchanged, a 413 is split and re-sent, a 503 is
+retried. `lore` retries `busy` three times (0.2 s, 0.5 s, 1.0 s) and then
+reports it as "still busy", which is never a failed push and never a
+cursor that advanced.
+
+**A client MUST bound what it reads.** The pull that runs at session
+start is detached and unattended, so an answer of unbounded size is read,
+decoded and parsed before a single byte of it has been verified. A client
+caps the whole response and refuses past it (`lore`: 32 MiB), and caps
+each op's `payload` independently before that op can be applied OR staged
+(`lore`: 1 MiB) — staging writes the op's own bytes to disk, so the cap
+that matters is the one in front of both.
 
 ### 6.1 Authentication
 
@@ -352,9 +436,11 @@ batch, which this shape prevents by construction.)
   {"accepted": 17, "duplicate": 3, "hub_seq_max": 90211}
   ```
   `accepted` — ops newly stored by this call. `duplicate` — ops whose
-  `op_id` already existed for this account (§9: identical net effect
-  whether this is a genuine retry or, in principle, a colliding uuid4;
-  the hub does not compare payload bytes, only `op_id`). `hub_seq_max` —
+  `op_id` already existed for this account **at the same `machine_id` and
+  the same `machine_seq`**; that triple is what makes a retry a retry. A
+  collision on any other pairing is 409 `op_id_conflict` below, not a
+  duplicate (§9; the hub still does not compare payload bytes).
+  `hub_seq_max` —
   the highest `hub_seq` now on the server for this account after this
   call (or the previous value if nothing new landed; `null` only if the
   account has zero ops even after this push, which cannot happen given a
@@ -368,7 +454,32 @@ batch, which this shape prevents by construction.)
   it does not recognise (§3, §8) — only structural violations of the
   shapes in §3 are 400.
 
+  A value of the right JSON type but out of range is also 400: a
+  `machine_seq` or `lamport` outside `0 … 2^63-1`, an `ops` array longer
+  than the server's cap, JSON nested deeper than the server's cap, or a
+  body that is not UTF-8. So is a `created` without a UTC offset — §3
+  already fixes it as RFC 3339 UTC with a trailing `Z`, and this is the
+  one place a v1 client's 200 can become a 400. `created` is outside the
+  signed tuple (§4), so a client holding older rows normalises the field
+  on the way out rather than being unable to push them at all.
+
 - **409** `machine_seq_gap` or `machine_seq_conflict` — see below.
+
+- **409** `op_id_conflict` — an `op_id` this account already holds,
+  claimed by a different `machine_id` or a different `machine_seq`.
+  Unlike the two above, this rolls the **whole push** back: the body
+  carries `accepted: 0, duplicate: 0` plus `op_id`, `machine_id`,
+  `machine_seq`, `stored_machine_id` and `stored_machine_seq`, and
+  nothing advanced, so the corrected batch is re-sent whole. Never
+  retried unchanged: `op_id` is the one identifier every idempotence rule
+  here rests on (§9), and two ops sharing one is a bug, not a race.
+
+- **413** `payload_too_large` — the body is over the server's cap. A
+  client splits the batch and re-sends; `GET /health` publishes the caps
+  (§6.6) so it need not discover them this way.
+
+- **503** `busy` — retried by the client (§6). Nothing was stored and no
+  cursor may advance.
 
 Ops are processed **in array order, independently per `machine_id`** (a
 batch MAY legitimately contain ops from more than one machine only when a
@@ -493,9 +604,14 @@ is `GET /ops?since=0` drained to completion (`lore sync bootstrap`,
 No authentication required (this is a liveness/monitoring endpoint; it
 MUST work for a caller with no account at all).
 
-- **200**: `{"ok": true, "version": "...", "hub_seq_max": 90712}` —
+- **200**: `{"ok": true, "version": "...", "hub_seq_max": 90712,
+  "limits": {"max_ops_per_push": 1000, "max_body_bytes": 4194304}}` —
   `hub_seq_max` here is the server's global maximum across all accounts,
-  for operational visibility, not scoped to any one caller.
+  for operational visibility, not scoped to any one caller. `limits` is
+  OPTIONAL and carries the caps §6.2's 400 and §6.6's 413 enforce, so a
+  client can size its batches from them instead of discovering them by
+  being refused; a client that does not see it falls back to its own
+  conservative defaults (`lore`: the same two numbers).
 
 ### 6.7 `GET /whoami`
 
@@ -534,6 +650,24 @@ A peer:
   mode), behind its own `tailscale serve`, with the same public-listener
   refusal rule. Bearer-token auth is not part of Transport B — a peer has
   no account/token model, only the tailnet's own identity.
+- **States what that boundary is.** An identity header is trusted on the
+  loopback listener because `tailscale serve` is supposed to be the only
+  thing that can reach it, and nothing enforces that: any process running
+  as the same user can connect to loopback and write the header itself,
+  and can read the allow-list out of the environment to pick a login that
+  is on it. **Loopback trust is same-user trust.** That is a defensible
+  boundary — a process running as that user can read the store directly
+  and skip the listener — but it is not the boundary "authenticated"
+  suggests, so a peer MUST NOT imply a stronger one: its startup output
+  and its `GET /whoami` say which mode is in force and what it rests on.
+- MAY additionally require a shared secret as `Authorization: Bearer
+  <secret>` on every authenticated request, in addition to the identity
+  header (`lore`: `LORE_SYNC_PEER_SECRET`, set on the listener and on
+  every machine that pulls from it). This is the one credential here that
+  a co-resident process does not already have. It is orthogonal to §5:
+  the secret says who may READ this machine's log, the `mac` says whose
+  ops may be APPLIED, and neither substitutes for the other. Unset is the
+  default and changes nothing on the wire.
 - Signs and verifies ops exactly as §2–§5 describe, with no
   transport-specific variation. This is the concrete meaning of "the
   wire format must be identical for both transports": an op pulled from
@@ -553,7 +687,11 @@ A peer:
   against an enum (§3, §6.2) — forward compatibility for new classes
   requires this.
 - Endpoint paths, methods, and the JSON field names/types fixed in §6–§7.
-- The status codes and `error` strings fixed in §6.1–§6.5.
+- The status codes and `error` strings fixed in §6.1–§6.5: a server MUST
+  NOT repurpose or omit one this document defines. It MAY answer a
+  condition this document does not describe with an additional code and
+  `error` string, which a client handles by status class until the
+  contract takes it up.
 - `op_id` as the sole idempotency key, and the duplicate semantics of §9.
 - `machine_seq` gap/conflict detection blocking only the affected
   `machine_id`'s remaining ops in a batch (§6.2).
@@ -593,13 +731,16 @@ A peer:
 `op_id` is the single idempotency key for the whole system, end to end:
 
 - **At the hub**, a push carrying an `op_id` already stored for the
-  account is `duplicate`, not re-stored, not re-counted as `accepted`.
-  The hub compares only `op_id` — it does not compare `payload` bytes
-  (§8: it does not interpret ops), so a second push under an
-  already-used `op_id` is *always* treated as a duplicate of whatever was
-  stored first, even in the practically-impossible case its payload now
-  differs. Preventing that case is the sender's responsibility (uuid4
-  generated fresh per logical mutation, never reused).
+  account **by the same `machine_id` at the same `machine_seq`** is
+  `duplicate`: not re-stored, not re-counted as `accepted`. The hub
+  compares that triple and never `payload` bytes (§8: it does not
+  interpret ops), so a retry is always a duplicate whatever the payload
+  now says. The same `op_id` arriving under a *different* machine or
+  `machine_seq` is not a duplicate but 409 `op_id_conflict` (§6.2): the
+  practically-impossible colliding uuid4 is refused rather than swallowed,
+  because swallowing it would silently pick one of two different ops.
+  Preventing the case remains the sender's responsibility (uuid4 generated
+  fresh per logical mutation, never reused).
 - **At a receiver applying a pulled op**, `op_id` already applied locally
   is a no-op at the store layer, before any per-class merge rule in
   `sync.md` even runs. Every per-class verb is additionally idempotent at

@@ -4,6 +4,7 @@ incremental (index_sessions) and streaming (index_live) indexers, FTS5
 search, and the `lore search`/`lore session`/`lore index` CLI commands.
 """
 
+import contextlib
 import json
 import os
 import re
@@ -17,6 +18,8 @@ from .config import (
     PROJECTS_DIR,
     ROOT,
     one_line,
+    private_dir,
+    private_file,
     project_slug,
     read_hook_input,
     stage_disabled,
@@ -46,9 +49,60 @@ __all__ = [
     'cmd_index',
 ]
 
+def _migrate_sync_ops_slot(conn: sqlite3.Connection) -> None:
+    """Rebuild a pre-0.57 `sync_ops` whose `UNIQUE(machine_id, machine_seq)`
+    is a TABLE constraint, so the slot can become the partial index
+    `sync_ops_slot` instead (see the comment at its creation for why).
+
+    SQLite cannot drop a table-level constraint, so this is the standard
+    twelve-step rebuild, in one transaction: new table, copy, drop, rename.
+    `seq INTEGER PRIMARY KEY` is a rowid alias and `SELECT *` carries it
+    across unchanged -- it is the paging cursor a peer hands out, so a
+    renumber here would make every puller re-drain or, worse, skip.
+
+    Detected from the schema text rather than from a version counter: LORE has
+    never had one, and `user_version` is a single integer on a file DOXA's
+    daemon opens too. A store that has already been rebuilt has no UNIQUE in
+    its `sync_ops` DDL and this is a single sqlite_master read.
+
+    Never raises. A migration that cannot run leaves the old shape standing
+    and every hook keeps working -- degraded to the pre-0.57 behaviour for
+    unverified ops, which is the house rule for the hook path -- and the next
+    connection tries again.
+    """
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sync_ops'"
+        ).fetchone()
+        if not row or not row[0] or "UNIQUE(machine_id, machine_seq)" not in row[0]:
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "CREATE TABLE sync_ops_rebuilt("
+            "seq INTEGER PRIMARY KEY, op_id TEXT NOT NULL UNIQUE, machine_id TEXT NOT NULL,"
+            " machine_seq INTEGER NOT NULL, lamport INTEGER NOT NULL, class TEXT NOT NULL,"
+            " op TEXT NOT NULL, project_key TEXT, payload TEXT NOT NULL, mac TEXT,"
+            " created TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute("INSERT INTO sync_ops_rebuilt SELECT * FROM sync_ops")
+        conn.execute("DROP TABLE sync_ops")
+        conn.execute("ALTER TABLE sync_ops_rebuilt RENAME TO sync_ops")
+        conn.commit()
+    except sqlite3.Error:
+        with contextlib.suppress(sqlite3.Error):
+            conn.rollback()
+
+
 def db_connect() -> sqlite3.Connection:
-    ROOT.mkdir(parents=True, exist_ok=True)
+    # PRIVATE, not merely present. state.db holds every indexed transcript,
+    # every belief and every op this machine has ever seen; under the ordinary
+    # umask 022 it was 0644 and ROOT was 0755, so any other user on the box
+    # could read all of it. Applied on every connect rather than once at
+    # creation, so a store that predates this is fixed the first time
+    # anything opens it.
+    private_dir(ROOT)
     conn = sqlite3.connect(ROOT / "state.db")
+    private_file(ROOT / "state.db")
     conn.execute("PRAGMA journal_mode=WAL")
     # 30s, not 5: WAL gives concurrent readers but exactly one writer, and the
     # writers here are whole agent runs — a backfill worker, four Claude Code
@@ -244,11 +298,29 @@ def db_connect() -> sqlite3.Connection:
         "seq INTEGER PRIMARY KEY, op_id TEXT NOT NULL UNIQUE, machine_id TEXT NOT NULL,"
         " machine_seq INTEGER NOT NULL, lamport INTEGER NOT NULL, class TEXT NOT NULL,"
         " op TEXT NOT NULL, project_key TEXT, payload TEXT NOT NULL, mac TEXT,"
-        " created TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0,"
-        " UNIQUE(machine_id, machine_seq))"
+        " created TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS sync_ops_order ON sync_ops(lamport, machine_id, machine_seq)"
+    )
+    # THE SLOT IS PARTIAL, and that is a containment property rather than an
+    # optimisation. `UNIQUE(machine_id, machine_seq)` used to be a table
+    # constraint over EVERY row, so an op whose MAC did not verify -- anyone's
+    # op, since a MAC is what makes an op somebody's -- claimed the slot the
+    # real author's op needed and the genuine op that arrived afterwards read
+    # as a `duplicate` and was dropped. Excluding `applied = 2`
+    # (sync_apply.APPLIED_UNVERIFIED) from the index keeps the constraint
+    # exactly where docs/sync-protocol.md S6.2 wants it -- on ops this store
+    # ACCEPTED -- while letting a staged, unapplied op sit beside the verified
+    # op for the same slot. The unverified row stays in `sync_ops` rather than
+    # moving to a table of its own so that a machine with no key still RELAYS
+    # it (docs/sync-protocol.md S7, `sync_peer.ops_page` serves this table):
+    # a courier that dropped mail it could not read would strand a legitimate
+    # op on the one machine that happened not to hold the key.
+    _migrate_sync_ops_slot(conn)
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS sync_ops_slot ON"
+        " sync_ops(machine_id, machine_seq) WHERE applied != 2"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sync_machine("

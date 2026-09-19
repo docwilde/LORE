@@ -1263,5 +1263,124 @@ class ServedOverRealHTTP(unittest.TestCase):
         caught.exception.close()
 
 
+class PeerListenerBoundary(unittest.TestCase):
+    """What the listener actually protects, and what it only appears to.
+
+    Its banner and `whoami` claimed "authenticated" for a boundary that is
+    same-user trust: any process running as this user can connect to loopback
+    and write `Tailscale-User-Login` itself, and can read
+    `LORE_SYNC_PEER_ALLOW` out of the environment to pick a login that is on
+    it. These tests pin the two things that were done about it -- saying so,
+    and offering a credential a co-resident process does not already have.
+    """
+
+    def setUp(self):
+        self.root, self.mod = _machine("boundary", MACHINE_A)
+        for var in ("LORE_SYNC_PEER_SECRET", "LORE_SYNC_PEER_ALLOW",
+                    "LORE_SYNC_PEER_AUTH"):
+            self.addCleanup(os.environ.pop, var, None)
+        os.environ.pop("LORE_SYNC_PEER_SECRET", None)
+
+    def _ops(self, mod, **headers):
+        peer = mod.PeerOps(machine_id=MACHINE_A, loopback=True)
+        return peer.handle("GET", "/v1/ops", {"since": ["0"]}, headers)
+
+    def test_a_shared_secret_refuses_a_forged_identity_header(self):
+        os.environ["LORE_SYNC_PEER_SECRET"] = "a-string-only-these-two-machines-hold"
+        status, body = self._ops(
+            self.mod, **{"Tailscale-User-Login": "attacker@evil.example"})
+        self.assertEqual(status, 401)
+        self.assertEqual(body["error"], "unauthenticated")
+
+    def test_a_shared_secret_admits_the_caller_that_holds_it(self):
+        secret = "a-string-only-these-two-machines-hold"
+        os.environ["LORE_SYNC_PEER_SECRET"] = secret
+        status, body = self._ops(
+            self.mod, **{"Tailscale-User-Login": "me@example.com",
+                         "Authorization": f"Bearer {secret}"})
+        self.assertEqual(status, 200)
+        self.assertIn("ops", body)
+
+    def test_a_wrong_secret_is_refused_even_with_a_listed_login(self):
+        os.environ["LORE_SYNC_PEER_SECRET"] = "the-real-one"
+        os.environ["LORE_SYNC_PEER_ALLOW"] = "me@example.com"
+        status, _ = self._ops(
+            self.mod, **{"Tailscale-User-Login": "me@example.com",
+                         "Authorization": "Bearer not-the-real-one"})
+        self.assertEqual(status, 401)
+
+    def test_the_peer_client_presents_the_secret_and_nothing_else(self):
+        os.environ["LORE_SYNC_PEER_SECRET"] = "shared"
+        client = self.mod.PeerClient("http://127.0.0.1:1")
+        self.assertEqual(client._auth_headers(), {"Authorization": "Bearer shared"})
+        self.assertNotIn("shared", repr(client),
+                         "a secret must never reach a repr or a traceback")
+
+    def test_with_no_secret_configured_the_wire_is_unchanged(self):
+        client = self.mod.PeerClient("http://127.0.0.1:1")
+        self.assertEqual(client._auth_headers(), {})
+
+    def test_whoami_reports_the_real_mode_and_names_the_trust_boundary(self):
+        """It answered a hardcoded `"auth": "tailscale"` whatever the mode
+        was, and said nothing at all about what loopback trust is worth."""
+        peer = self.mod.PeerOps(machine_id=MACHINE_A, loopback=True, auth="none")
+        status, body = peer.handle("GET", "/v1/whoami", {}, {})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["auth"], "none")
+        self.assertIn("same-user", body["trust"])
+        self.assertIs(body["shared_secret"], False)
+
+    def test_the_banner_says_the_allow_list_is_unenforced_in_none_mode(self):
+        """`auth=none` returns before the allow-list is ever consulted, and
+        the banner printed the list as though it were active."""
+        peer = self.mod.PeerOps(machine_id=MACHINE_A, loopback=True, auth="none",
+                                allow={"me@example.com"})
+        banner = "\n".join(self.mod.serve_banner(peer, "127.0.0.1", 8765))
+        self.assertIn("allow=me@example.com", banner)
+        self.assertIn("NOT enforced", banner)
+
+    def test_the_banner_names_same_user_trust_on_a_bare_loopback_listener(self):
+        peer = self.mod.PeerOps(machine_id=MACHINE_A, loopback=True,
+                                auth="tailscale", allow=set())
+        self.assertIn("same-user",
+                      "\n".join(self.mod.serve_banner(peer, "127.0.0.1", 8765)))
+
+    def test_the_banner_never_prints_the_secret_itself(self):
+        peer = self.mod.PeerOps(machine_id=MACHINE_A, loopback=True,
+                                auth="tailscale", allow=set(),
+                                secret="a-string-only-these-two-machines-hold")
+        banner = "\n".join(self.mod.serve_banner(peer, "127.0.0.1", 8765))
+        self.assertIn("shared secret required", banner)
+        self.assertNotIn("a-string-only-these-two-machines-hold", banner)
+
+
+class PeerFramingErrors(unittest.TestCase):
+    def setUp(self):
+        ok, why = _sockets_available()
+        if not ok:
+            self.skipTest(why)
+        self.root, self.mod = _machine("framing", MACHINE_A)
+
+    def test_a_bad_content_length_is_a_400_not_a_dropped_connection(self):
+        """`int(Content-Length)` sat OUTSIDE the try that wraps the handler,
+        so a non-numeric value raised out of the request thread: the caller
+        got a dropped connection and the operator got a traceback on stderr,
+        for a malformed request the contract already has a `400` for."""
+        import http.client
+
+        with serving(self.mod) as url:
+            port = int(url.rsplit(":", 1)[1])
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.putrequest("POST", "/v1/ops")
+            conn.putheader("Content-Length", "not-a-number")
+            conn.endheaders()
+            response = conn.getresponse()
+            status, body = response.status, json.loads(response.read())
+            conn.close()
+
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "bad_request")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

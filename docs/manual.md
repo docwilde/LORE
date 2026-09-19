@@ -14,8 +14,8 @@ decisions were made, see [`user-model-channel-separation.md`](user-model-channel
 | `/lore:remember <fact>` | Stores a fact now — picks the scope, condenses to one line, writes through the cap. |
 | `/lore:context` | The exact entries in context right now, verbatim, as one table per scope. |
 | `/lore:filemap [path "purpose"]` | No args prints the file map; args add or update a row. |
-| `/lore:pending` | Lists staged proposals grouped by kind, each with its origin session and a keep/reject/merge judgment. Decides nothing. Clusters piles over ~50. |
-| `/lore:approve <id\|all>` | Applies proposals: memory writes cap-enforced, skill updates diffed before overwriting, retires moved to `skills-retired/`. |
+| `/lore:pending` | Lists staged proposals grouped by kind, each with its origin session and a keep/reject/merge judgment — a staged skill shows its body, truncated, not only its description. Decides nothing. Clusters piles over ~50. |
+| `/lore:approve <id\|all>` | Applies proposals: memory writes cap-enforced, every skill install diffed first (a first install against nothing), retires moved to `skills-retired/`. A proposal whose file changed since it was listed is refused and re-shown — approval is consent to a text, not to an id. |
 | `/lore:reject <id\|all>` | Archives proposals unapplied, verdict recorded in `pending/archive/`. |
 | `/lore:review` | Reviews the current session now instead of waiting for session end. Runs as a TUI-visible background task. `--dry-run` prints the prompt and spends nothing. |
 | `/lore:backfill [full\|project\|<path>]` | Pages a *whole* transcript through the deriver window by window, not just the newest window. Empty or `full` takes the current session, `project` every transcript of this project, or name a path. Reports the window count before spending. |
@@ -100,7 +100,7 @@ Four rules keep the loop honest:
 - **Silence is not an outcome.** A run counts as success or failure only when the digest shows the result — the user confirmed it, tests passed, an error traced. Abandonment records nothing, so the track record never fills with noise.
 - **Drift ≠ rot.** Every outcome carries the repo HEAD it happened at. When a skill starts failing, a HEAD that moved between the successes and the failures says *the codebase changed*, not *the recipe is wrong* — and the gate reads that trail before it proposes anything.
 
-`/lore:status` prints each learned skill with its record. Approve an `update` and the new body is diffed before overwriting; approve a `retire` and it moves to `skills-retired/` rather than vanishing.
+`/lore:status` prints each learned skill with its record. Every install is diffed before it is written — an `update` against the installed file, a first install against nothing, because that is the case where the whole file is about to become instructions a future session runs. Approve a `retire` and it moves to `skills-retired/` rather than vanishing.
 
 ## The belief gate sits on read, not on write
 
@@ -222,9 +222,9 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_SYNC_URL` | unset | hub base URL; unset means sync is off entirely |
 | `LORE_SYNC_TOKEN` | unset | this machine's bearer token — written by `lore sync login` |
 | `LORE_SYNC_AUTH` | `token` | `token` (bearer) or `tailscale` (identity header injected by `tailscale serve`) |
-| `LORE_SYNC_HMAC_KEY` | unset | shared integrity key, set on every machine of one account, never sent |
+| `LORE_SYNC_HMAC_KEY` | unset | shared integrity key, set on every machine of one account, never sent. Stored in `settings.json`, which lore keeps at `0600` |
 | `LORE_MACHINE_ID` | persisted uuid4 | this machine's identity in the op log; honoured only at first creation. The hostname is a label, not the id. |
-| `LORE_SYNC_CLASSES` | `memory,filemap,beliefs,pending,skills,sessions` | which classes travel; `transcripts`, `tabsets`, `worktrees`, `skill_usage` are opt-in |
+| `LORE_SYNC_CLASSES` | `memory,filemap,beliefs,pending,skills,sessions` | which classes are **sent and applied** — a class left out is neither appended here nor applied from a peer; `transcripts`, `tabsets`, `worktrees`, `skill_usage` are opt-in |
 | `LORE_SYNC_TIMEOUT` | 15 | seconds per hub call |
 | `LORE_SYNC_PULL_AT_START` | `1` | detached pull at SessionStart; `0` turns it off |
 | `LORE_SYNC_PULL_SECS` | 120 | floor between those pulls, so a resume/clear/compact storm does not fan out |
@@ -232,7 +232,8 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_SYNC_PEER` | unset | Transport B: a comma list of tailnet nodes to pull from directly. A bare name (`workstation`) means `http://workstation:<port>`; a full URL is used as written, which is the `tailscale serve` form |
 | `LORE_SYNC_PEER_PORT` | 8765 | port `lore sync serve` binds and a bare peer name dials |
 | `LORE_SYNC_PEER_AUTH` | `tailscale` | how `lore sync serve` authenticates: the Tailscale identity header, or `none` — which is required, and must be typed, before it will bind anything but loopback |
-| `LORE_SYNC_PEER_ALLOW` | unset | comma list of tailnet logins `lore sync serve` will answer; unset means any identity `tailscale serve` vouched for |
+| `LORE_SYNC_PEER_ALLOW` | unset | comma list of tailnet logins `lore sync serve` will answer; unset means any identity `tailscale serve` vouched for. Not enforced at all under `LORE_SYNC_PEER_AUTH=none`, and the banner says so |
+| `LORE_SYNC_PEER_SECRET` | unset | shared string required as `Authorization: Bearer <secret>` on every authenticated request, in addition to the identity header. Set it on the listener and on every machine that pulls from it. Never printed or logged |
 | `LORE_SYNC_PEER_LOG` | unset | `1` logs one line per served request to stderr |
 | `LORE_DISABLE_SYNC` | unset | stage kill switch: no op is appended and nothing syncs |
 | `LORE_SKIP` | unset | any value no-ops every hook — the master off-switch above all stage switches |
@@ -277,6 +278,8 @@ There is no push to a peer — both directions happen as each side pulls, so run
 The wire is the same wire: an op pulled from a peer and an op pulled from the hub are indistinguishable, they sort into the same `(lamport, machine_id, machine_seq)` order, and the same MAC rule applies to both. **A peer is not trusted because it is on the tailnet** — an op whose MAC does not verify is staged, whichever machine handed it over.
 
 Serving is opt-in and never on by default: nothing but `lore sync serve` binds a socket, it binds `127.0.0.1` unless `--bind` says otherwise, and a Tailscale identity header is trusted only on the loopback listener `tailscale serve` forwards to. A non-loopback bind therefore has nothing it could authenticate, and refuses to start until you say `LORE_SYNC_PEER_AUTH=none` in so many words.
+
+What that trust is worth, plainly: the identity header is trusted on loopback because `tailscale serve` is *supposed* to be the only thing that can reach it, and nothing enforces that. Anything running as you can connect to `127.0.0.1` and write the header itself, and can read `LORE_SYNC_PEER_ALLOW` out of the environment to pick a login that is on it — **loopback trust is same-user trust**. The startup banner and `GET /v1/whoami` say so rather than letting "auth: tailscale" imply more. For a credential a co-resident process does not already have, set `LORE_SYNC_PEER_SECRET` to a random string on the listener and on every machine that pulls from it; it is required on every request alongside the identity header, and it is never printed. It does not replace the MAC: the secret says who may *read* this machine's log, the MAC says whose ops may be *applied*.
 
 What Transport B does not do: a cloud sandbox is not a tailnet node and cannot pull from anything; a machine that is off holds its ops until it is on again; and a fresh machine has to be told which peer to start from (`lore sync bootstrap --peer <name>`). Those are the reasons the hub exists, not reasons not to use a peer.
 
