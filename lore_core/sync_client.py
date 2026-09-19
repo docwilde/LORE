@@ -49,6 +49,7 @@ import it without a cycle, and a test can drive it against a stub HTTP server
 with no LORE_ROOT in existence at all.
 """
 
+import http.client
 import json
 import os
 import urllib.error
@@ -59,6 +60,7 @@ import urllib.request
 __all__ = [
     'DEFAULT_TIMEOUT',
     'DEFAULT_PAGE',
+    'MAX_RESPONSE_BYTES',
     'SyncError',
     'SyncNotConfigured',
     'SyncUnreachable',
@@ -82,6 +84,16 @@ DEFAULT_TIMEOUT = 15.0
 # Ops per page. The server MAY clamp this down silently (S6.3) and the client
 # must not care -- it keeps paging until `next` is null either way.
 DEFAULT_PAGE = 500
+
+# The most of an answer this client will hold in memory, per call. There was
+# no cap: `response.read()` with no argument buffers whatever the other end
+# sends, and the SessionStart pull runs detached and unattended, so a hub (or
+# anything that answered on its URL) could hand an idle laptop a body of any
+# size and have it read, decoded and JSON-parsed before one byte of it was
+# verified. 32 MiB is far above any real page -- a 500-op page of memory,
+# filemap and belief ops is tens of kilobytes -- and far below the size at
+# which "the machine stopped" is the symptom.
+MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
 
 class SyncError(Exception):
@@ -157,7 +169,46 @@ class SyncConflict(SyncHTTPError):
 
 class SyncProtocolError(SyncHTTPError):
     """The answer was not what S6 says it is: an unexpected status, a body
-    that is not JSON, or JSON that is not an object."""
+    that is not JSON, JSON that is not an object, a body past
+    MAX_RESPONSE_BYTES, or a redirect (S6 has no redirects)."""
+
+
+class _NoCrossHostRedirect(urllib.request.HTTPRedirectHandler):
+    """The redirect policy for a client that carries a bearer token.
+
+    `urllib` follows a redirect by rebuilding the request for the new URL and
+    carrying the original headers with it -- `Authorization` included, and to
+    whatever host the `Location` names. So any server on LORE_SYNC_URL, or
+    anything that could answer in its place, could collect this machine's hub
+    token with a single `302`, and the pull would return normally with nothing
+    said.
+
+    A cross-origin redirect is therefore refused outright, and a same-origin
+    one is followed WITHOUT the credential. S6 describes no redirects at all;
+    a hub that issues one is misconfigured, and the message says so rather
+    than papering over it. (A same-origin redirect to something that does need
+    the credential comes back 401 -- which names the misconfiguration too,
+    from the other side.)
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        def origin(url):
+            parts = urllib.parse.urlsplit(url)
+            return (parts.scheme.lower(), parts.hostname or "",
+                    parts.port or (443 if parts.scheme.lower() == "https" else 80))
+
+        if origin(req.full_url) != origin(newurl):
+            raise SyncProtocolError(
+                f"{req.full_url} answered {code} redirecting to a different"
+                f" host ({newurl}) — docs/sync-protocol.md S6 has no redirects,"
+                " and following one would hand this machine's credential to"
+                " whatever answered there. Point LORE_SYNC_URL at the hub"
+                " itself.",
+                status=code)
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            new.remove_header("Authorization")
+        return new
 
 
 def sync_timeout() -> float:
@@ -328,18 +379,55 @@ class HubClient:
         request = urllib.request.Request(url, data=data, headers=headers,
                                          method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                raw = response.read()
+            with self._opener().open(request, timeout=self.timeout) as response:
+                raw = self._read_capped(response, url)
                 status = response.status
         except urllib.error.HTTPError as exc:
             raise self._http_error(exc, url) from exc
         except urllib.error.URLError as exc:
+            # A handler that raised inside the opener arrives wrapped: the
+            # redirect refusal above is this client's own typed error and must
+            # reach the caller as itself, not as "unreachable".
+            if isinstance(exc.reason, SyncError):
+                raise exc.reason from exc
             raise SyncUnreachable(f"{url} is unreachable: {exc.reason}",
                                   url=url, cause=exc) from exc
         except (TimeoutError, OSError) as exc:
+            # BEFORE the HTTPException clause, deliberately:
+            # `http.client.RemoteDisconnected` is both, and a peer that hung up
+            # mid-call is an outage to retry, not a server answering something
+            # that is not HTTP.
             raise SyncUnreachable(f"{url} is unreachable: {exc}",
                                   url=url, cause=exc) from exc
+        except http.client.HTTPException as exc:
+            # A malformed status line, a truncated chunked body, too many
+            # headers: none of these is an OSError, so they used to escape the
+            # typed-error contract entirely and reach a hook as a traceback.
+            raise SyncProtocolError(
+                f"{url} answered something that is not HTTP"
+                f" ({exc.__class__.__name__}: {exc})", status=0) from exc
         return self._decode(raw, status, url)
+
+    def _opener(self) -> urllib.request.OpenerDirector:
+        """This client's own opener, so the redirect policy is this client's
+        own. `urllib.request.urlopen` uses a process-global opener whose
+        redirect handler carries `Authorization` to wherever a `Location`
+        points -- see `_NoCrossHostRedirect`."""
+        return urllib.request.build_opener(_NoCrossHostRedirect)
+
+    def _read_capped(self, stream: object, url: str) -> bytes:
+        """At most MAX_RESPONSE_BYTES, and a typed error past it.
+
+        Reads ONE byte more than the cap so "exactly at the cap" and "longer
+        than the cap" are distinguishable without reading the rest of it.
+        """
+        raw = stream.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise SyncProtocolError(
+                f"{url} answered more than {MAX_RESPONSE_BYTES} bytes —"
+                " refusing to buffer it. A page of ops is kilobytes;"
+                " something on that URL is not a hub.", status=0)
+        return raw
 
     def _decode(self, raw: bytes, status: int, url: str) -> dict:
         try:
@@ -363,8 +451,11 @@ class HubClient:
         with this client's own explanation appended where the status means
         something the server cannot know (403's machine binding)."""
         try:
-            body = json.loads(exc.read().decode("utf-8"))
+            body = json.loads(
+                exc.read(MAX_RESPONSE_BYTES + 1)[:MAX_RESPONSE_BYTES].decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            # Capped like the success path: an error body is a body too, and
+            # `{"error": ..., "message": ...}` is a few hundred bytes.
             body = {}
         if not isinstance(body, dict):
             body = {}

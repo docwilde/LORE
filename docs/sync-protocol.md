@@ -351,6 +351,22 @@ possibly with additional fields, noted per status code below. `error` is
 normative and MUST be one of the exact strings given; `message` is for a
 human and a server MAY phrase it however it likes.
 
+**A server MUST NOT answer any of these endpoints with a redirect**, and a
+client MUST NOT follow one to another origin. `urllib`-shaped clients
+re-send the original headers to whatever `Location` names, so following a
+cross-origin redirect hands the machine's bearer token to whoever issued
+it; a client refuses it and reports the hub as misconfigured. A
+same-origin redirect, if a client follows one at all, MUST be followed
+without the credential.
+
+**A client MUST bound what it reads.** The pull that runs at session
+start is detached and unattended, so an answer of unbounded size is read,
+decoded and parsed before a single byte of it has been verified. A client
+caps the whole response and refuses past it (`lore`: 32 MiB), and caps
+each op's `payload` independently before that op can be applied OR staged
+(`lore`: 1 MiB) — staging writes the op's own bytes to disk, so the cap
+that matters is the one in front of both.
+
 ### 6.1 Authentication
 
 `Authorization: Bearer <token>` (bearer mode) or the Tailscale identity

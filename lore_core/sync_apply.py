@@ -110,6 +110,7 @@ __all__ = [
     'APPLIED_UNKNOWN',
     'APPLIED_FAILED',
     'MAX_SIGNED_64',
+    'MAX_OP_BYTES',
     'InvalidOp',
     'canonical_key',
     'canonical_order',
@@ -152,6 +153,16 @@ APPLIED_FAILED = 4      # verified and known, but applying it was refused or rai
 # with). Rejected at validation, where a wire value that cannot be stored
 # belongs, rather than clamped: a clamp would silently reorder the log.
 MAX_SIGNED_64 = 2 ** 63
+
+# The most one op's payload may weigh. A cap belongs HERE and not only in the
+# transport, because "before staging" is the line that matters: an unverified
+# op is written whole into `pending/` so a human can review the very bytes
+# that arrived, and an unattended SessionStart pull therefore turned an
+# oversized payload into a file on disk that nothing ever cleans up. 1 MiB is
+# far above every class that has a writer -- a memory entry is capped at
+# thousands of characters and a skill is a SKILL.md -- and far below the size
+# at which a pull is an attack.
+MAX_OP_BYTES = 1024 * 1024
 
 
 class InvalidOp(ValueError):
@@ -1275,6 +1286,12 @@ def _envelope_error(op: object) -> "str | None":
     if not isinstance(op.get("payload"), dict):
         return (f"payload is {type(op.get('payload')).__name__},"
                 " not an object (docs/sync-protocol.md S3)")
+    try:
+        size = len(json.dumps(op["payload"], sort_keys=True).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        return f"payload does not encode as JSON ({exc})"
+    if size > MAX_OP_BYTES:
+        return f"payload is {size} bytes, over the {MAX_OP_BYTES}-byte cap"
     return None
 
 

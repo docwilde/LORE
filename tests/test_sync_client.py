@@ -779,5 +779,159 @@ class BootstrapContract(unittest.TestCase):
             os.environ.update(env)
 
 
+# ---------------------------------------------------------------------------
+# The transport under an answer that is not a hub's
+# ---------------------------------------------------------------------------
+
+class _RawServer:
+    """One handler class, one ephemeral port, started and stopped by the
+    caller. Smaller than `_StubHub` on purpose: these tests are about what the
+    transport does with an answer, so the answer has to be arbitrary."""
+
+    def __init__(self, handler):
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def stop(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class TransportRefusals(unittest.TestCase):
+    """`import` inside the method, the pattern TransportContract already uses:
+    `lore_core` is re-executed per `_exec_lore`, so a module-level binding
+    would be whichever instance happened to load first."""
+
+    def _serve(self, handler) -> str:
+        server = _RawServer(handler)
+        self.addCleanup(server.stop)
+        return server.url
+
+    def test_a_redirect_to_another_host_never_carries_the_token(self):
+        """`urlopen` rebuilds a redirected request with the original headers
+        and sends them wherever `Location` points, so any server on
+        LORE_SYNC_URL could collect this machine's bearer token with one 302
+        and the pull would return normally."""
+        seen = {}
+
+        class Collector(BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen["auth"] = self.headers.get("Authorization")
+                body = b'{"ops": [], "next": null}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        import lore_core.sync_client as sc
+
+        elsewhere = self._serve(Collector)
+
+        class Redirector(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", elsewhere + "/collect")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        hub = self._serve(Redirector)
+        client = sc.HubClient(hub, token="SECRET-TOKEN-0123456789",
+                                       auth="token", timeout=5)
+
+        with self.assertRaises(sc.SyncProtocolError) as caught:
+            client.pull(since=0, limit=10)
+
+        self.assertIn("different host", str(caught.exception))
+        self.assertIsNone(seen.get("auth"),
+                          "the credential must not reach the redirect target")
+
+    def test_an_answer_larger_than_the_cap_is_refused_not_buffered(self):
+        """`response.read()` took no argument, and the SessionStart pull is
+        detached and unattended: whatever answered on the hub's URL could hand
+        an idle machine a body of any size, read and parsed before one byte of
+        it was verified."""
+        import lore_core.sync_client as sc
+
+        oversize = sc.MAX_RESPONSE_BYTES + 4096
+
+        class Flood(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(oversize))
+                self.end_headers()
+                self.wfile.write(b"A" * oversize)
+
+            def log_message(self, *a):
+                pass
+
+        client = sc.HubClient(self._serve(Flood), token="t",
+                                       auth="token", timeout=30)
+        with self.assertRaises(sc.SyncProtocolError) as caught:
+            client.pull(since=0, limit=10)
+        self.assertIn("refusing to buffer", str(caught.exception))
+
+    def test_a_non_http_answer_is_a_typed_error_not_a_traceback(self):
+        """`http.client.HTTPException` is not an OSError, so a malformed
+        status line escaped the typed-error contract and reached a hook as a
+        raw traceback."""
+        import lore_core.sync_client as sc
+
+        class Garbage(BaseHTTPRequestHandler):
+            def handle_one_request(self):
+                self.rfile.readline()
+                self.wfile.write(b"this is not a status line\r\n\r\n")
+                self.close_connection = True
+
+            def log_message(self, *a):
+                pass
+
+        client = sc.HubClient(self._serve(Garbage), token="t",
+                              auth="token", timeout=5)
+        with self.assertRaises(sc.SyncProtocolError) as caught:
+            client.pull(since=0, limit=10)
+        self.assertIn("not HTTP", str(caught.exception))
+
+
+class OversizedOpNeverReachesDisk(unittest.TestCase):
+    """The cap that matters is the one before STAGING: an unverified op is
+    written whole into `pending/` so a human can review the bytes that
+    arrived, which turned an oversized payload into a file nothing cleans
+    up."""
+
+    def test_an_op_over_the_payload_cap_is_dropped_before_it_is_staged(self):
+        _root, node = _machine("opcap", str(uuid.uuid4()))
+        conn = node.db_connect()
+        try:
+            with quiet():
+                report = node.apply_ops(conn, [{
+                    "op_id": str(uuid.uuid4()), "machine_id": str(uuid.uuid4()),
+                    "machine_seq": 1, "lamport": 1, "class": "memory", "op": "add",
+                    "project_key": None,
+                    "payload": {"text": "A" * (8 * 1024 * 1024),
+                                "via": "direct", "writer": "terminal"},
+                    "mac": None, "created": "2026-01-01T00:00:00Z",
+                }])
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertEqual(report["unverified"], 0, "it must not be staged")
+        pdir = Path(node.ROOT) / "pending"
+        staged = list(pdir.glob("*.json")) if pdir.exists() else []
+        self.assertEqual(staged, [], "nothing that large may reach disk")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
