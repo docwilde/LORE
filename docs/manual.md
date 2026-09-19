@@ -232,7 +232,8 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_SYNC_PEER` | unset | Transport B: a comma list of tailnet nodes to pull from directly. A bare name (`workstation`) means `http://workstation:<port>`; a full URL is used as written, which is the `tailscale serve` form |
 | `LORE_SYNC_PEER_PORT` | 8765 | port `lore sync serve` binds and a bare peer name dials |
 | `LORE_SYNC_PEER_AUTH` | `tailscale` | how `lore sync serve` authenticates: the Tailscale identity header, or `none` — which is required, and must be typed, before it will bind anything but loopback |
-| `LORE_SYNC_PEER_ALLOW` | unset | comma list of tailnet logins `lore sync serve` will answer; unset means any identity `tailscale serve` vouched for |
+| `LORE_SYNC_PEER_ALLOW` | unset | comma list of tailnet logins `lore sync serve` will answer; unset means any identity `tailscale serve` vouched for. Not enforced at all under `LORE_SYNC_PEER_AUTH=none`, and the banner says so |
+| `LORE_SYNC_PEER_SECRET` | unset | shared string required as `Authorization: Bearer <secret>` on every authenticated request, in addition to the identity header. Set it on the listener and on every machine that pulls from it. Never printed or logged |
 | `LORE_SYNC_PEER_LOG` | unset | `1` logs one line per served request to stderr |
 | `LORE_DISABLE_SYNC` | unset | stage kill switch: no op is appended and nothing syncs |
 | `LORE_SKIP` | unset | any value no-ops every hook — the master off-switch above all stage switches |
@@ -277,6 +278,8 @@ There is no push to a peer — both directions happen as each side pulls, so run
 The wire is the same wire: an op pulled from a peer and an op pulled from the hub are indistinguishable, they sort into the same `(lamport, machine_id, machine_seq)` order, and the same MAC rule applies to both. **A peer is not trusted because it is on the tailnet** — an op whose MAC does not verify is staged, whichever machine handed it over.
 
 Serving is opt-in and never on by default: nothing but `lore sync serve` binds a socket, it binds `127.0.0.1` unless `--bind` says otherwise, and a Tailscale identity header is trusted only on the loopback listener `tailscale serve` forwards to. A non-loopback bind therefore has nothing it could authenticate, and refuses to start until you say `LORE_SYNC_PEER_AUTH=none` in so many words.
+
+What that trust is worth, plainly: the identity header is trusted on loopback because `tailscale serve` is *supposed* to be the only thing that can reach it, and nothing enforces that. Anything running as you can connect to `127.0.0.1` and write the header itself, and can read `LORE_SYNC_PEER_ALLOW` out of the environment to pick a login that is on it — **loopback trust is same-user trust**. The startup banner and `GET /v1/whoami` say so rather than letting "auth: tailscale" imply more. For a credential a co-resident process does not already have, set `LORE_SYNC_PEER_SECRET` to a random string on the listener and on every machine that pulls from it; it is required on every request alongside the identity header, and it is never printed. It does not replace the MAC: the secret says who may *read* this machine's log, the MAC says whose ops may be *applied*.
 
 What Transport B does not do: a cloud sandbox is not a tailnet node and cannot pull from anything; a machine that is off holds its ops until it is on again; and a fresh machine has to be told which peer to start from (`lore sync bootstrap --peer <name>`). Those are the reasons the hub exists, not reasons not to use a peer.
 

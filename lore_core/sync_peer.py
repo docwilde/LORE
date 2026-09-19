@@ -58,6 +58,29 @@ THE TWO SECURITY RULES, AND WHY THEY ARE NOT NEGOTIABLE.
      identity to check at all, and this module refuses to start there unless
      the operator has said `LORE_SYNC_PEER_AUTH=none` in so many words.
 
+WHAT "TRUSTED ON LOOPBACK" ACTUALLY MEANS, SAID PLAINLY. `Tailscale-User-
+Login` is trusted on the loopback listener because `tailscale serve` is
+supposed to be the only thing that can reach it. Nothing enforces that.
+Any process running as this user can connect to 127.0.0.1 and write that
+header itself, and `LORE_SYNC_PEER_ALLOW` is no barrier to it either: the
+allow-list is an environment variable the same user can read, so a local
+process can simply send a login that is on it. LOOPBACK TRUST IS SAME-USER
+TRUST. That is a defensible boundary -- a process running as you can read
+`~/.claude/lore/state.db` directly and skip the listener entirely -- but it
+is a different boundary from the one "authenticated" suggests, so this
+module says so in its banner and in `GET /v1/whoami` rather than letting an
+operator infer otherwise.
+
+`LORE_SYNC_PEER_SECRET` is the knob for an operator who wants more than
+that: a shared random string, set on the listener and on every machine that
+pulls from it, required as `Authorization: Bearer <secret>` on every
+authenticated request IN ADDITION to the identity header. It is read like
+`LORE_SYNC_HMAC_KEY` (environment only) and never printed, never logged and
+never put in a banner. It does not replace the MAC and cannot: it says who
+may READ this machine's log, while the MAC says whose ops may be APPLIED,
+and those are two different questions with two different answers. Unset is
+the default and leaves the posture exactly as it was.
+
 A NOTE ON `LORE_SYNC_PEER`. `workstation` (a bare MagicDNS name) means
 `http://workstation:8765` -- straight to the listener across the tailnet's own
 WireGuard encryption, which requires the peer to have bound something other
@@ -69,6 +92,7 @@ there because the design's own example spells a bare host name.
 """
 
 import contextlib
+import hmac
 import ipaddress
 import json
 import os
@@ -111,10 +135,12 @@ __all__ = [
     'peer_clients',
     'peer_allow',
     'peer_auth_mode',
+    'peer_secret',
     'is_loopback',
     'ops_page',
     'PeerOps',
     'peer_server',
+    'serve_banner',
     'cmd_sync_serve',
 ]
 
@@ -286,11 +312,27 @@ class PeerClient(HubClient):
         "the peer knows this tailnet login and will not serve it: it is not"
         " on that peer's LORE_SYNC_PEER_ALLOW list")
 
-    def __init__(self, base_url: str, *, timeout: float = DEFAULT_TIMEOUT):
+    def __init__(self, base_url: str, *, timeout: float = DEFAULT_TIMEOUT,
+                 secret: "str | None" = None):
         super().__init__(base_url, token=None, auth="tailscale", timeout=timeout)
+        # NOT `token`: that name means "this account's bearer credential" and
+        # a peer has no account. This is the shared string both ends of ONE
+        # peer pair hold, and it is presented alongside whatever identity
+        # header `tailscale serve` injected, never instead of it.
+        self.secret = peer_secret() if secret is None else (secret or None)
 
     def __repr__(self) -> str:
+        # No secret, ever: this repr lands in `lore doctor` and in tracebacks.
         return f"PeerClient({self.base_url!r})"
+
+    def _auth_headers(self) -> dict:
+        """S7 says Transport B has no account/token model, and it still does
+        not: this is the optional `LORE_SYNC_PEER_SECRET`, sent only when both
+        ends were given one. Unset on either side and the wire is byte for
+        byte what it was."""
+        if self.secret:
+            return {"Authorization": f"Bearer {self.secret}"}
+        return {}
 
     def push(self, machine_id: str, ops: "list[dict]") -> dict:
         """There is no push to a peer (S7, sync.md "Transport B"): both
@@ -323,6 +365,21 @@ def peer_auth_mode() -> str:
     """
     mode = os.environ.get("LORE_SYNC_PEER_AUTH", "").strip().lower()
     return mode if mode in ("tailscale", "none") else "tailscale"
+
+
+def peer_secret() -> "str | None":
+    """LORE_SYNC_PEER_SECRET, or None when unset.
+
+    Read the way `sync_oplog.hmac_key` reads its key -- from the environment,
+    at call time, with no file of its own and no default. Unset means the
+    listener is exactly as it was before this existed: identity headers only,
+    on loopback, which is same-user trust (see the module docstring).
+
+    Returned but NEVER printed. The one caller that shows anything about it
+    shows whether it is set, not what it is.
+    """
+    secret = os.environ.get("LORE_SYNC_PEER_SECRET", "").strip()
+    return secret or None
 
 
 def peer_allow() -> "set[str]":
@@ -407,11 +464,12 @@ class PeerOps:
 
     def __init__(self, *, machine_id: str, loopback: bool,
                  auth: "str | None" = None, allow: "set[str] | None" = None,
-                 version: str = ""):
+                 version: str = "", secret: "str | None" = None):
         self.machine_id = machine_id
         self.loopback = loopback
         self.auth = auth or peer_auth_mode()
         self.allow = peer_allow() if allow is None else allow
+        self.secret = peer_secret() if secret is None else (secret or None)
         self.version = version
         self.served = 0          # pages served, for the operator's line
 
@@ -431,8 +489,21 @@ class PeerOps:
             # S6.7. A peer MAY omit this; answering it costs four lines and
             # gives `lore sync status` and a human with curl a way to tell
             # WHICH machine is behind a name before trusting a drain from it.
-            return 200, {"account": "peer", "machine_id": self.machine_id,
-                         "auth": "tailscale"}
+            #
+            # `auth` reports what this listener is ACTUALLY doing, not the
+            # literal "tailscale" it used to answer whatever the mode was --
+            # and `trust` names the boundary rather than implying a stronger
+            # one: an identity header on loopback is only as good as "nothing
+            # else running as this user is hostile".
+            return 200, {
+                "account": "peer",
+                "machine_id": self.machine_id,
+                "auth": self.auth,
+                "trust": ("same-user (a loopback identity header is written by"
+                          " whoever can reach the socket)"
+                          if self.loopback else "public listener"),
+                "shared_secret": bool(self.secret),
+            }
         if path == "/v1/snapshot":
             # S6.5 reserves the path and fixes its answer. A peer could return
             # 404 instead, but 501 says "reserved, not yours to repurpose",
@@ -452,6 +523,21 @@ class PeerOps:
         return 404, {"error": "not_found", "message": path}
 
     def _authenticate(self, headers) -> "tuple[int, dict] | None":
+        # THE SHARED SECRET FIRST, when one is configured: it is the only
+        # credential here that a co-resident process cannot simply write for
+        # itself, so it gates every authenticated path regardless of what the
+        # identity header says. `GET /v1/health` stays open by contract
+        # (S6.6) -- it is what a caller with no credential at all uses to find
+        # out whether anything is listening -- and answers nothing but a
+        # version and a sequence number.
+        if self.secret:
+            presented = (headers.get("Authorization") or "").strip()
+            expected = f"Bearer {self.secret}"
+            if not hmac.compare_digest(presented, expected):
+                return 401, {"error": "unauthenticated",
+                             "message": "this peer requires a shared secret"
+                                        " (LORE_SYNC_PEER_SECRET) as a bearer"
+                                        " credential on every request"}
         login = (headers.get("Tailscale-User-Login") or "").strip()
         if login and not self.loopback:
             # S6.1, verbatim: an identity header "presented on the public
@@ -536,17 +622,28 @@ class _PeerHandler(BaseHTTPRequestHandler):
         self._serve("DELETE")
 
     def _serve(self, method: str):
-        parsed = urllib.parse.urlsplit(self.path)
-        # Drain any request body before answering: on HTTP/1.1 an undrained
-        # body desynchronises the next request on a kept-alive connection.
-        length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            with contextlib.suppress(OSError):
-                self.rfile.read(length)
+        # EVERY line of this that touches the request is inside the try. The
+        # framing used to be parsed above it, so `Content-Length: not-a-number`
+        # raised ValueError out of the handler thread and the caller got a
+        # dropped connection and a traceback on the peer's stderr instead of
+        # the `400` the contract has for exactly this.
         try:
+            parsed = urllib.parse.urlsplit(self.path)
+            # Drain any request body before answering: on HTTP/1.1 an undrained
+            # body desynchronises the next request on a kept-alive connection.
+            raw_length = (self.headers.get("Content-Length") or "0").strip()
+            if not raw_length.isdigit():
+                raise ValueError(f"Content-Length {raw_length!r} is not a length")
+            length = int(raw_length)
+            if length:
+                with contextlib.suppress(OSError):
+                    self.rfile.read(length)
             status, payload = self.server.peer.handle(
                 method, parsed.path, urllib.parse.parse_qs(parsed.query),
                 self.headers)
+        except ValueError as exc:
+            self.close_connection = True       # the framing is untrustworthy now
+            status, payload = 400, {"error": "bad_request", "message": str(exc)}
         except Exception as exc:               # a peer never dies of one request
             status, payload = 500, {"error": "internal_error",
                                     "message": f"{exc.__class__.__name__}: {exc}"}
@@ -560,7 +657,8 @@ class _PeerHandler(BaseHTTPRequestHandler):
 
 def peer_server(*, bind: str = "127.0.0.1", port: int = DEFAULT_PEER_PORT,
                 auth: "str | None" = None, allow: "set[str] | None" = None,
-                version: str = "") -> ThreadingHTTPServer:
+                version: str = "",
+                secret: "str | None" = None) -> ThreadingHTTPServer:
     """A configured listener that is NOT yet serving -- the caller starts it.
 
     Returned rather than run so a test can drive it on an ephemeral port in a
@@ -595,8 +693,51 @@ def peer_server(*, bind: str = "127.0.0.1", port: int = DEFAULT_PEER_PORT,
     server = ThreadingHTTPServer((bind, port), _PeerHandler)
     server.daemon_threads = True
     server.peer = PeerOps(machine_id=machine_id, loopback=loopback, auth=mode,
-                          allow=allow, version=version)
+                          allow=allow, version=version, secret=secret)
     return server
+
+
+def serve_banner(peer: "PeerOps", host: str, bound: int) -> "list[str]":
+    """The operator's lines, as data -- so what the listener claims about
+    itself can be asserted without starting `serve_forever`, which never
+    returns.
+
+    SAYING WHAT THE BOUNDARY IS is the whole reason this got its own
+    function's worth of attention. The banner used to print the allow-list as
+    though it were a barrier, and in `none` mode it printed it while nothing
+    consulted it at all. On loopback the identity header is written by whoever
+    can reach the socket, and the allow-list is an environment variable the
+    same user can read -- so an operator reading "auth: tailscale,
+    allow=me@example.com" was being told something stronger than what is true.
+    The secret is reported as PRESENT, never printed.
+    """
+    lines = [
+        f"sync serve: {ROOT}/state.db on http://{_show(host)}:{bound}/v1/ops",
+        f"  machine:  {peer.machine_id}",
+        f"  auth:     {peer.auth}"
+        + (f", allow={','.join(sorted(peer.allow))}" if peer.allow else "")
+        + (", shared secret required" if peer.secret else "")
+        + (" (loopback)" if peer.loopback else " (PUBLIC LISTENER)"),
+    ]
+    if peer.auth == "none":
+        lines.append(
+            "  trust:    NO identity is checked (LORE_SYNC_PEER_AUTH=none)"
+            + ("; the allow-list above is NOT enforced in this mode"
+               if peer.allow else ""))
+    elif peer.loopback and not peer.secret:
+        lines.append(
+            "  trust:    same-user — anything running as you can reach"
+            " 127.0.0.1 and write the identity header itself, and can read the"
+            " allow-list from the environment. Set LORE_SYNC_PEER_SECRET on"
+            " both ends for a credential a co-resident process does not"
+            " already have.")
+    if peer.loopback:
+        lines.append(f"  expose:   tailscale serve --bg {bound}")
+        lines.append("  pull it:  LORE_SYNC_PEER=https://<this-host>.<tailnet>.ts.net")
+    else:
+        lines.append(f"  pull it:  LORE_SYNC_PEER=<this-host>:{bound}")
+    lines.append("  pull side only — there is no push to a peer. Ctrl-C to stop.")
+    return lines
 
 
 def cmd_sync_serve(args) -> int:
@@ -627,17 +768,8 @@ def cmd_sync_serve(args) -> int:
 
     host, bound = server.server_address[0], server.server_address[1]
     peer = server.peer
-    print(f"sync serve: {ROOT}/state.db on http://{_show(host)}:{bound}/v1/ops")
-    print(f"  machine:  {peer.machine_id}")
-    print(f"  auth:     {peer.auth}"
-          + (f", allow={','.join(sorted(peer.allow))}" if peer.allow else "")
-          + (" (loopback)" if peer.loopback else " (PUBLIC LISTENER)"))
-    if peer.loopback:
-        print(f"  expose:   tailscale serve --bg {bound}")
-        print("  pull it:  LORE_SYNC_PEER=https://<this-host>.<tailnet>.ts.net")
-    else:
-        print(f"  pull it:  LORE_SYNC_PEER=<this-host>:{bound}")
-    print("  pull side only — there is no push to a peer. Ctrl-C to stop.")
+    for line in serve_banner(peer, host, bound):
+        print(line)
     # Explicit, because `serve_forever` never returns: stdout to anything but
     # a tty is block-buffered, so a peer started under nohup, systemd or a
     # `| tee` would print its banner only once it had already stopped, which

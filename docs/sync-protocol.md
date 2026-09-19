@@ -602,6 +602,24 @@ A peer:
   mode), behind its own `tailscale serve`, with the same public-listener
   refusal rule. Bearer-token auth is not part of Transport B — a peer has
   no account/token model, only the tailnet's own identity.
+- **States what that boundary is.** An identity header is trusted on the
+  loopback listener because `tailscale serve` is supposed to be the only
+  thing that can reach it, and nothing enforces that: any process running
+  as the same user can connect to loopback and write the header itself,
+  and can read the allow-list out of the environment to pick a login that
+  is on it. **Loopback trust is same-user trust.** That is a defensible
+  boundary — a process running as that user can read the store directly
+  and skip the listener — but it is not the boundary "authenticated"
+  suggests, so a peer MUST NOT imply a stronger one: its startup output
+  and its `GET /whoami` say which mode is in force and what it rests on.
+- MAY additionally require a shared secret as `Authorization: Bearer
+  <secret>` on every authenticated request, in addition to the identity
+  header (`lore`: `LORE_SYNC_PEER_SECRET`, set on the listener and on
+  every machine that pulls from it). This is the one credential here that
+  a co-resident process does not already have. It is orthogonal to §5:
+  the secret says who may READ this machine's log, the `mac` says whose
+  ops may be APPLIED, and neither substitutes for the other. Unset is the
+  default and changes nothing on the wire.
 - Signs and verifies ops exactly as §2–§5 describe, with no
   transport-specific variation. This is the concrete meaning of "the
   wire format must be identical for both transports": an op pulled from

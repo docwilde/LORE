@@ -370,12 +370,12 @@ class HubClient:
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json; charset=utf-8"
-        if auth and self.auth == "token" and self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        # Tailscale mode sends NO credential of its own on purpose (S6.1):
-        # the identity headers are injected by `tailscale serve` in front of
-        # the hub, and a client that wrote them itself would be presenting
-        # exactly the forgery the hub refuses on its public listener.
+        if auth:
+            headers.update(self._auth_headers())
+        # Tailscale mode sends NO IDENTITY header of its own on purpose
+        # (S6.1): those are injected by `tailscale serve` in front of the hub,
+        # and a client that wrote them itself would be presenting exactly the
+        # forgery the hub refuses on its public listener.
         request = urllib.request.Request(url, data=data, headers=headers,
                                          method=method)
         try:
@@ -407,6 +407,19 @@ class HubClient:
                 f"{url} answered something that is not HTTP"
                 f" ({exc.__class__.__name__}: {exc})", status=0) from exc
         return self._decode(raw, status, url)
+
+    def _auth_headers(self) -> dict:
+        """The credential this transport presents, or {}.
+
+        A method rather than two lines inline because Transport B's
+        `sync_peer.PeerClient` presents a DIFFERENT credential model on the
+        same mechanics -- no account token, but an optional shared peer
+        secret -- and overriding one small method is what keeps the two from
+        forking `_request` between them.
+        """
+        if self.auth == "token" and self.token:
+            return {"Authorization": f"Bearer {self.token}"}
+        return {}
 
     def _opener(self) -> urllib.request.OpenerDirector:
         """This client's own opener, so the redirect policy is this client's
