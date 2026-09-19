@@ -272,7 +272,12 @@ def cross_project_note(item: dict) -> "str | None":
 # WHAT WAS LISTED, so `lore approve` can tell whether it is applying THAT.
 # Outside pending/ on purpose: everything in there is a proposal, and
 # `load_pending` and `sync_apply._uid_already_staged` both glob it.
-LISTED_DIGESTS = ".pending-listed.json"
+#: Lives INSIDE the pile it describes, deliberately: a pile wiped by hand
+#: (`rm -rf pending/`, a test's reset) takes its listing with it, so an id
+#: that comes round again under the same second-stamped name is a fresh
+#: proposal and not "the listed file rewritten". No `.json` suffix, so
+#: `load_pending`'s glob never mistakes it for a proposal.
+LISTED_DIGESTS = ".listed"
 
 
 def item_digest(pid: str) -> "str | None":
@@ -313,7 +318,7 @@ def _listed_entry(known: dict, pid: str) -> "tuple[str | None, int | None]":
 
 
 def _listed_path() -> Path:
-    return ROOT / LISTED_DIGESTS
+    return ROOT / "pending" / LISTED_DIGESTS
 
 
 def record_listing(pids: "list[str]", *, refresh: bool = False) -> None:
