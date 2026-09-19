@@ -14,8 +14,9 @@ import sys
 from pathlib import Path
 
 from .beliefs import belief_insert, belief_retract, belief_subject
-from .config import (ROOT, SKILLS_DIR, SKILL_NAME_RE, project_slug,
-                     resolve_machine_key, utcnow, valid_skill_name, valid_slug)
+from .config import (ROOT, SKILLS_DIR, SKILL_NAME_RE, private_dir,
+                     project_slug, resolve_machine_key, utcnow,
+                     valid_skill_name, valid_slug)
 from .filemap import filemap_add, filemap_remove, filemap_replace
 from .gate import pending_op_project_key
 from .memory import memory_add, memory_move, memory_remove, memory_replace
@@ -623,11 +624,10 @@ def archive(pid: str, status: str) -> None:
     item["status"] = status
     item["resolved"] = utcnow()
 
-    dst_dir = ROOT / "pending" / "archive"
+    dst_dir = private_dir(ROOT / "pending" / "archive")
     dst = dst_dir / f"{pid}.json"
     tmp = dst.with_name(dst.name + ".tmp")
     try:
-        dst_dir.mkdir(parents=True, exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(item, indent=2))
             fh.flush()

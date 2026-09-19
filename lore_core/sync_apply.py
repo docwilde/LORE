@@ -71,7 +71,7 @@ from .beliefs import (
     record_dream_reviewed,
     record_outcome,
 )
-from .config import ROOT, SKILLS_DIR, utcnow, valid_skill_name
+from .config import ROOT, SKILLS_DIR, private_dir, utcnow, valid_skill_name
 from .filemap import SEP, filemap_add, filemap_path, filemap_remove, filemap_replace
 from .gate import entry_key
 from .memory import (
@@ -366,8 +366,7 @@ def _stage(item: dict, uid: str) -> "str | None":
     """
     if _uid_already_staged(uid):
         return None
-    pdir = ROOT / "pending"
-    pdir.mkdir(parents=True, exist_ok=True)
+    pdir = private_dir(ROOT / "pending")
     stamp = utcnow().replace("-", "").replace(":", "").replace("T", "").rstrip("Z")
     payload = dict(item) | {"uid": uid}
     payload.setdefault("created", utcnow())

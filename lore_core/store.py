@@ -18,6 +18,8 @@ from .config import (
     PROJECTS_DIR,
     ROOT,
     one_line,
+    private_dir,
+    private_file,
     project_slug,
     read_hook_input,
     stage_disabled,
@@ -92,8 +94,15 @@ def _migrate_sync_ops_slot(conn: sqlite3.Connection) -> None:
 
 
 def db_connect() -> sqlite3.Connection:
-    ROOT.mkdir(parents=True, exist_ok=True)
+    # PRIVATE, not merely present. state.db holds every indexed transcript,
+    # every belief and every op this machine has ever seen; under the ordinary
+    # umask 022 it was 0644 and ROOT was 0755, so any other user on the box
+    # could read all of it. Applied on every connect rather than once at
+    # creation, so a store that predates this is fixed the first time
+    # anything opens it.
+    private_dir(ROOT)
     conn = sqlite3.connect(ROOT / "state.db")
+    private_file(ROOT / "state.db")
     conn.execute("PRAGMA journal_mode=WAL")
     # 30s, not 5: WAL gives concurrent readers but exactly one writer, and the
     # writers here are whole agent runs — a backfill worker, four Claude Code

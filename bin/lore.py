@@ -55,6 +55,23 @@ import sqlite3
 import sys
 from pathlib import Path
 
+# PRIVATE BY DEFAULT, set before lore_core is imported and therefore before
+# anything this process creates. Nothing in this tree ever called umask or
+# chmod, so under the ordinary umask 022 every file lore wrote was 0644 and
+# every directory 0755: state.db (every indexed transcript and belief),
+# USER.md, the staged proposals, and `~/.claude/settings.json` -- which holds
+# LORE_SYNC_TOKEN and LORE_SYNC_HMAC_KEY in cleartext. Any other user on the
+# box could read a machine's curated memory and the secret that decides which
+# ops every machine of the account will apply.
+#
+# Here rather than in `main()` because the hooks, the detached review worker
+# and the detached sync pull all re-enter through this file, and because
+# importing lore_core can itself create ROOT. `config.private_dir` /
+# `private_file` are the belt to this pair of braces: they fix paths that
+# already exist, and cover a consumer (DOXA's daemon) that imports lore_core
+# without ever running this file.
+os.umask(0o077)
+
 # TEST-ISOLATION HAZARD: lore_core reads LORE_ROOT / LORE_SKILLS_DIR /
 # LORE_PROJECTS_DIR / etc. into module-level constants at import time, same
 # as this file always has. The test suite execs THIS file fresh, once per
@@ -283,6 +300,11 @@ def config_env_write(var: str, value: "str | None", *, secret: bool = False) -> 
         action = f"set {var} (value not shown)" if secret else f"set {var}={value}"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    # 0600 explicitly, not merely by umask: this is the file `lore sync login`
+    # writes a bearer token into and `lore config set LORE_SYNC_HMAC_KEY`
+    # writes the shared integrity key into, and it may well predate the umask
+    # above with a 0644 already on it.
+    private_file(path)
     print(f"{action} in {path} — hook-read switches apply from the next hook"
           " fire of a session started with it; restart to refresh everything.")
     return 0

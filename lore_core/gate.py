@@ -63,7 +63,8 @@ import sys
 import uuid
 from pathlib import Path
 
-from .config import ROOT, SKILL_NAME_RE, agent_id, one_line, utcnow, valid_skill_name
+from .config import (ROOT, SKILL_NAME_RE, agent_id, one_line, private_dir,
+                     utcnow, valid_skill_name)
 from .sync_oplog import append_op, resolve_project_key_for_slug
 # Module level, deliberately (ISSUE #74). `store` imports this module's
 # siblings but never gate itself, so there is no cycle to dodge. Resolved
@@ -228,8 +229,9 @@ def stage_write(item: dict) -> str:
             f"refusing to stage skill proposal with unsafe name {item.get('name')!r}"
             f" (must match {SKILL_NAME_RE.pattern!r})"
         )
-    pdir = ROOT / "pending"
-    pdir.mkdir(parents=True, exist_ok=True)
+    # 0700: a staged proposal is a model's unreviewed text sitting on disk,
+    # and a directory anyone can list is a directory anyone can read it from.
+    pdir = private_dir(ROOT / "pending")
     stamp = utcnow().replace("-", "").replace(":", "").replace("T", "").rstrip("Z")
     payload = {"created": utcnow(), "derived_by": agent_id()} | dict(item)
     # sync spec PR 2 ("ids that cannot collide"): a staged proposal travels

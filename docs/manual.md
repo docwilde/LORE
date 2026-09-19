@@ -222,7 +222,7 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_SYNC_URL` | unset | hub base URL; unset means sync is off entirely |
 | `LORE_SYNC_TOKEN` | unset | this machine's bearer token — written by `lore sync login` |
 | `LORE_SYNC_AUTH` | `token` | `token` (bearer) or `tailscale` (identity header injected by `tailscale serve`) |
-| `LORE_SYNC_HMAC_KEY` | unset | shared integrity key, set on every machine of one account, never sent |
+| `LORE_SYNC_HMAC_KEY` | unset | shared integrity key, set on every machine of one account, never sent. Stored in `settings.json`, which lore keeps at `0600` |
 | `LORE_MACHINE_ID` | persisted uuid4 | this machine's identity in the op log; honoured only at first creation. The hostname is a label, not the id. |
 | `LORE_SYNC_CLASSES` | `memory,filemap,beliefs,pending,skills,sessions` | which classes are **sent and applied** — a class left out is neither appended here nor applied from a peer; `transcripts`, `tabsets`, `worktrees`, `skill_usage` are opt-in |
 | `LORE_SYNC_TIMEOUT` | 15 | seconds per hub call |
