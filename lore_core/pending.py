@@ -289,6 +289,29 @@ def item_digest(pid: str) -> "str | None":
         return None
 
 
+def _item_inode(pid: str) -> "int | None":
+    """The inode of `pending/<pid>.json`, or None when it is gone. Recorded
+    beside the digest so a NEW file under a reused id (the pile wiped by
+    hand, or a name that came round again in the same second) is not
+    mistaken for the listed file rewritten in place: a rewrite keeps its
+    inode, a replacement does not."""
+    try:
+        return (ROOT / "pending" / f"{pid}.json").stat().st_ino
+    except OSError:
+        return None
+
+
+def _listed_entry(known: dict, pid: str) -> "tuple[str | None, int | None]":
+    """(digest, inode) as recorded, tolerating the bare-digest shape an
+    earlier build wrote."""
+    was = known.get(pid)
+    if isinstance(was, dict):
+        return was.get("sha256"), was.get("ino")
+    if isinstance(was, str):
+        return was, None
+    return None, None
+
+
 def _listed_path() -> Path:
     return ROOT / LISTED_DIGESTS
 
@@ -316,11 +339,12 @@ def record_listing(pids: "list[str]", *, refresh: bool = False) -> None:
     """
     known = listed_digests()
     for pid in pids:
-        if not refresh and pid in known:
+        _was, ino = _listed_entry(known, pid)
+        if not refresh and pid in known and ino == _item_inode(pid):
             continue
         digest = item_digest(pid)
         if digest is not None:
-            known[pid] = digest
+            known[pid] = {"sha256": digest, "ino": _item_inode(pid)}
     _write_listing(known)
 
 
@@ -339,8 +363,12 @@ def changed_since_listing(pid: str) -> bool:
     compare against, and refusing every unrecorded proposal would make the
     first approval on a fresh ROOT impossible.
     """
-    was = listed_digests().get(pid)
-    return bool(was) and was != item_digest(pid)
+    was, ino = _listed_entry(listed_digests(), pid)
+    if not was:
+        return False
+    if ino is not None and ino != _item_inode(pid):
+        return False  # a different file under the same id, never this one rewritten
+    return was != item_digest(pid)
 
 
 def _write_listing(known: dict) -> None:
