@@ -140,12 +140,20 @@ def cmd_sync_status(args) -> int:
     # containment count -- ops whose MAC was missing or wrong, staged as
     # pending proposals and applied by nothing but a human.
     waiting, unverified = deferred_op_count(conn), unverified_op_count(conn)
+    failed = failed_op_count(conn)
     if waiting:
         print(f"waiting:      {waiting} op(s) held for a missing dependency"
               " (retried after the next pull)")
     if unverified:
         print(f"unverified:   {unverified} op(s) staged, NOT applied —"
               " review with `lore pending`")
+    # The terminal state per-op isolation writes: verified, of a class this
+    # build implements, and the applier refused or raised. Nothing retries
+    # these and nothing stages them, so this line is the only place they are
+    # ever mentioned again.
+    if failed:
+        print(f"failed:       {failed} op(s) verified but not applicable —"
+              " the reason was printed by the pull that received them")
     # sync.md memory/filemap rule 1: the same entry replaced on two machines.
     # Both wordings are kept and neither is auto-chosen, so the pair stays
     # here until a human removes one -- this is the write the gate exists to

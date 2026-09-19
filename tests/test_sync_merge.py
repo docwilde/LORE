@@ -1797,5 +1797,307 @@ class TestApplyingDoesNotAppend(unittest.TestCase):
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# L) the receiver under a hostile or merely broken page
+#
+# Every test below fails on the build before the receiver was reordered, and
+# each names the failure it catches rather than the code it covers.
+# ---------------------------------------------------------------------------
+
+class TestUnverifiedOpHoldsNothing(unittest.TestCase):
+    """docs/sync-protocol.md S5.2: verification comes BEFORE the receiver
+    commits anything to the op. An op anyone can forge must not take the slot
+    the genuine author's op needs, and must not move this machine's clock."""
+
+    def test_a_forged_op_does_not_evict_the_genuine_op_for_its_slot(self):
+        """The whole containment inverted. `_record` ran before `verify_mac`,
+        so a forged op claimed `(machine_id, machine_seq)` and the REAL op --
+        signed, and for the same slot, which is the only shape a real one can
+        have -- arrived afterwards as a `duplicate` and was dropped. An
+        attacker who could not forge a MAC could still delete any op he could
+        predict the slot of."""
+        _, tgt = _machine("slot-evict")
+        forged = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=7,
+                         cls="memory", verb="add",
+                         payload={"text": "the attacker's entry", "via": "direct",
+                                  "writer": "terminal"},
+                         key="not-the-shared-secret")
+        genuine = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=7,
+                          cls="memory", verb="add",
+                          payload={"text": "the entry that was really written",
+                                   "via": "direct", "writer": "terminal"})
+
+        self.assertEqual(_apply(tgt, [forged])["unverified"], 1)
+        report = _apply(tgt, [genuine])
+
+        self.assertEqual(report["applied"], 1,
+                         "the genuine op for the slot must still land")
+        self.assertEqual(report["duplicate"], 0)
+        self.assertIn("the entry that was really written", _entries(tgt))
+        self.assertNotIn("the attacker's entry", _entries(tgt))
+
+        conn = tgt.db_connect()
+        self.assertEqual(
+            conn.execute("SELECT applied FROM sync_ops WHERE op_id = ?",
+                         (forged["op_id"],)).fetchone()[0], 2,
+            "the unverified row is still held, and still relayed (S7)")
+        conn.close()
+
+    def test_a_forged_op_does_not_move_this_machines_lamport_clock(self):
+        """`observe_lamport` ran before `verify_mac`, so anyone who could
+        reach this machine's pull could set its logical clock to anything --
+        including a value no locally authored op could ever sort after."""
+        _, tgt = _machine("clock-forge")
+        conn = tgt.db_connect()
+        before = conn.execute("SELECT lamport FROM sync_machine").fetchone()[0]
+        conn.close()
+
+        _apply(tgt, [_signed(tgt, machine_id=MACHINE_A, machine_seq=1,
+                             lamport=2 ** 62, cls="memory", verb="add",
+                             payload={"text": "x", "via": "direct",
+                                      "writer": "terminal"},
+                             key="not-the-shared-secret")])
+
+        conn = tgt.db_connect()
+        after = conn.execute("SELECT lamport FROM sync_machine").fetchone()[0]
+        conn.close()
+        self.assertEqual(after, before,
+                         "an op that did not verify is not an op this machine saw")
+
+
+class TestUnknownAndInvalidOps(unittest.TestCase):
+    """S5.5: recorded, relayed, never applied -- and never confused with an op
+    that is merely waiting for a dependency."""
+
+    def test_an_unknown_class_is_never_marked_applied_by_the_retry_path(self):
+        """It used to be recorded at `applied = 0` having SKIPPED the MAC
+        check (the class test ran first), and `retry_deferred` -- which
+        deliberately does not re-verify -- then marked it applied. The report
+        said `applied: 1, deferred: -1` for an op nothing ever dispatched."""
+        _, tgt = _machine("unknown-class")
+        report = _apply(tgt, [_signed(tgt, machine_id=MACHINE_A, machine_seq=1,
+                                      lamport=5, cls="a-class-from-the-future",
+                                      verb="put", payload={"anything": 1})])
+
+        self.assertEqual(report["unknown"], 1)
+        self.assertEqual(report["applied"], 0)
+        self.assertGreaterEqual(report["deferred"], 0,
+                                "a count of things that happened cannot be negative")
+        conn = tgt.db_connect()
+        self.assertEqual(
+            conn.execute("SELECT applied FROM sync_ops WHERE machine_id = ?",
+                         (MACHINE_A,)).fetchone()[0], 3)
+        self.assertEqual(tgt.deferred_op_count(conn), 0)
+        conn.close()
+
+    def test_an_unknown_class_that_did_not_verify_is_still_staged(self):
+        """The class test must not short-circuit the MAC check either way:
+        an op of an unrecognised class is still somebody's, and whether it is
+        this account's is still the first question."""
+        _, tgt = _machine("unknown-unverified")
+        report = _apply(tgt, [_signed(tgt, machine_id=MACHINE_A, machine_seq=1,
+                                      lamport=5, cls="a-class-from-the-future",
+                                      verb="put", payload={"anything": 1},
+                                      key="not-the-shared-secret")])
+        self.assertEqual(report["unverified"], 1)
+        self.assertEqual(report["unknown"], 0)
+
+    def test_a_page_with_a_malformed_op_still_sorts_and_still_applies(self):
+        """`canonical_order` sorted BEFORE anything was validated, so a page
+        containing a non-dict raised `KeyError` and one whose `lamport` was a
+        string raised `TypeError` -- out of `apply_ops`, before a single op of
+        that page was applied, on every pull of it forever."""
+        _, tgt = _machine("malformed-page")
+        good = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=5,
+                       cls="memory", verb="add",
+                       payload={"text": "the op that shares the page",
+                                "via": "direct", "writer": "terminal"})
+        junk = [
+            "not an op at all",
+            {"op_id": "x", "machine_id": MACHINE_B, "machine_seq": 1,
+             "lamport": "five", "class": "memory", "op": "add", "project_key": None,
+             "payload": {}},
+            _signed(tgt, machine_id=MACHINE_B, machine_seq=2, lamport=2 ** 63,
+                    cls="memory", verb="add",
+                    payload={"text": "y", "via": "direct", "writer": "terminal"}),
+        ]
+
+        with quiet():
+            report = _apply(tgt, junk + [good])
+
+        self.assertEqual(report["applied"], 1)
+        self.assertEqual(report["unknown"], 3)
+        self.assertIn("the op that shares the page", _entries(tgt))
+
+    def test_one_ops_exception_does_not_abort_the_rest_of_the_page(self):
+        """A VERIFIED op -- one from a machine the trust model already trusts
+        for memory content -- whose payload the applier mishandles. `float()`
+        on a `confidence` of "not-a-number" raised straight out of
+        `apply_ops`, so every op ordered after it on that page never ran, and
+        the pull never advanced past the page either."""
+        _, tgt = _machine("isolation")
+        uid_ok, uid_bad, uid_late = (str(uuid.uuid4()) for _ in range(3))
+
+        def belief(seq, uid, claim, confidence):
+            return _signed(tgt, machine_id=MACHINE_A, machine_seq=seq, lamport=seq,
+                           cls="belief", verb="insert",
+                           payload={"uid": uid, "subject": "user", "claim": claim,
+                                    "confidence": confidence, "via": "derived",
+                                    "writer": "hook", "created": "2026-01-01T00:00:00Z",
+                                    "evidence": {}})
+
+        with quiet():
+            report = _apply(tgt, [
+                belief(1, uid_ok, "the first claim", 0.5),
+                belief(2, uid_bad, "the poison claim", "not-a-number"),
+                belief(3, uid_late, "the claim ordered after the poison", 0.5),
+            ])
+
+        self.assertEqual(report["applied"], 2)
+        self.assertEqual(report["failed"], 1)
+        conn = tgt.db_connect()
+        claims = {r[0] for r in conn.execute("SELECT claim FROM beliefs")}
+        self.assertIn("the claim ordered after the poison", claims)
+        self.assertEqual(tgt.failed_op_count(conn), 1,
+                         "and `lore sync status` can say so")
+        conn.close()
+
+
+class TestPayloadsThatWouldEscapeOrErase(unittest.TestCase):
+    """Two verified ops whose payloads the appliers must refuse outright."""
+
+    def test_a_transcript_session_id_cannot_build_a_path(self):
+        """ROOT/transcripts/<key>/<session_id>.jsonl was built from the wire
+        `session_id` raw, so `../../escaped` wrote ROOT/escaped.jsonl -- an
+        arbitrary-path write from any op that verifies."""
+        _, tgt = _machine("transcript-escape")
+        escaped = Path(tgt.ROOT) / "escaped.jsonl"
+
+        with quiet():
+            report = _apply(tgt, [_signed(
+                tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                cls="transcript", verb="chunk", project_key="proj",
+                payload={"session_id": "../../escaped", "lines": ['{"x": 1}'],
+                         "from_line": 1, "to_line": 1})])
+
+        self.assertEqual(report["applied"], 0)
+        self.assertEqual(report["failed"], 1)
+        self.assertFalse(escaped.exists(), "nothing may be written outside ROOT")
+
+    def test_a_session_msgs_op_with_bad_rows_erases_nothing(self):
+        """`msgs` DELETEd the session's whole local history and then INSERTed
+        only the rows that were dicts -- so rows that were not dicts wiped the
+        history and put nothing back. Validation now precedes the delete."""
+        _, tgt = _machine("msgs-erase")
+        conn = tgt.db_connect()
+        conn.execute("INSERT INTO msg(session_id, project, ts, role, content)"
+                     " VALUES('s1', NULL, 't', 'user', 'the local history')")
+        conn.commit()
+        conn.close()
+
+        with quiet():
+            report = _apply(tgt, [_signed(
+                tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                cls="session", verb="msgs",
+                payload={"session_id": "s1", "rows": ["not a row"]})])
+
+        self.assertEqual(report["failed"], 1)
+        conn = tgt.db_connect()
+        kept = [r[0] for r in conn.execute(
+            "SELECT content FROM msg WHERE session_id = 's1'")]
+        conn.close()
+        self.assertEqual(kept, ["the local history"])
+
+
+class TestReceiveSideClassAllowList(unittest.TestCase):
+    """LORE_SYNC_CLASSES governed what this machine SENT and nothing else, so
+    a machine that had switched `sessions` off still applied every peer's
+    session ops. An allow-list that does not govern what lands is not one."""
+
+    def test_a_class_switched_off_here_is_not_applied_from_a_peer(self):
+        _, tgt = _machine("classes-off")
+        os.environ["LORE_SYNC_CLASSES"] = "memory"
+        self.addCleanup(os.environ.pop, "LORE_SYNC_CLASSES", None)
+
+        report = _apply(tgt, [_signed(
+            tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+            cls="session", verb="upsert",
+            payload={"session_id": "s1", "cwd": "/x", "title": "t",
+                     "first_ts": "a", "last_ts": "b", "messages": 2})])
+
+        self.assertEqual(report["skipped"], 1)
+        self.assertEqual(report["applied"], 0)
+        self.assertEqual(report["unverified"], 0, "declined, not staged")
+        conn = tgt.db_connect()
+        self.assertEqual(
+            conn.execute("SELECT count(*) FROM sessions").fetchone()[0], 0)
+        self.assertEqual(
+            conn.execute("SELECT count(*) FROM sync_ops").fetchone()[0], 0)
+        conn.close()
+
+    def test_a_class_left_on_still_applies(self):
+        _, tgt = _machine("classes-on")
+        os.environ["LORE_SYNC_CLASSES"] = "memory"
+        self.addCleanup(os.environ.pop, "LORE_SYNC_CLASSES", None)
+
+        report = _apply(tgt, [_signed(
+            tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+            cls="memory", verb="add",
+            payload={"text": "an entry of a class that is on", "via": "direct",
+                     "writer": "terminal"})])
+
+        self.assertEqual(report["applied"], 1)
+        self.assertIn("an entry of a class that is on", _entries(tgt))
+
+
+class TestApprovalOfAStagedOp(unittest.TestCase):
+    """The other end of S5.2 -- and the one state the retry loop cannot see."""
+
+    def test_an_approved_op_waiting_on_a_dependency_is_left_where_retry_looks(self):
+        """`apply_op_after_approval` told the human "it will apply after the
+        next pull" and left the row at `applied = 2`, which is the ONE state
+        `retry_deferred` never selects. The promise could not be kept by
+        anything."""
+        _, tgt = _machine("approved-deferred")
+        late = str(uuid.uuid4())
+        edge = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                       cls="belief", verb="edge",
+                       payload={"src_uid": late, "dst_uid": str(uuid.uuid4()),
+                                "rel": "explains", "source": "derived",
+                                "session_id": "s1", "note": None},
+                       key="not-the-shared-secret")
+        self.assertEqual(_apply(tgt, [edge])["unverified"], 1)
+
+        message = tgt.apply_op_after_approval(edge)
+
+        self.assertIn("after the next pull", message or "")
+        conn = tgt.db_connect()
+        self.assertEqual(tgt.deferred_op_count(conn), 1,
+                         "it must sit where the retry loop will find it")
+        conn.close()
+
+    def test_approval_is_refused_when_the_slot_was_filled_meanwhile(self):
+        """Two ops cannot both hold one machine's machine_seq (S6.2). The
+        genuine op landed while the forged one sat in the pending pile; the
+        approval must say so rather than apply beside it."""
+        _, tgt = _machine("approved-slot-taken")
+        forged = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=7,
+                         cls="memory", verb="add",
+                         payload={"text": "the attacker's entry", "via": "direct",
+                                  "writer": "terminal"},
+                         key="not-the-shared-secret")
+        genuine = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=7,
+                          cls="memory", verb="add",
+                          payload={"text": "the genuine entry", "via": "direct",
+                                   "writer": "terminal"})
+        _apply(tgt, [forged])
+        _apply(tgt, [genuine])
+
+        message = tgt.apply_op_after_approval(forged)
+
+        self.assertIn("already holds machine_seq", message or "")
+        self.assertNotIn("the attacker's entry", _entries(tgt))
+
+
 if __name__ == "__main__":
     unittest.main()

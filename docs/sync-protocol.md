@@ -265,6 +265,58 @@ downgrade a hub or a malicious peer could induce by stripping the field,
 and the contract exists to make that induce a pending review, not a
 silent apply.
 
+**Verification comes before the receiver commits anything to the op.** A
+receiver MUST check the `mac` *before* it claims the op's `(machine_id,
+machine_seq)` slot in its own log and *before* it advances its Lamport
+clock past the op's. An op that does not verify is one anybody could have
+written, so it earns a place in the pending pile and nowhere else: in
+particular it MUST NOT occupy the slot the genuine author's op needs
+(which would make that op arrive as a duplicate and be dropped) and it
+MUST NOT move the receiver's clock (which would let anyone set it).
+
+A receiver still STORES the op it could not verify, and still relays it
+onward — the courier property of §7 does not exempt mail this machine
+cannot read. It stores it in a way that leaves the slot free: `lore`
+records it in `sync_ops` with `applied = 2` and excludes exactly that
+state from its `(machine_id, machine_seq)` unique index, so a verified op
+for the same slot can land beside it afterwards. When a human later
+approves the staged proposal and the slot has since been filled by a
+different `op_id`, the approval is refused rather than applied beside it:
+two ops cannot both hold one machine's `machine_seq` (§6.2), and the one
+already applied is the one that verified.
+
+### 5.5 Ops a receiver accepts but does not apply
+
+Verification decides whether an op is *this account's*; it does not
+decide whether this build can act on it. Three outcomes are neither
+"applied" nor "staged", and a receiver MUST keep them apart from both:
+
+- **Unknown `class` or `op`.** Recorded, relayed, never applied, and —
+  this is the part that matters — never picked up by the dependency-retry
+  path either. A receiver MUST NOT record an unrecognised op in the same
+  state it records one that is merely waiting on a dependency: a retry
+  pass that does not re-verify (it must not; see §5.2) would otherwise
+  mark it applied without ever having applied it. §8's
+  forward-compatibility rule is what it stays recorded FOR.
+- **Structurally invalid.** An op missing a signed field of §3, carrying
+  one of the wrong JSON type, or carrying a `machine_seq`/`lamport`
+  outside `0 .. 2**63 - 1` is not an op: it cannot be verified and cannot
+  be ordered. It is counted and dropped, with the reason reported. §3
+  says "integer"; the bound is what an implementation MUST enforce to
+  keep one wire value from being unstorable.
+- **Refused or failed on apply.** A verified op of a known class whose
+  payload the applier will not act on (a path that would escape the
+  store's own directory, a batch of rows that are not rows) or which
+  raises. A receiver MUST contain that to the one op: the rest of the
+  page MUST still apply, and the op MUST reach a terminal state that a
+  status command reports. A page that aborts is a page that is re-fetched
+  and aborts again on the next pull, forever.
+
+A receiver MAY additionally decline a whole class it has been configured
+not to hold (`LORE_SYNC_CLASSES`). A declined class is counted and
+dropped, not staged: an operator who switched a class off has already
+answered the question staging would ask.
+
 ### 5.3 When the receiver has no key configured
 
 A machine that has not set `LORE_SYNC_HMAC_KEY` locally cannot perform

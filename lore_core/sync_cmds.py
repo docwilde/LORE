@@ -413,6 +413,10 @@ def pull_summary(report: dict, peer: str = HUB_PEER) -> str:
         parts.append(f"{report['unverified']} unverified (staged, NOT applied)")
     if report.get("unknown"):
         parts.append(f"{report['unknown']} unknown")
+    if report.get("failed"):
+        parts.append(f"{report['failed']} failed (see above)")
+    if report.get("skipped"):
+        parts.append(f"{report['skipped']} skipped (class off here)")
     return (f"sync pull{where}: {report['fetched']} op(s) in"
             f" {report['pages']} page(s) — " + ", ".join(parts))
 
