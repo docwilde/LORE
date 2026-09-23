@@ -6,6 +6,8 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import unittest
 from pathlib import Path
 
 
@@ -139,3 +141,21 @@ def test_legacy_sessions_get_claude_engine_on_migration(tmp_path: Path) -> None:
     _run(env, "index")
     db = sqlite3.connect(root / "state.db")
     assert db.execute("SELECT engine FROM sessions WHERE session_id='legacy'").fetchone() == ("claude",)
+
+
+class CodexIndexTests(unittest.TestCase):
+    def test_native_codex_and_doxa_engine_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            test_native_codex_and_doxa_engine_provenance(Path(directory))
+
+    def test_live_index_keeps_doxa_engine(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            test_live_index_keeps_doxa_engine(Path(directory))
+
+    def test_legacy_sessions_get_claude_engine_on_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            test_legacy_sessions_get_claude_engine_on_migration(Path(directory))
+
+
+if __name__ == "__main__":
+    unittest.main()
