@@ -163,6 +163,14 @@ anything that predates 0.36.0 — and the snapshot carries the counts per scope:
 `lore provenance` lists it per entry; beliefs show `via derived` /
 `via approved` in `lore belief list|show`.
 
+User memory remains one shared `USER.md`, and each repository has one project
+`MEMORY.md`, regardless of which agent wrote a fact. The snapshot adds
+`[source: codex]` or `[source: claude]` after a fact when its originating
+engine is known; the file and its scope are unchanged. Set `LORE_ENGINE` for
+direct integrations, or include `source_engine` in a staged memory item.
+The label travels with signed memory sync operations, including manual bundles.
+Older facts and operations retain unknown engine provenance.
+
 ## Where the agent looks
 
 ```mermaid

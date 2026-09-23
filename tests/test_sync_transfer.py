@@ -90,6 +90,30 @@ class ManualTransferTests(unittest.TestCase):
         _belief(self.src_env, "Prefers concise handoffs")
         _skill(self.src_env, "Give agents a short handoff.\n")
 
+    def test_engine_label_survives_export_into_another_engine_snapshot(self):
+        self.src_env["LORE_ENGINE"] = "codex"
+        self.dst_env["LORE_ENGINE"] = "claude"
+        _memory(self.src_env, "user", "Keep release notes with the published release.")
+        source = json.loads((self.src / "provenance.json").read_text())
+        self.assertEqual(next(iter(source["entries"].values()))["source_engine"],
+                         "codex")
+
+        exported = _cli(self.src_env, "sync", "export", self.bundle)
+        self.assertEqual(exported.returncode, 0, exported.stderr)
+        bundle = json.loads(self.bundle.read_text())
+        self.assertEqual(bundle["ops"][0]["payload"]["source_engine"], "codex")
+        imported = _cli(self.dst_env, "sync", "import", self.bundle)
+        self.assertEqual(imported.returncode, 0, imported.stderr)
+        self.assertEqual((self.dst / "USER.md").read_text(),
+                         "- Keep release notes with the published release.\n")
+        snapshot = _cli(self.dst_env, "snapshot", "--scope", "user")
+        self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
+        self.assertIn("Keep release notes with the published release."
+                      " [source: codex]", snapshot.stdout)
+        dest = json.loads((self.dst / "provenance.json").read_text())
+        self.assertEqual(next(iter(dest["entries"].values()))["source_engine"],
+                         "codex")
+
     def test_round_trip_is_idempotent_and_excludes_machine_state(self):
         self._author()
         # A signed session op exists but the manual bundle must never carry
