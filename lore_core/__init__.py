@@ -33,6 +33,7 @@ in deriver.py's docstring):
                `lore sync serve`, the only listener in the repository
     sync_cmds  sync spec PR 5/9: `lore sync push|pull|bootstrap` -- the peer
                cursors, the drain, and the hook-path entry points
+    sync_transfer  offline signed-op bundle export/import
     context    memory snapshot rendering + SessionStart/refresh/MOTD
 
 Off that graph, importing nothing from the package and imported by
@@ -63,6 +64,7 @@ from .sync_apply import *  # noqa: F401,F403
 from .sync_client import *  # noqa: F401,F403
 from .sync_peer import *  # noqa: F401,F403
 from .sync_cmds import *  # noqa: F401,F403
+from .sync_transfer import *  # noqa: F401,F403
 from .relocate import *  # noqa: F401,F403
 from .context import *  # noqa: F401,F403
 
@@ -83,6 +85,7 @@ from . import sync_apply as _sync_apply
 from . import sync_client as _sync_client
 from . import sync_peer as _sync_peer
 from . import sync_cmds as _sync_cmds
+from . import sync_transfer as _sync_transfer
 from . import relocate as _relocate
 from . import context as _context
 
@@ -104,6 +107,7 @@ __all__ = [
     *_sync_client.__all__,
     *_sync_peer.__all__,
     *_sync_cmds.__all__,
+    *_sync_transfer.__all__,
     *_relocate.__all__,
     *_context.__all__,
 ]
