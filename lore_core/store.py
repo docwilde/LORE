@@ -5,6 +5,7 @@ search, and the `lore search`/`lore session`/`lore index` CLI commands.
 """
 
 import contextlib
+import itertools
 import json
 import os
 import re
@@ -14,6 +15,7 @@ import uuid
 from pathlib import Path
 
 from .config import (
+    CODEX_SESSIONS_DIR,
     MSG_TRUNC,
     PROJECTS_DIR,
     ROOT,
@@ -38,6 +40,7 @@ __all__ = [
     'tool_line',
     'tool_errors',
     'parse_transcript',
+    'parse_codex_transcript',
     'index_sessions',
     'index_live',
     'fts_expr',
@@ -132,8 +135,13 @@ def db_connect() -> sqlite3.Connection:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sessions("
         "session_id TEXT PRIMARY KEY, project TEXT, cwd TEXT, title TEXT,"
-        "first_ts TEXT, last_ts TEXT, messages INTEGER)"
+        "first_ts TEXT, last_ts TEXT, messages INTEGER,"
+        "engine TEXT NOT NULL DEFAULT 'claude')"
     )
+    try:
+        conn.execute("ALTER TABLE sessions ADD COLUMN engine TEXT NOT NULL DEFAULT 'claude'")
+    except sqlite3.OperationalError:
+        pass  # already migrated
     # PROJECT IDENTITY (docs/plans/sync.md, prerequisite (a) -- "a project
     # identity that survives the machine"): project_slug is a checkout's own
     # path flattened, so the same repository cloned to two paths is two
@@ -180,7 +188,7 @@ def db_connect() -> sqlite3.Connection:
     # reads as "unknown", because nothing in the store records what wrote it
     # and a retroactive label would be a guess dressed as a fact. Nothing
     # reads these columns for behavior, so old rows keep working untouched.
-    for _col in ("writer", "via"):
+    for _col in ("writer", "via", "source_engine"):
         try:
             conn.execute(f"ALTER TABLE beliefs ADD COLUMN {_col} TEXT")
         except sqlite3.OperationalError:
@@ -215,8 +223,13 @@ def db_connect() -> sqlite3.Connection:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS beliefs_uid ON beliefs(uid)")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS belief_evidence("
-        "belief_id INTEGER, session_id TEXT, project TEXT, note TEXT, created TEXT)"
+        "belief_id INTEGER, session_id TEXT, project TEXT, note TEXT, created TEXT,"
+        " source_engine TEXT)"
     )
+    try:
+        conn.execute("ALTER TABLE belief_evidence ADD COLUMN source_engine TEXT")
+    except sqlite3.OperationalError:
+        pass  # pre-existing evidence keeps unknown provenance
     conn.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS belief_fts USING fts5("
         "belief_id UNINDEXED, claim, tokenize='porter unicode61')"
@@ -415,6 +428,11 @@ BOILERPLATE = re.compile(
 )
 
 
+def _engine_label(value: object, default: str = "claude") -> str:
+    """Only short identifiers are displayed or carried in session sync ops."""
+    return value if isinstance(value, str) and re.fullmatch(r"[a-z0-9_-]{1,32}", value) else default
+
+
 def extract_text(content) -> str:
     """Text of a transcript message; tool_result-only user messages come back empty."""
     if isinstance(content, str):
@@ -467,7 +485,8 @@ def parse_transcript(
     """(meta, [(ts, role, text), ...]) — role is user/assistant, plus tool/toolerr
     when include_tools is set. Transcript format is internal to Claude Code and may
     change between versions — every line is parsed defensively."""
-    meta = {"cwd": None, "title": None, "first_ts": None, "last_ts": None}
+    meta = {"cwd": None, "title": None, "first_ts": None, "last_ts": None,
+            "source_engine": "claude"}
     messages: list[tuple[str, str, str]] = []
     try:
         fh = open(path, encoding="utf-8")
@@ -481,6 +500,8 @@ def parse_transcript(
                 continue
             if not isinstance(d, dict):
                 continue
+            if d.get("engine"):
+                meta["source_engine"] = _engine_label(d["engine"])
             ts = d.get("timestamp") or ""
             if ts:
                 meta["first_ts"] = meta["first_ts"] or ts
@@ -510,13 +531,81 @@ def parse_transcript(
     return meta, messages
 
 
+def parse_codex_transcript(
+    path: Path,
+) -> tuple[dict, list[tuple[str, str, str]]]:
+    """Read user/assistant text from a Codex rollout, excluding instructions,
+    reasoning, tool calls and tool output. The internal JSONL format may change;
+    malformed and unfamiliar records are ignored.
+    """
+    meta = {"session_id": None, "cwd": None, "title": None,
+            "first_ts": None, "last_ts": None, "source_engine": "codex",
+            "internal": False}
+    messages: list[tuple[str, str, str]] = []
+    try:
+        fh = path.open(encoding="utf-8")
+    except OSError:
+        return meta, messages
+    with fh:
+        for line in fh:
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if record.get("type") == "session_meta":
+                meta["session_id"] = meta["session_id"] or payload.get("id") or payload.get("session_id")
+                meta["cwd"] = meta["cwd"] or payload.get("cwd")
+                meta["internal"] = bool(meta["internal"] or payload.get("parent_thread_id")
+                                        or payload.get("agent_path")
+                                        or payload.get("thread_source") == "subagent")
+                continue
+            if record.get("type") != "response_item" or payload.get("type") != "message":
+                continue
+            role = payload.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            content = payload.get("content")
+            if not isinstance(content, list):
+                continue
+            text = " ".join(
+                block.get("text", "") for block in content
+                if isinstance(block, dict)
+                and block.get("type") in ("input_text", "output_text")
+                and isinstance(block.get("text"), str)
+            ).strip()
+            if not text:
+                continue
+            ts = record.get("timestamp") or ""
+            if ts:
+                meta["first_ts"] = meta["first_ts"] or ts
+                meta["last_ts"] = ts
+            messages.append((ts, role, scrub_secrets(text)[:MSG_TRUNC]))
+    return meta, messages
+
+
 def index_sessions(conn: sqlite3.Connection, force: bool = False) -> tuple[int, int]:
     """Incrementally index transcripts; returns (indexed, skipped)."""
-    if not PROJECTS_DIR.exists():
-        return 0, 0
     cached = dict(conn.execute("SELECT path, stamp FROM files"))
     indexed = skipped = 0
-    for jsonl in PROJECTS_DIR.glob("*/*.jsonl"):
+    # DOXA already stores its Codex sessions as Claude-shaped transcripts.
+    # Its sidecar maps the DOXA id to the native Codex thread id; omit those
+    # native rollouts so one conversation has one search result.
+    doxa_threads: set[str] = set()
+    for sidecar in PROJECTS_DIR.glob("*/*.codex.json"):
+        try:
+            thread_id = json.loads(sidecar.read_text(encoding="utf-8")).get("thread_id")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(thread_id, str):
+            doxa_threads.add(thread_id)
+    sources = ((jsonl, "claude") for jsonl in PROJECTS_DIR.glob("*/*.jsonl"))
+    codex_sources = ((jsonl, "codex") for jsonl in CODEX_SESSIONS_DIR.rglob("*.jsonl"))
+    for jsonl, engine in itertools.chain(sources, codex_sources):
         try:
             st = jsonl.stat()
         except OSError:
@@ -526,9 +615,22 @@ def index_sessions(conn: sqlite3.Connection, force: bool = False) -> tuple[int, 
         if not force and cached.get(key) == stamp:
             skipped += 1
             continue
-        session_id = jsonl.stem
-        proj = jsonl.parent.name
-        meta, messages = parse_transcript(jsonl)
+        if engine == "codex":
+            meta, messages = parse_codex_transcript(jsonl)
+            # Without a session id and cwd there is no safe session/project
+            # identity. Skip malformed or unsupported rollouts.
+            if not isinstance(meta["session_id"], str) or not isinstance(meta["cwd"], str) \
+                    or not meta["session_id"] or not meta["cwd"]:
+                continue
+            if meta["internal"] or meta["session_id"] in doxa_threads:
+                continue
+            session_id = f"codex:{meta['session_id']}"
+            proj = project_slug(meta["cwd"])
+        else:
+            session_id = jsonl.stem
+            proj = jsonl.parent.name
+            meta, messages = parse_transcript(jsonl)
+            engine = meta["source_engine"]
         conn.execute("DELETE FROM msg WHERE session_id = ?", (session_id,))
         # scrub before the row is written, not before it is shown: the index
         # lives on disk indefinitely and is greppable by anything.
@@ -537,9 +639,10 @@ def index_sessions(conn: sqlite3.Connection, force: bool = False) -> tuple[int, 
             [(session_id, proj, ts, role, scrub_secrets(text)) for ts, role, text in messages],
         )
         conn.execute(
-            "INSERT OR REPLACE INTO sessions VALUES(?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO sessions(session_id, project, cwd, title,"
+            " first_ts, last_ts, messages, engine) VALUES(?,?,?,?,?,?,?,?)",
             (session_id, proj, meta["cwd"], meta["title"], meta["first_ts"],
-             meta["last_ts"], len(messages)),
+             meta["last_ts"], len(messages), engine),
         )
         # lines_indexed intentionally resets to NULL here: the full parse does
         # not count file lines, and NULL tells the next --live pass to re-own
@@ -556,7 +659,7 @@ def index_sessions(conn: sqlite3.Connection, force: bool = False) -> tuple[int, 
         append_op(conn, "session", "upsert", pk, {
             "session_id": session_id, "project_key": pk, "machine_id": mid,
             "cwd": meta["cwd"], "title": meta["title"], "first_ts": meta["first_ts"],
-            "last_ts": meta["last_ts"], "messages": len(messages),
+            "last_ts": meta["last_ts"], "messages": len(messages), "engine": engine,
         })
         if messages:
             append_op(conn, "session", "msgs", pk, {
@@ -597,6 +700,7 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
     key = str(transcript)
     session_id = transcript.stem
     proj = transcript.parent.name
+    engine = "claude"
     row = conn.execute("SELECT lines_indexed FROM files WHERE path = ?", (key,)).fetchone()
     start = int(row[0]) if row and row[0] else 0
     if start == 0:
@@ -618,6 +722,8 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
                 if not isinstance(d, dict) or d.get("type") not in ("user", "assistant") \
                         or d.get("isMeta"):
                     continue
+                if d.get("engine"):
+                    engine = _engine_label(d["engine"])
                 text = extract_text(d.get("message", {}).get("content", ""))
                 if text:
                     # scrub BEFORE truncating (0.31.1, Codex): a secret near the
@@ -636,13 +742,14 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
         n = conn.execute("SELECT count(*) FROM msg WHERE session_id = ?",
                          (session_id,)).fetchone()[0]
         cur = conn.execute(
-            "UPDATE sessions SET messages = ?, last_ts = coalesce(?, last_ts)"
+            "UPDATE sessions SET messages = ?, last_ts = coalesce(?, last_ts), engine = ?"
             " WHERE session_id = ?",
-            (n, new_rows[-1][2] or None, session_id))
+            (n, new_rows[-1][2] or None, engine, session_id))
         if cur.rowcount == 0:
-            conn.execute("INSERT INTO sessions VALUES(?,?,?,?,?,?,?)",
+            conn.execute("INSERT INTO sessions(session_id, project, cwd, title,"
+                         " first_ts, last_ts, messages, engine) VALUES(?,?,?,?,?,?,?,?)",
                          (session_id, proj, None, None,
-                          new_rows[0][2] or None, new_rows[-1][2] or None, n))
+                          new_rows[0][2] or None, new_rows[-1][2] or None, n, engine))
         # SYNC (sync spec PR 3): same two verbs as the full-parse path above,
         # scoped to just the newly-consumed tail -- a streaming pass must not
         # re-emit ops for lines a prior pass already logged.
@@ -655,7 +762,7 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
             "session_id": session_id, "project_key": pk, "machine_id": mid,
             "cwd": row[1] if row else None, "title": row[2] if row else None,
             "first_ts": row[3] if row else None, "last_ts": row[4] if row else None,
-            "messages": row[5] if row else n,
+            "messages": row[5] if row else n, "engine": engine,
         })
         append_op(conn, "session", "msgs", pk, {
             "session_id": session_id,
@@ -773,19 +880,23 @@ def print_hits(conn: sqlite3.Connection, rows, limit: int) -> None:
     ranked = sorted(by_session.items(), key=lambda kv: min(r[3] for r in kv[1]))[:limit]
     for sid, hits in ranked:
         row = conn.execute(
-            "SELECT project, title, last_ts, messages FROM sessions WHERE session_id = ?", (sid,)
+            "SELECT project, title, last_ts, messages, engine FROM sessions WHERE session_id = ?", (sid,)
         ).fetchone()
-        proj, title, last_ts, n = row if row else ("?", None, "?", 0)
+        proj, title, last_ts, n, engine = row if row else ("?", None, "?", 0, "claude")
         day = (last_ts or "")[:10]
-        print(f"session {sid}  [{proj}]  {day}  {n} msgs" + (f'  "{title}"' if title else ""))
+        print(f"session {sid}  [{proj}]  [{engine}]  {day}  {n} msgs"
+              + (f'  "{title}"' if title else ""))
         for ts, role, snip, _ in hits[:3]:
             print(f"  {role[:4]}: {one_line(snip)[:200]}")
-        print(f"  read: lore session {sid}   resume: claude -r {sid}")
+        resume = f"claude -r {sid}" if engine == "claude" else f"codex resume {sid.removeprefix('codex:')}"
+        print(f"  read: lore session {sid}   resume: {resume}")
         print()
 
 
 def cmd_session(args) -> int:
     conn = db_connect()
+    row = conn.execute("SELECT engine FROM sessions WHERE session_id = ?",
+                       (args.session_id,)).fetchone()
     rows = conn.execute(
         "SELECT rowid, ts, role, content FROM msg WHERE session_id = ? ORDER BY rowid",
         (args.session_id,),
@@ -793,6 +904,7 @@ def cmd_session(args) -> int:
     if not rows:
         print("unknown session (run `lore search` first to build the index).", file=sys.stderr)
         return 1
+    print(f"session {args.session_id}  [{row[0] if row else 'claude'}]")
     if args.grep:
         low = args.grep.lower()
         keep = set()

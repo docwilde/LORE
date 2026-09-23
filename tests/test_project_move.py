@@ -58,7 +58,8 @@ def _seed():
     bid, _ = lore.belief_insert(conn, f"project:{OLD}", "claim retracted", 0.5, "s-old", OLD, "n")
     conn.execute("UPDATE beliefs SET status = 'retracted' WHERE id = ?", (bid,))
     lore.belief_insert(conn, "finch-releases", "bare subject claim", 0.8, "s-old", OLD, "n")
-    conn.execute("INSERT INTO sessions VALUES(?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO sessions(session_id, project, cwd, title, first_ts, last_ts, messages)"
+                 " VALUES(?,?,?,?,?,?,?)",
                  ("s-old", OLD, "/home/x/Schreibtisch/doxa", "t", "2026", "2026", 2))
     conn.executemany("INSERT INTO msg(session_id, project, ts, role, content) VALUES(?,?,?,?,?)",
                      [("s-old", OLD, "2026", "user", "hello"),

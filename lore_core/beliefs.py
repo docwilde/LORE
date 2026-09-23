@@ -30,7 +30,7 @@ from .config import (
     project_slug,
     utcnow,
 )
-from .gate import gate_write, writer_class
+from .gate import current_engine, gate_write, writer_class
 from .store import db_connect, fts_expr
 from .sync_oplog import append_op, resolve_project_key_for_slug
 
@@ -100,6 +100,7 @@ def _op_project_key(conn: sqlite3.Connection, subject: str) -> "str | None":
 def belief_reinforce(
     conn: sqlite3.Connection, bid: int, confidence: float,
     session_id: str | None, project: str | None, note: str | None,
+    *, source_engine: "str | None" = None,
 ) -> None:
     """Attach a new derivation to an EXISTING belief as evidence, instead of a
     new row: lift confidence to the max of old/new and touch `updated`. This is
@@ -120,9 +121,11 @@ def belief_reinforce(
         (max(row[0], confidence) if row else confidence, now, bid),
     )
     note_text = one_line(note or "")[:300] or None
+    engine = current_engine(source_engine)
     conn.execute(
-        "INSERT INTO belief_evidence VALUES(?,?,?,?,?)",
-        (bid, session_id, project, note_text, now),
+        "INSERT INTO belief_evidence(belief_id, session_id, project, note, created,"
+        " source_engine) VALUES(?,?,?,?,?,?)",
+        (bid, session_id, project, note_text, now, engine),
     )
     # sync spec PR 3 ("belief" verb `reinforce {uid, confidence, evidence}"):
     # same transaction as the UPDATE+INSERT above -- a crash between them
@@ -131,7 +134,8 @@ def belief_reinforce(
         project_key = _op_project_key(conn, row[1])
         append_op(conn, "belief", "reinforce", project_key, {
             "uid": row[2], "confidence": max(row[0], confidence),
-            "evidence": {"session_id": session_id, "project_key": project_key, "note": note_text},
+            "evidence": {"session_id": session_id, "project_key": project_key,
+                         "note": note_text, "source_engine": engine},
         })
 
 
@@ -140,6 +144,7 @@ def belief_insert(
     session_id: str | None, project: str | None, note: str | None,
     exclude_ids: "set[int] | None" = None, *, via: str = "direct",
     uid: "str | None" = None,
+    source_engine: "str | None" = None,
 ) -> tuple[int, bool]:
     """Insert or reinforce a belief; returns (id, created). An exact restatement
     of an active claim adds evidence and lifts confidence instead of duplicating.
@@ -168,21 +173,24 @@ def belief_insert(
         row = None
     if row:
         bid, created = row[0], False
-        belief_reinforce(conn, bid, confidence, session_id, project, note)
+        belief_reinforce(conn, bid, confidence, session_id, project, note,
+                         source_engine=source_engine)
     else:
         now = utcnow()
+        engine = current_engine(source_engine)
         row_uid = uid or str(uuid.uuid4())
         cur = conn.execute(
             "INSERT INTO beliefs(subject, claim, confidence, status, created, updated,"
-            " writer, via, uid) VALUES(?,?,?,'active',?,?,?,?,?)",
-            (subject, claim, confidence, now, now, writer_class(), via, row_uid),
+            " writer, via, uid, source_engine) VALUES(?,?,?,'active',?,?,?,?,?,?)",
+            (subject, claim, confidence, now, now, writer_class(), via, row_uid, engine),
         )
         bid, created = cur.lastrowid, True
         conn.execute("INSERT INTO belief_fts(belief_id, claim) VALUES(?,?)", (bid, claim))
         note_text = one_line(note or "")[:300] or None
         conn.execute(
-            "INSERT INTO belief_evidence VALUES(?,?,?,?,?)",
-            (bid, session_id, project, note_text, now),
+            "INSERT INTO belief_evidence(belief_id, session_id, project, note, created,"
+            " source_engine) VALUES(?,?,?,?,?,?)",
+            (bid, session_id, project, note_text, now, engine),
         )
         # sync spec PR 3 ("belief" verb `insert {uid, subject, claim,
         # confidence, via, writer, created, evidence{...}}"): same
@@ -191,7 +199,9 @@ def belief_insert(
         append_op(conn, "belief", "insert", project_key, {
             "uid": row_uid, "subject": subject, "claim": claim, "confidence": confidence,
             "via": via, "writer": writer_class(), "created": now,
-            "evidence": {"session_id": session_id, "project_key": project_key, "note": note_text},
+            "source_engine": engine,
+            "evidence": {"session_id": session_id, "project_key": project_key,
+                         "note": note_text, "source_engine": engine},
         })
     return bid, created
 
@@ -466,9 +476,13 @@ def format_belief(conn: sqlite3.Connection, row, with_evidence: bool = False) ->
     # ISSUE #43: show provenance when the row has it. Beliefs written before
     # 0.36.0 have NULL via/writer and render exactly as they always did --
     # no retroactive label for something the store never recorded.
-    prov = conn.execute("SELECT via, writer FROM beliefs WHERE id = ?", (bid,)).fetchone()
+    prov = conn.execute("SELECT via, writer, source_engine FROM beliefs WHERE id = ?",
+                        (bid,)).fetchone()
     via = (prov[0] if prov else None) or ""
     tag = f", via {via}" if via else ""
+    engine = (prov[2] if prov else None) or ""
+    if engine and engine != "unknown":
+        tag += f", engine {engine}"
     # BOTH counts, because they answer different questions and only one of them
     # is corroboration: a live store held a belief with 12 evidence rows from 6
     # sessions, and the row count alone reads as twice the independent support
@@ -478,11 +492,12 @@ def format_belief(conn: sqlite3.Connection, row, with_evidence: bool = False) ->
         ev += f" / {n_sess} session" + ("s" if n_sess != 1 else "")
     out = f"[{bid}] ({subject}, conf {conf:.2f}, {status}, {ev}{tag}) {claim}"
     if with_evidence:
-        for sid, proj, note, created in conn.execute(
-            "SELECT session_id, project, note, created FROM belief_evidence"
+        for sid, proj, note, created, source_engine in conn.execute(
+            "SELECT session_id, project, note, created, source_engine FROM belief_evidence"
             " WHERE belief_id = ? ORDER BY created", (bid,)
         ):
-            out += f"\n    {created or '?'} session {sid or '?'}" + (f": {note}" if note else "")
+            source = f" [{source_engine}]" if source_engine and source_engine != "unknown" else ""
+            out += f"\n    {created or '?'} session {sid or '?'}{source}" + (f": {note}" if note else "")
     return out
 
 
@@ -846,7 +861,7 @@ def interaction_model_lines(limit: int = 5) -> "list[str]":
     try:
         conn = db_connect()
         rows = conn.execute(
-            "SELECT b.id, claim, confidence,"
+            "SELECT b.id, claim, confidence, source_engine,"
             " (SELECT count(*) FROM belief_outcomes o WHERE o.belief_id = b.id)"
             " FROM beliefs b WHERE status = 'active' AND subject = 'user-model'"
             " ORDER BY confidence DESC, updated DESC LIMIT ?", (limit,)).fetchall()
@@ -858,5 +873,6 @@ def interaction_model_lines(limit: int = 5) -> "list[str]":
         rows = [r[1:] for r in rows]
     except Exception:                                   # noqa: BLE001
         return []
-    return [f"- {one_line(c)[:160]} (conf {v:.2f}{', n=' + str(n) if n else ''})"
-            for c, v, n in rows]
+    return [f"- {one_line(c)[:160]} (conf {v:.2f}{', n=' + str(n) if n else ''}"
+            f"{', source ' + engine if engine and engine != 'unknown' else ''})"
+            for c, v, engine, n in rows]

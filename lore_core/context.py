@@ -38,7 +38,8 @@ from .deriver import learned_skills, load_skill_usage, skill_candidates
 from .filemap import filemap_entries
 from .gate import provenance_tag
 from .graph import context_candidates, render_context_block
-from .memory import memory_bucket, memory_path, read_entries, render_entries, usage_line
+from .memory import (memory_bucket, memory_path, read_entries, render_entries,
+                     render_memory_entries, usage_line)
 from .pending import load_pending
 from .store import db_connect, record_project_identity
 from .sync_client import hub_url
@@ -151,6 +152,12 @@ def review_interval() -> int | None:
 
 def _freshness_rule() -> str:
     """The snapshot's own statement of how current it is."""
+    if os.environ.get("LORE_ENGINE", "").strip().lower() == "codex":
+        return (
+            "- In Codex, this snapshot is injected at startup, resume, clear, and"
+            " compaction. Writes land in the files immediately; read them during"
+            " this session with lore memory show."
+        )
     interval = refresh_interval()
     if refresh_on_change():
         return (
@@ -201,7 +208,7 @@ def build_context(cwd: str, scope: str = "all") -> str:
         parts += [
             f"## User memory ({usage_line(user_entries, USER_CAP)})"
             f"{provenance_tag('memory', memory_bucket('user', slug), user_entries)}",
-            render_entries(user_entries).rstrip() or "(empty)",
+            render_memory_entries("user", slug, user_entries).rstrip() or "(empty)",
             "",
         ]
         # Interaction model (2026-08-22, wired 0.31.0 -- the helper existed but
@@ -220,7 +227,7 @@ def build_context(cwd: str, scope: str = "all") -> str:
         parts += [
             f"## Project memory ({usage_line(proj_entries, MEMORY_CAP)}) — {slug}"
             f"{provenance_tag('memory', memory_bucket('project', slug), proj_entries)}",
-            render_entries(proj_entries).rstrip() or "(empty)",
+            render_memory_entries("project", slug, proj_entries).rstrip() or "(empty)",
             "",
         ]
         # File map pointer (0.34.0): ONE line, count only, never the map body.
@@ -251,7 +258,7 @@ def build_context(cwd: str, scope: str = "all") -> str:
                 f"## Machine memory ({usage_line(mach_entries, MACHINE_CAP)}) — {host}"
                 f"{provenance_tag('memory', memory_bucket('machine', host), mach_entries)}",
                 "True of THIS host only — never assert it of another machine.",
-                render_entries(mach_entries).rstrip(),
+                render_memory_entries("machine", host, mach_entries).rstrip(),
                 "",
             ]
         others = [m for m in known_machines() if m != host]

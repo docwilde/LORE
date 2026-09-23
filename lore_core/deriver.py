@@ -61,7 +61,7 @@ from .config import (
     valid_skill_name,
 )
 from .filemap import filemap_entries
-from .gate import append_pending_stage_op
+from .gate import append_pending_stage_op, current_engine
 from .memory import match_entries, memory_path, read_entries, render_entries
 from .pending import containment, load_pending, overlap_tokens, token_containment
 from .scrub import scrub_secrets
@@ -726,7 +726,7 @@ def build_review_job(transcript: Path, slug: str,
     scoped pending list and the same skill bookkeeping as a single review
     does — a second assembly of this would drift from the first.
     """
-    _, messages = parse_transcript(transcript, include_tools=True)
+    meta, messages = parse_transcript(transcript, include_tools=True)
     user_msgs = sum(1 for _, role, _ in messages if role == "user")
     if user_msgs < REVIEW_MIN_MESSAGES:
         return None
@@ -779,7 +779,9 @@ def build_review_job(transcript: Path, slug: str,
     # the worker may run minutes later in a process whose LORE_AGENT_ID says
     # nothing about who ASKED for this review.
     return {"prompt": prompt, "project": slug, "session_id": sid,
-            "cwd": str(cwd_hint or ""), "agent": agent or agent_id()}
+            "cwd": str(cwd_hint or ""), "agent": agent or agent_id(),
+            "source_engine": current_engine(
+                meta.get("source_engine") or meta.get("engine") or "unknown")}
 
 
 WORKER_MARKERS = (
@@ -1324,14 +1326,16 @@ def worker_run(jobfile: Path) -> int:
         # in logs/review-<session>.log otherwise) and the notification.
         stats: dict = {}
         staged = stage_proposals(data, job["project"], job["session_id"],
-                                 derived_by=job.get("agent"), stats=stats)
+                                 derived_by=job.get("agent"), stats=stats,
+                                 source_engine=job.get("source_engine", "unknown"))
         suppressed = stats.get("suppressed", 0)
         # ISSUE #50: the conclusions channel gets the same accounting the
         # memory channel got in #48 -- a cross-subject drop is a decision and
         # has to reach the same log a human reads.
         bstats: dict = {}
         derived = derive_conclusions(data, job["project"], job["session_id"],
-                                     stats=bstats)
+                                     stats=bstats,
+                                     source_engine=job.get("source_engine", "unknown"))
         cross = bstats.get("cross_subject", 0)
         # ISSUE #51: same accounting treatment -- a fold is a decision too
         # (evidence attached to an existing belief instead of a new row).
@@ -1558,7 +1562,8 @@ def relate_conclusion(conn, src: int, c: dict, session_id: str, acct: dict) -> i
 
 
 def derive_conclusions(data: dict, slug: str, session_id: str,
-                       stats: "dict | None" = None) -> int:
+                       stats: "dict | None" = None,
+                       source_engine: "str | None" = "unknown") -> int:
     """Deriver: auto-write the reviewer's conclusions to the belief store.
     No approval gate — beliefs are queryable data, they never enter context
     uninvited; the gate stays on core memory and skills.
@@ -1690,7 +1695,7 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
                 fold_note = f"{score:.0%} contained"
         if fold_id is not None:
             belief_reinforce(conn, fold_id, confidence, session_id, target_slug,
-                             evidence or claim)
+                             evidence or claim, source_engine=source_engine)
             acct["folded"] += 1
             folded_ids.append(fold_id)
             print(f"conclusion folded into existing [{fold_id}] ({fold_note}, same subject) —"
@@ -1703,6 +1708,7 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
         bid, _created = belief_insert(
             conn, subject, claim, confidence,
             session_id, target_slug, evidence or None, via="derived",
+            source_engine=source_engine,
         )
         derived += 1
         acct["derived"] += 1
@@ -1733,7 +1739,8 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
 
 def stage_proposals(data: dict, slug: str, session_id: str,
                     derived_by: "str | None" = None,
-                    stats: "dict | None" = None) -> int:
+                    stats: "dict | None" = None,
+                    source_engine: "str | None" = "unknown") -> int:
     """Stage the review's proposals into pending/; returns how many landed.
 
     `stats` (ISSUE #48) is an optional out-parameter, filled with the staging
@@ -1800,6 +1807,8 @@ def stage_proposals(data: dict, slug: str, session_id: str,
         # slug=cwd's-project below -- ISSUE #40, the whole point of the fix.
         item = {"created": utcnow(), "project": slug, "session_id": session_id,
                 "derived_by": derived_by or agent_id()} | item
+        if item.get("kind") == "memory":
+            item["source_engine"] = current_engine(source_engine)
         # sync spec PR 2: minted last, after the merge, so nothing an item
         # carries can collide with or override the staging-time uid -- same
         # rule gate.stage_write() follows for CLI-staged proposals.

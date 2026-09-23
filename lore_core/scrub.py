@@ -43,6 +43,7 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
     # and, under 40 characters of body, left the whole key standing.
     ("api-key", re.compile(r"sk-[A-Za-z0-9_-]{16,}")),
     ("aws", re.compile(r"AKIA[A-Z0-9]{16}")),
+    ("github-pat", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}")),
     ("github", re.compile(r"gh[posru]_[A-Za-z0-9]{36,}")),
     ("gcp", re.compile(r"AIza[A-Za-z0-9_-]{35}")),
     ("slack", re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}")),

@@ -518,7 +518,8 @@ def _apply_memory(conn: sqlite3.Connection, op: dict) -> bool:
         text = payload.get("text") or ""
         if not text:
             return True
-        err = memory_add(scope, slug, text, via=payload.get("via", "direct"))
+        err = memory_add(scope, slug, text, via=payload.get("via", "direct"),
+                         source_engine=payload.get("source_engine", "unknown"))
         if _over_cap(err):
             _stage_overflow(op, "memory", scope, slug, text)
         return True
@@ -536,7 +537,8 @@ def _apply_memory(conn: sqlite3.Connection, op: dict) -> bool:
         if old is not None:
             return _replace_in_place(conn, op, "memory", scope, slug, old, text)
         _record_replace_conflict(conn, op, "memory", bucket, old_key, text)
-        err = memory_add(scope, slug, text, via=payload.get("via", "direct"))
+        err = memory_add(scope, slug, text, via=payload.get("via", "direct"),
+                         source_engine=payload.get("source_engine", "unknown"))
         if _over_cap(err):
             _stage_overflow(op, "memory", scope, slug, text)
         return True
@@ -556,7 +558,8 @@ def _replace_in_place(conn: sqlite3.Connection, op: dict, kind: str, scope: str,
     """
     via = op["payload"].get("via", "direct")
     if kind == "memory":
-        err = memory_replace(scope, slug, old, text, via=via)
+        err = memory_replace(scope, slug, old, text, via=via,
+                             source_engine=op["payload"].get("source_engine", "unknown"))
         if _over_cap(err):
             _stage_overflow(op, "memory", scope, slug, text)
         return True
@@ -637,6 +640,7 @@ def _apply_belief(conn: sqlite3.Connection, op: dict) -> bool:
             float(payload.get("confidence") or 0.0),
             evidence.get("session_id"), slug, evidence.get("note"),
             via=payload.get("via", "direct"), uid=uid,
+            source_engine=payload.get("source_engine", "unknown"),
         )
         if not created:
             # FOLDED onto an existing active row with the same (subject,
@@ -660,7 +664,8 @@ def _apply_belief(conn: sqlite3.Connection, op: dict) -> bool:
         belief_reinforce(conn, bid, float(payload.get("confidence") or 0.0),
                          evidence.get("session_id"),
                          _local_slug(conn, evidence.get("project_key")),
-                         evidence.get("note"))
+                         evidence.get("note"),
+                         source_engine=evidence.get("source_engine", "unknown"))
         return True
 
     if verb == "supersede":
@@ -882,12 +887,8 @@ def _apply_session(conn: sqlite3.Connection, op: dict) -> bool:
     conflict: the author's latest upsert is authoritative, `msgs` replaces by
     session id the way index_sessions already does."
 
-    NOTE on the `machine_id` column sync.md also asks for here: not added.
-    Both production writers insert into `sessions` POSITIONALLY (`INSERT OR
-    REPLACE INTO sessions VALUES(?,?,?,?,?,?,?)`, store.py:443 and 545), so an
-    eighth column turns both into a column-count error. Adding it is a change
-    to the session indexer, not to the apply engine, and it buys `lore search`
-    a display label this PR has no other use for.
+    The engine label is informational metadata; old peers without it are
+    treated as Claude sessions.
     """
     verb, payload = op["op"], op["payload"]
     session_id = payload.get("session_id")
@@ -897,10 +898,11 @@ def _apply_session(conn: sqlite3.Connection, op: dict) -> bool:
 
     if verb == "upsert":
         conn.execute(
-            "INSERT OR REPLACE INTO sessions VALUES(?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO sessions(session_id, project, cwd, title,"
+            " first_ts, last_ts, messages, engine) VALUES(?,?,?,?,?,?,?,?)",
             (session_id, slug, payload.get("cwd"), payload.get("title"),
              payload.get("first_ts"), payload.get("last_ts"),
-             int(payload.get("messages") or 0)),
+             int(payload.get("messages") or 0), payload.get("engine") or "claude"),
         )
         return True
 

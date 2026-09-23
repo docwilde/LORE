@@ -59,6 +59,7 @@ lore_core module can import this one without a cycle.
 import hashlib
 import json
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -94,9 +95,11 @@ __all__ = [
     'gate_write',
     'PROVENANCE_PATH',
     'entry_key',
+    'current_engine',
     'record_entry',
     'forget_entry',
     'entry_provenance',
+    'memory_source_labels',
     'provenance_counts',
     'provenance_tag',
     'provenance_rows',
@@ -236,6 +239,8 @@ def stage_write(item: dict) -> str:
     pdir = private_dir(ROOT / "pending")
     stamp = utcnow().replace("-", "").replace(":", "").replace("T", "").rstrip("Z")
     payload = {"created": utcnow(), "derived_by": agent_id()} | dict(item)
+    if payload.get("kind") in ("memory", "belief"):
+        payload["source_engine"] = current_engine(payload.get("source_engine"))
     # sync spec PR 2 ("ids that cannot collide"): a staged proposal travels
     # on the wire like everything else, so it gets a uid in the payload at
     # staging time. Minted AFTER the merge so `item` can never supply its
@@ -356,6 +361,27 @@ def gate_write(item: dict) -> "int | None":
 PROVENANCE_VERSION = 1
 
 
+def current_engine(value: "str | None" = None) -> str:
+    """Informational origin of a curated fact, never a memory partition.
+
+    LORE_ENGINE is the explicit integration contract. The environment probes
+    cover direct CLI calls from either agent; an absent or invalid signal is
+    honestly unknown rather than attributed to the receiving sync process.
+    An explicit value (including ``unknown``) always wins on replay.
+    """
+    if value is None:
+        value = os.environ.get("LORE_ENGINE", "")
+        if not value:
+            if os.environ.get("CLAUDECODE") or os.environ.get("AI_AGENT", "").startswith("claude-code"):
+                value = "claude"
+            elif os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID"):
+                value = "codex"
+    if not isinstance(value, str):
+        return "unknown"
+    value = value.strip().lower()
+    return value if re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value) else "unknown"
+
+
 def PROVENANCE_PATH() -> Path:
     return ROOT / "provenance.json"
 
@@ -388,7 +414,8 @@ def _save(data: dict) -> None:
 
 
 def record_entry(kind: str, bucket: str, text: str, via: str = "direct",
-                 origin: "str | None" = None, writer: "str | None" = None) -> None:
+                 origin: "str | None" = None, writer: "str | None" = None,
+                 source_engine: "str | None" = None) -> None:
     """Record who wrote one curated entry. Never raises: a provenance write
     must not be able to fail a memory write (house rule -- this sits on the
     same path as the hook)."""
@@ -401,6 +428,7 @@ def record_entry(kind: str, bucket: str, text: str, via: str = "direct",
                 "at": utcnow(),
                 "agent": agent_id(),
                 **({"origin": origin} if origin else {}),
+                **({"source_engine": current_engine(source_engine)} if kind == "memory" else {}),
             }
             _save(data)
     except Exception:                                       # noqa: BLE001
@@ -425,6 +453,20 @@ def entry_provenance(kind: str, bucket: str, text: str) -> dict:
     except Exception:                                       # noqa: BLE001
         return {}
     return rec if isinstance(rec, dict) else {}
+
+
+def memory_source_labels(bucket: str, entries: "list[str]") -> "list[str]":
+    """One ledger read for informational source labels in an injected scope."""
+    try:
+        records = _load()["entries"]
+    except Exception:                                       # noqa: BLE001
+        records = {}
+    labels = []
+    for entry in entries:
+        rec = records.get(entry_key("memory", bucket, entry)) or {}
+        value = rec.get("source_engine") if isinstance(rec, dict) else None
+        labels.append(value if isinstance(value, str) and value != "unknown" else "")
+    return labels
 
 
 def _label(rec: dict) -> str:
@@ -501,8 +543,10 @@ def cmd_provenance(args) -> int:
         head = f"## {kind} {bucket}"
         print(f"\n{head} ({len(entries)} entr{'y' if len(entries) == 1 else 'ies'})"
               f"{provenance_tag(kind, bucket, entries)}")
-        for label, when, text in provenance_rows(kind, bucket, entries):
-            print(f"  [{label:<11}] {when or '-':<20} {text[:100]}")
+        sources = memory_source_labels(bucket, entries) if kind == "memory" else [""] * len(entries)
+        for (label, when, text), source in zip(provenance_rows(kind, bucket, entries), sources):
+            suffix = f" [source: {source}]" if source else ""
+            print(f"  [{label:<11}] {when or '-':<20} {text[:100]}{suffix}")
     try:
         conn = db_connect()
         rows = conn.execute(

@@ -521,5 +521,34 @@ class TestApprovalAppliesWhatWasListed(unittest.TestCase):
         self.assertFalse(lore.changed_since_listing(self.pid))
 
 
+class TestMemorySourceEngineSurvivesApproval(unittest.TestCase):
+    def setUp(self):
+        _clear_state()
+
+    def test_approval_uses_proposal_engine_not_approver_process(self):
+        text = "Codex proposal retained across Claude approval"
+        item = {"kind": "memory", "scope": "user", "action": "add",
+                "text": text, "project": SLUG, "session_id": "s-codex",
+                "source_engine": "codex"}
+        with mock.patch.dict(os.environ, {"LORE_ENGINE": "claude"}):
+            self.assertIsNone(lore.apply_item("source-engine-test", item, False))
+        provenance = lore.entry_provenance("memory", lore.memory_bucket("user", SLUG), text)
+        self.assertEqual(provenance["source_engine"], "codex")
+
+    def test_belief_proposal_engine_survives_approval(self):
+        item = {"kind": "belief", "subject": "user-model", "claim": "prefers terse answers",
+                "confidence": 0.7, "project": SLUG, "session_id": "s-codex",
+                "source_engine": "codex"}
+        with mock.patch.dict(os.environ, {"LORE_ENGINE": "claude"}):
+            self.assertIsNone(lore.apply_item("belief-source-test", item, False))
+        conn = lore.db_connect()
+        source = conn.execute(
+            "SELECT source_engine FROM beliefs WHERE subject = 'user-model' AND claim = ?",
+            (item["claim"],),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(source, ("codex",))
+
+
 if __name__ == "__main__":
     unittest.main()

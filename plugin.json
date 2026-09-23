@@ -1,0 +1,26 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "lore",
+  "version": "0.58.0",
+  "description": "Unified user, repo, and session memory for Claude Code, Codex, and DOXA",
+  "author": {
+    "name": "Dr. Fabian Wilde",
+    "email": "docwilde@proton.me"
+  },
+  "repository": "https://github.com/docwilde/LORE",
+  "license": "AGPL-3.0-only",
+  "extensions": {
+    "com.openai": {
+      "hooks": "./codex/hooks/hooks.json",
+      "interface": {
+        "displayName": "LORE",
+        "shortDescription": "Shared memory and session recall",
+        "longDescription": "Read one LORE user and repo memory across Claude Code, Codex, and DOXA; recall indexed sessions and review proposed memories.",
+        "developerName": "Dr. Fabian Wilde",
+        "category": "Productivity",
+        "capabilities": ["Read", "Write"],
+        "defaultPrompt": ["Recall relevant project context from LORE."]
+      }
+    }
+  }
+}

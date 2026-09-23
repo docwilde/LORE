@@ -762,6 +762,15 @@ shape a wire implementation needs to serialize/deserialize without
 interpreting it. `via`/`writer` values are the existing provenance
 vocabulary (`docs/write-gate.md`): `approved` / `interactive` /
 `terminal` / `derived` / `dream`.
+For memory, optional `source_engine` records the originating session's engine
+(for example `claude` or `codex`) so a receiving agent can see the fact's
+history. It does not alter user/project scope, trust, ordering, or merge rules.
+An older op without the field has unknown engine provenance.
+Belief inserts carry the same optional field for the first assertion;
+each belief evidence object may also carry it, so a later reinforcement
+from another engine retains its own source without changing the belief's
+original source. `user-model` remains a separate belief subject, shared
+across engines like `user` beliefs.
 
 **Evolving a payload field.** An op is durable: one written by an older
 version of this software MUST still apply, and one written by a newer
@@ -787,11 +796,13 @@ field may change:
 
 | Class | Verb | Payload fields |
 |---|---|---|
-| `memory` / `filemap` | `add` | `{text: string, via: string, writer: string}` |
+| `memory` | `add` | `{text: string, via: string, writer: string, source_engine?: string}` |
+| `filemap` | `add` | `{text: string, via: string, writer: string}` |
 | `memory` / `filemap` | `remove` | `{key: string}` — `key` is the `entry_key` hash |
-| `memory` / `filemap` | `replace` | `{old_key: string, text: string, via: string, writer: string}` |
-| `belief` | `insert` | `{uid: string, subject: string, claim: string, confidence: number, via: string, writer: string, created: string, evidence: {session_id: string, project_key: string\|null, note: string}}` |
-| `belief` | `reinforce` | `{uid: string, confidence: number, evidence: {...}}` |
+| `memory` | `replace` | `{old_key: string, text: string, via: string, writer: string, source_engine?: string}` |
+| `filemap` | `replace` | `{old_key: string, text: string, via: string, writer: string}` |
+| `belief` | `insert` | `{uid: string, subject: string, claim: string, confidence: number, via: string, writer: string, created: string, source_engine?: string, evidence: {session_id: string, project_key: string\|null, note: string, source_engine?: string}}` |
+| `belief` | `reinforce` | `{uid: string, confidence: number, evidence: {session_id: string, project_key: string\|null, note: string, source_engine?: string}}` |
 | `belief` | `supersede` | `{uid: string, by_uid: string, reason: string}` |
 | `belief` | `retract` | `{uid: string}` |
 | `belief` | `status` | `{uid: string, status: "active"\|"dormant"}` |
@@ -802,7 +813,7 @@ field may change:
 | `pending` | `resolve` | `{uid: string, status: string}` |
 | `skill` | `put` | `{name: string, body: string}` — `body` is the **complete `SKILL.md`**, frontmatter included, so a receiver reproduces the author's file byte for byte by writing it verbatim (ISSUE #73) |
 | `skill` | `remove` | `{name: string}` |
-| `session` | `upsert` | `{session_id: string, project_key: string\|null, machine_id: string, cwd: string, title: string, first_ts: string, last_ts: string, messages: integer}` |
+| `session` | `upsert` | `{session_id: string, project_key: string\|null, machine_id: string, cwd: string, title: string, first_ts: string, last_ts: string, messages: integer, engine?: string}`; `engine` is informational provenance and defaults to `claude` for older senders. |
 | `session` | `msgs` | `{session_id: string, rows: array}` |
 | `transcript` (opt-in) | `chunk` | `{session_id: string, from_line: integer, to_line: integer, lines: array<string>}` |
 | `tabset` (opt-in) | `put` / `remove` | `{project_key: string, machine_id: string, record: object}` |

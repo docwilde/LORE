@@ -68,6 +68,7 @@ def _exec_lore(root: Path):
     os.environ["LORE_ROOT"] = str(root)
     os.environ["LORE_SKILLS_DIR"] = str(root / "skills")
     os.environ["LORE_PROJECTS_DIR"] = str(root / "projects_dir")
+    os.environ["LORE_CODEX_SESSIONS_DIR"] = str(root / "codex_sessions")
     spec = importlib.util.spec_from_file_location(f"lore_{uuid.uuid4().hex[:8]}", BIN_LORE)
     mod = importlib.util.module_from_spec(spec)
     with quiet():
@@ -750,9 +751,11 @@ def _apply_one(tgt, conn, op: dict, uid_to_id: dict) -> None:
         if verb == "upsert":
             slug = tgt.resolve_or_create_synthetic_slug(conn, pk) if pk else None
             conn.execute(
-                "INSERT OR REPLACE INTO sessions VALUES(?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO sessions(session_id, project, cwd, title,"
+                " first_ts, last_ts, messages, engine) VALUES(?,?,?,?,?,?,?,?)",
                 (payload["session_id"], slug, payload.get("cwd"), payload.get("title"),
-                 payload.get("first_ts"), payload.get("last_ts"), payload.get("messages") or 0),
+                 payload.get("first_ts"), payload.get("last_ts"), payload.get("messages") or 0,
+                 payload.get("engine") or "claude"),
             )
             conn.commit()
         return

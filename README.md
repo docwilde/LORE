@@ -12,7 +12,7 @@
 
 # LORE — Lots Of Reconciled Engrams
 
-**Persistent memory for Claude Code that nothing writes to without your approval.** Curated memory stays hard-capped and human-directed. A derived belief store keeps everything the agent concluded on its own — and reaches the agent only when you ask for it.
+**Persistent memory shared by Claude Code, DOXA, and Codex.** Curated memory stays hard-capped and human-directed. A derived belief store keeps conclusions with their evidence, and reaches an agent only when requested or explicitly configured for context.
 
 > [!WARNING]
 > **Beta.** LORE is `0.x` and still moves fast: 78 releases took it from `0.6.0`
@@ -20,8 +20,9 @@
 > surfaces and the curated-memory caps can still change between releases — the
 > SQLite store migrates itself additively, nothing else promises to.
 >
-> What that means concretely for you: it reads every transcript under
-> `~/.claude/projects/`, sends a scrubbed session digest to the same Anthropic
+> What that means concretely for you: its index reads Claude Code and DOXA
+> transcripts under `~/.claude/projects/` and Codex transcripts under
+> `~/.codex/sessions/`; its Claude review sends a scrubbed session digest to the Anthropic
 > endpoint the session already used, and edits `~/.claude/settings.json` when you
 > run `/lore:setup` (`lore teardown` reverses that).
 > [Sync](#sync--one-memory-on-every-machine) is off until you configure it, and
@@ -45,10 +46,14 @@ Beliefs form a graph, and it is built for that bet rather than against it. An ed
 - **Curated memory behind a cap and a gate.** `USER.md` (9000 chars, global), `MEMORY.md` (8800 chars, per repo) and `machines/<host>.md` (`LORE_MACHINE_CAP`, 4400 chars, per host — only the current host's injects, so one box's driver quirk is never asserted on another) inject at session start. You write them via `/lore:remember`; background review only proposes, and `/lore:approve` applies.
 - **A belief store with evidence trails.** Up to 10 confidence-weighted conclusions per session, each carrying its citations. Beliefs never enter context uninvited — read them through `/lore:ask`, or at decision time through `lore consult`.
 - **Typed relations between beliefs, and traversal over them.** Five declared verbs — `depends_on`, `specializes`, `explains`, `contradicts`, `applies_when` — emitted by the deriver alongside its conclusions, plus `supersedes` from the store's own history. `lore graph` walks them: neighbourhood, most-confident path, components, communities. A chain's confidence is the *product* of its hops, so a long chain of plausible steps is not a strong conclusion.
-- **Local full-text session search.** Every transcript indexed incrementally into SQLite FTS5. No embeddings, no API calls.
+- **Local full-text session search.** Claude Code, DOXA, and standalone Codex sessions share one incremental SQLite FTS5 index. Engine origin is shown with search results. No embeddings, no API calls.
 - **A project file map** (`/lore:filemap`, capped by `LORE_FILEMAP_CAP` at 4400 chars). One `path — purpose` row per load-bearing file, so nobody hunts a location twice.
 - **Skills that carry a track record.** Proposed only for a recipe the session verified, judged on every later use, updated or retired once one keeps failing.
 - **One memory across machines, or none at all.** [Sync](#sync--one-memory-on-every-machine) reconciles the laptop, the workstation and a sandbox through a signed op log — through a hub, or directly between two machines with no hub at all. It does nothing until configured, and an op it cannot verify is staged for a human rather than applied.
+
+User and repo memory have one scope each across engines. A memory's source
+engine travels as provenance and appears in the snapshot when known; it does
+not create a separate memory or change a fact's authority.
 
 ## How it works
 
@@ -74,6 +79,23 @@ Full mechanics — every command, config variable, hook, and the belief/write ga
 `/lore:setup` walks each `/lore:doctor` finding behind its own confirmation: disabling Claude Code's built-in auto-memory, adding the permission allowlist, porting existing entries, priming the session index.
 
 **First run:** review only looks forward, so run `/lore:backfill project` once to derive existing sessions into the belief store.
+
+### Codex
+
+This checkout also contains a portable Codex `plugin.json`. When LORE is
+installed as a Codex plugin, its session-start hook loads the same user and
+repo snapshot as the Claude plugin. The shared skill provides memory writes
+and session search. For a skill-only local setup from this checkout:
+
+```sh
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+ln -s "$(pwd)/codex/skills/lore" "${CODEX_HOME:-$HOME/.codex}/skills/lore"
+```
+
+The skill calls LORE's CLI against the shared store. This skill-only setup
+reads memory when a task needs it; installing the plugin adds automatic
+session-start injection. The Codex hook does not run LORE's Claude-only
+reviewer, so Codex memories enter through explicit writes and approvals.
 
 ## Sync — one memory on every machine
 

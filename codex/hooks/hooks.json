@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/codex/hooks/session_start.py\"",
+            "timeout": 10,
+            "statusMessage": "Loading LORE memory",
+            "additionalContextLimit": 16000
+          }
+        ]
+      }
+    ]
+  }
+}

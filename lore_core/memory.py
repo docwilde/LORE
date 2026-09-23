@@ -22,10 +22,12 @@ from .config import (
     valid_slug,
 )
 from .gate import (
+    current_engine,
     entry_key,
     entry_provenance,
     forget_entry,
     gate_write,
+    memory_source_labels,
     provenance_tag,
     record_entry,
     writer_class,
@@ -41,6 +43,7 @@ __all__ = [
     'memory_cap',
     'read_entries',
     'render_entries',
+    'render_memory_entries',
     'usage_line',
     'write_entries',
     'match_entries',
@@ -109,6 +112,17 @@ def read_entries(path: Path) -> list[str]:
 
 def render_entries(entries: list[str]) -> str:
     return "".join(f"- {e}\n" for e in entries)
+
+
+def render_memory_entries(scope: str, slug: str, entries: list[str]) -> str:
+    """Show an author's engine to readers without changing the stored fact.
+
+    Legacy/unknown entries keep their original display. The sidecar label is
+    informational; neither memory identity nor scope depends on it.
+    """
+    sources = memory_source_labels(memory_bucket(scope, slug), entries)
+    return "".join(f"- {entry}" + (f" [source: {engine}]" if engine else "") + "\n"
+                   for entry, engine in zip(entries, sources))
 
 
 def usage_line(entries: list[str], cap: int) -> str:
@@ -202,7 +216,8 @@ def _serialized_memory(fn):
 
 @_serialized_memory
 def memory_add(scope: str, slug: str, text: str, *, via: str = "direct",
-               origin: "str | None" = None) -> str | None:
+               origin: "str | None" = None,
+               source_engine: "str | None" = None) -> str | None:
     """`via` (ISSUE #43) records HOW this entry got in — "direct" for a write
     by the interactive agent or the user's own shell, "approved" when
     apply_item lands a staged proposal. It never changes what is written;
@@ -217,14 +232,19 @@ def memory_add(scope: str, slug: str, text: str, *, via: str = "direct",
     entries.append(text)
     err = write_entries(path, entries, memory_cap(scope), scope)
     if err is None:
-        record_entry("memory", memory_bucket(scope, slug), text, via=via, origin=origin)
-        _append_memory_op(scope, slug, "add", {"text": text, "via": via, "writer": writer_class()})
+        engine = current_engine(source_engine)
+        record_entry("memory", memory_bucket(scope, slug), text, via=via,
+                     origin=origin, source_engine=engine)
+        _append_memory_op(scope, slug, "add", {"text": text, "via": via,
+                                                "writer": writer_class(),
+                                                "source_engine": engine})
     return err
 
 
 @_serialized_memory
 def memory_replace(scope: str, slug: str, needle: str, text: str, *,
-                   via: str = "direct", origin: "str | None" = None) -> str | None:
+                   via: str = "direct", origin: "str | None" = None,
+                   source_engine: "str | None" = None) -> str | None:
     path = memory_path(scope, slug)
     entries = read_entries(path)
     hits = match_entries(entries, needle)
@@ -238,12 +258,15 @@ def memory_replace(scope: str, slug: str, needle: str, text: str, *,
     entries[hits[0]] = new
     err = write_entries(path, entries, memory_cap(scope), scope)
     if err is None:
+        engine = current_engine(source_engine)
         bucket = memory_bucket(scope, slug)
         forget_entry("memory", bucket, old)
-        record_entry("memory", bucket, new, via=via, origin=origin)
+        record_entry("memory", bucket, new, via=via, origin=origin,
+                     source_engine=engine)
         old_key = entry_key("memory", bucket, old)
         _append_memory_op(scope, slug, "replace",
-                          {"old_key": old_key, "text": new, "via": via, "writer": writer_class()})
+                          {"old_key": old_key, "text": new, "via": via,
+                           "writer": writer_class(), "source_engine": engine})
     return err
 
 
@@ -338,7 +361,8 @@ def memory_move(scope: str, from_slug: str, needle: str, to_slug: str,
             return err  # refuse rather than truncate: nothing written anywhere
         record_entry("memory", memory_bucket(to_scope, to_slug), text,
                      via=prov.get("via", "direct"), origin=f"moved from {src_label}",
-                     writer=prov.get("writer"))
+                     writer=prov.get("writer"),
+                     source_engine=prov.get("source_engine", "unknown"))
     src_entries.pop(hits[0])
     src_key = entry_key("memory", src_bucket, text)
     forget_entry("memory", src_bucket, text)
@@ -382,7 +406,7 @@ def cmd_memory(args) -> int:
             label = f"{scope} — {key}" if scope == "machine" else scope
             print(f"## {label} ({usage_line(entries, memory_cap(scope))})"
                   f"{provenance_tag('memory', memory_bucket(scope, key), entries)}")
-            print(render_entries(entries).rstrip() or "(empty)")
+            print(render_memory_entries(scope, key, entries).rstrip() or "(empty)")
             # Other hosts are never shown inline -- pull-on-demand, the same
             # discipline the file map keeps. Naming them costs one line and
             # makes the fleet discoverable without injecting any of it.

@@ -46,6 +46,11 @@ class TestScrubSecrets(unittest.TestCase):
             out = lore.scrub_secrets(prefix + "Ab1" * 12)
             self.assertIn("[REDACTED:github]", out, prefix)
 
+    def test_github_fine_grained_pat(self):
+        token = "github_pat_" + "Ab1_cD2" * 8
+        out = lore.scrub_secrets("credential " + token + " end")
+        self.assertEqual(out, "credential [REDACTED:github-pat] end")
+
     def test_cloudflare_token(self):
         out = lore.scrub_secrets("cfat_" + "Zz9" * 8)
         self.assertIn("[REDACTED:cloudflare]", out)
