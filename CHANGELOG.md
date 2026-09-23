@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.58.0 — 2026-09-24
+
+**One memory across Claude Code, Codex, and DOXA.**
+
+- User and repo memories retain one shared scope. Approved facts now record their originating engine as informational provenance in the snapshot and provenance view. Belief evidence records the source engine too, without changing belief scope or confidence.
+- Engine provenance survives signed sync through a hub, a direct peer, or a manual export/import bundle. Older entries remain valid and show no engine label when their origin is unknown; `lore-hub` treats the extra payload field as opaque.
+- A portable Codex plugin manifest and session-start hook load the same LORE snapshot. Codex can read and explicitly propose memories through the shared skill; automatic Claude review is not run for standalone Codex sessions.
+- The FTS5 index now includes standalone Codex user and assistant messages alongside Claude Code and DOXA sessions, with engine labels in search results. It skips internal Codex rollouts and DOXA duplicates, and excludes instructions, reasoning, and tool output.
+- The transcript scrubber now redacts GitHub fine-grained PATs before indexing or sync. All 33 test files pass on the release branch.
+
 ## 0.57.0 — 2026-09-20
 
 **The sync receiver verifies before it records, and nothing outside LORE_ROOT is ever written.**
