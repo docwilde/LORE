@@ -10,7 +10,10 @@ snapshot. Claude Code can also run `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py"
 <cmd>`; standalone Codex can run `bash codex/skills/lore/scripts/lore.sh
 <cmd>` from a LORE checkout.
 
-The current memory snapshot was injected at session start. A write reaches the files at once but reaches your context only at the next injection — next session by default, or within `LORE_REFRESH_SECS` when the mid-session refresh is on; the snapshot's own last rule says which applies. Either way `lore memory show` reads the files live. State lives in `~/.claude/lore/` (override: `LORE_ROOT`).
+The memory snapshot is injected at session start. Claude Code can refresh it
+between turns; the Codex hook injects it at startup, resume, clear, and
+compaction. A write reaches the files immediately; `lore memory show` reads
+them live. State lives in `~/.claude/lore/` (override: `LORE_ROOT`).
 
 ## Writing memory
 

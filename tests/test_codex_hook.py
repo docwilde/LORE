@@ -31,6 +31,7 @@ class CodexHookTests(unittest.TestCase):
             )
             self.assertIn("Prefers one shared memory.", result.stdout)
             self.assertIn("## User memory", result.stdout)
+            self.assertIn("In Codex, this snapshot is injected", result.stdout)
 
 
 if __name__ == "__main__":

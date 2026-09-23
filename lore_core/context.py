@@ -152,6 +152,12 @@ def review_interval() -> int | None:
 
 def _freshness_rule() -> str:
     """The snapshot's own statement of how current it is."""
+    if os.environ.get("LORE_ENGINE", "").strip().lower() == "codex":
+        return (
+            "- In Codex, this snapshot is injected at startup, resume, clear, and"
+            " compaction. Writes land in the files immediately; read them during"
+            " this session with lore memory show."
+        )
     interval = refresh_interval()
     if refresh_on_change():
         return (
