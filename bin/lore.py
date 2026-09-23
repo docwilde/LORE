@@ -1045,6 +1045,14 @@ def main() -> int:
     syp.add_argument("--cwd")
     syp.set_defaults(fn=cmd_sync_status, scmd="status")
     syp = syncsub.add_parser(
+        "export", help="write a signed, portable op bundle for offline transfer")
+    syp.add_argument("path", help="new bundle file (never overwritten)")
+    syp.set_defaults(fn=cmd_sync_export, scmd="export")
+    syp = syncsub.add_parser(
+        "import", help="verify and merge an offline op bundle")
+    syp.add_argument("path", help="bundle file produced by sync export")
+    syp.set_defaults(fn=cmd_sync_import, scmd="import")
+    syp = syncsub.add_parser(
         "push", help="send this machine's unpushed ops to the hub, page by page")
     syp.add_argument("--from", dest="from_seq", type=int, default=None,
                      metavar="SEQ",

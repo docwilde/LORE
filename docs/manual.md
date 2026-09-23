@@ -254,6 +254,10 @@ Off until `LORE_SYNC_URL` is set. With it set, every write to a synced class app
 | `lore sync serve` | Transport B: serve this machine's op log to a peer. Pull side only, loopback unless told otherwise, and started by nothing but this command. |
 | `lore sync login <token>` | store this machine's bearer token in `settings.json` → `"env"`. The token is never echoed. |
 | `lore sync classes [+class\|-class]` | show or edit `LORE_SYNC_CLASSES` |
+| `lore sync export <new-file>` | write a private, signed bundle of portable content ops for manual offline transfer; never overwrite a file |
+| `lore sync import <file>` | validate and merge an offline bundle through the normal sync apply engine |
+
+Manual transfer needs the same `LORE_SYNC_HMAC_KEY` on both machines but no hub, peer, or token. Export copies signed ops from the local log for the enabled portable classes: memory, file maps, beliefs, pending proposals, and skills. Machine memory never enters the op log. Session indexes, transcripts, tabsets, worktree records, credentials, local machine configuration, and peer cursors are excluded; each op retains its author machine id for deduplication. Move the bundle file yourself, then import it on the destination. The complete bundle count and digest are checked before any op is applied; each op's MAC is then checked by the normal receiver. A bad MAC is staged as unverified, and conflicting writes follow the usual pending/conflict rules. Re-import is idempotent. The bundle contains personal content, so handle it as a private file.
 
 A pull runs detached at SessionStart and never on the prompt loop; a push runs after the review worker finishes. Both are silent when the hub is unreachable — ops accumulate and the next push drains them — and an explicit `lore sync` prints the error. A `409` from the hub means the client's log has a gap: it is reported, never retried around, because a lost op means a store that is no longer a function of its log.
 
