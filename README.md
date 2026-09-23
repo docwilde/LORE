@@ -75,6 +75,22 @@ Full mechanics — every command, config variable, hook, and the belief/write ga
 
 **First run:** review only looks forward, so run `/lore:backfill project` once to derive existing sessions into the belief store.
 
+### Codex
+
+LORE uses the same user and repo memory store for Claude Code, DOXA, and
+standalone Codex. To make its read, write, and session-search workflow
+available as a Codex skill from this checkout:
+
+```sh
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+ln -s "$(pwd)/codex/skills/lore" "${CODEX_HOME:-$HOME/.codex}/skills/lore"
+```
+
+The skill calls LORE's CLI against the shared store. Codex can read a
+snapshot, stage or apply a user-authorized memory, and search indexed sessions.
+Session-start injection remains specific to clients that call LORE's snapshot
+hook; the skill reads it when a task needs remembered context.
+
 ## Sync — one memory on every machine
 
 A laptop, a workstation and a cloud sandbox each build their own store, and
