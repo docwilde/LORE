@@ -1381,6 +1381,41 @@ class PeerFramingErrors(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(body["error"], "bad_request")
 
+    def test_a_huge_declared_body_is_rejected_without_reading_it(self):
+        import http.client
+
+        with serving(self.mod) as url:
+            port = int(url.rsplit(":", 1)[1])
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.putrequest("GET", "/v1/ops")
+            conn.putheader("Content-Length", str(2**50))
+            conn.endheaders()  # deliberately send no body
+            response = conn.getresponse()
+            status, body = response.status, json.loads(response.read())
+            conn.close()
+
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "bad_request")
+
+    def test_listener_rejects_connections_when_handler_slots_are_full(self):
+        server = self.mod.peer_server(bind="127.0.0.1", port=0, auth="none")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        slots = server._client_slots
+        for _ in range(server.MAX_CLIENTS):
+            self.assertTrue(slots.acquire(blocking=False))
+        thread.start()
+        try:
+            with socket.create_connection(server.server_address, timeout=3) as client:
+                client.settimeout(3)
+                client.sendall(b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                self.assertEqual(client.recv(1), b"")
+        finally:
+            for _ in range(server.MAX_CLIENTS):
+                slots.release()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

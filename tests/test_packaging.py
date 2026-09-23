@@ -148,6 +148,12 @@ class TestWhatIsPackaged(unittest.TestCase):
         packages = PYPROJECT["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
         self.assertEqual(packages, ["lore_core"])
 
+    def test_wheel_bundles_the_cli_that_context_snapshots_invoke(self):
+        bundled = PYPROJECT["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+        self.assertEqual(bundled["bin/lore.py"], "lore_core/_bin/lore.py")
+        from lore_core.context import _cli_path
+        self.assertTrue(_cli_path().is_file())
+
     def test_the_sdist_carries_its_own_version_source(self):
         """An sdist that cannot rebuild itself is broken: the build reads
         the version out of the plugin manifest, so the manifest has to be
@@ -155,6 +161,7 @@ class TestWhatIsPackaged(unittest.TestCase):
         include = PYPROJECT["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
         self.assertIn("/.claude-plugin/plugin.json", include)
         self.assertIn("/lore_core", include)
+        self.assertIn("/bin/lore.py", include)
 
     def test_no_console_script(self):
         """`lore` is the plugin's CLI, resolved by path out of the plugin

@@ -63,6 +63,8 @@ import sys
 import uuid
 from pathlib import Path
 
+from .file_lock import atomic_write_text, locked_paths
+
 from .config import (ROOT, SKILL_NAME_RE, agent_id, one_line, private_dir,
                      utcnow, valid_skill_name)
 from .sync_oplog import append_op, resolve_project_key_for_slug
@@ -382,10 +384,7 @@ def _load() -> dict:
 
 def _save(data: dict) -> None:
     path = PROVENANCE_PATH()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
 def record_entry(kind: str, bucket: str, text: str, via: str = "direct",
@@ -394,15 +393,16 @@ def record_entry(kind: str, bucket: str, text: str, via: str = "direct",
     must not be able to fail a memory write (house rule -- this sits on the
     same path as the hook)."""
     try:
-        data = _load()
-        data["entries"][entry_key(kind, bucket, text)] = {
-            "writer": writer or writer_class(),
-            "via": via,
-            "at": utcnow(),
-            "agent": agent_id(),
-            **({"origin": origin} if origin else {}),
-        }
-        _save(data)
+        with locked_paths(PROVENANCE_PATH(), lock_root=ROOT):
+            data = _load()
+            data["entries"][entry_key(kind, bucket, text)] = {
+                "writer": writer or writer_class(),
+                "via": via,
+                "at": utcnow(),
+                "agent": agent_id(),
+                **({"origin": origin} if origin else {}),
+            }
+            _save(data)
     except Exception:                                       # noqa: BLE001
         pass
 
@@ -410,9 +410,10 @@ def record_entry(kind: str, bucket: str, text: str, via: str = "direct",
 def forget_entry(kind: str, bucket: str, text: str) -> None:
     """Drop a removed entry's record so the ledger tracks the store."""
     try:
-        data = _load()
-        if data["entries"].pop(entry_key(kind, bucket, text), None) is not None:
-            _save(data)
+        with locked_paths(PROVENANCE_PATH(), lock_root=ROOT):
+            data = _load()
+            if data["entries"].pop(entry_key(kind, bucket, text), None) is not None:
+                _save(data)
     except Exception:                                       # noqa: BLE001
         pass
 

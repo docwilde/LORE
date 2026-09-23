@@ -21,7 +21,7 @@ from .filemap import filemap_add, filemap_remove, filemap_replace
 from .gate import pending_op_project_key
 from .memory import memory_add, memory_move, memory_remove, memory_replace
 from .store import db_connect
-from .sync_oplog import append_op
+from .sync_oplog import append_op, canonical_bytes
 
 
 __all__ = [
@@ -287,10 +287,46 @@ def item_digest(pid: str) -> "str | None":
     on disk, and two dicts that compare equal can have been written by
     different processes with different intent.
     """
+    snap = _pending_bytes_snapshot(pid)
+    return hashlib.sha256(snap[0]).hexdigest() if snap is not None else None
+
+
+def _pending_bytes_snapshot(pid: str) -> "tuple[bytes, int] | None":
+    """Read one pending file through one descriptor.
+
+    The inode and bytes must describe the same opened file.  Reading JSON
+    through ``Path.read_text()`` and its digest through another path lookup
+    left a rename window in which approval compared one proposal and applied
+    another.
+    """
     try:
-        return hashlib.sha256(
-            (ROOT / "pending" / f"{pid}.json").read_bytes()).hexdigest()
+        fd = os.open(ROOT / "pending" / f"{pid}.json", os.O_RDONLY)
     except OSError:
+        return None
+    try:
+        inode = os.fstat(fd).st_ino
+        chunks = []
+        while True:
+            chunk = os.read(fd, 64 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks), inode
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _pending_snapshot(pid: str) -> "tuple[dict, str, int] | None":
+    """The parsed proposal and the exact bytes/inode it came from."""
+    raw = _pending_bytes_snapshot(pid)
+    if raw is None:
+        return None
+    data, inode = raw
+    try:
+        return json.loads(data.decode("utf-8")), hashlib.sha256(data).hexdigest(), inode
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None
 
 
@@ -332,24 +368,29 @@ def record_listing(pids: "list[str]", *, refresh: bool = False) -> None:
     as untrusted for this directory -- was applied verbatim with a human's
     approval attached to text they never saw.
 
-    TWO MODES, and the difference is what makes this usable rather than a
-    trap. A plain call FILLS IN what is missing and leaves every existing
-    digest alone: `load_pending` is a read, and a read must not quietly
-    re-bless a file that changed since the last one. `refresh=True` recomputes
-    them, and only `lore pending` passes it -- that IS a human reading the
-    pile again, which is the one event that may re-bless it. A proposal edited
-    by hand is therefore refused by `approve` until it has been listed again.
+    This helper records a requested file snapshot, but is not evidence that a
+    person saw an unverified sync operation. Only :func:`cmd_pending` writes
+    the ``reviewed`` marker through :func:`_record_snapshots`, after it has
+    printed that operation's complete signed bytes.
 
     Never raises: a pile that cannot be recorded must still be listable.
     """
     known = listed_digests()
     for pid in pids:
-        _was, ino = _listed_entry(known, pid)
-        if not refresh and pid in known and ino == _item_inode(pid):
+        if not refresh and pid in known:
             continue
-        digest = item_digest(pid)
-        if digest is not None:
-            known[pid] = {"sha256": digest, "ino": _item_inode(pid)}
+        snap = _pending_snapshot(pid)
+        if snap is not None:
+            _item, digest, inode = snap
+            known[pid] = {"sha256": digest, "ino": inode}
+    _write_listing(known)
+
+
+def _record_snapshots(snapshots: "list[tuple[str, dict, str, int]]") -> None:
+    """Refresh listings from the same snapshots `lore pending` displayed."""
+    known = listed_digests()
+    for pid, _item, digest, inode in snapshots:
+        known[pid] = {"sha256": digest, "ino": inode, "reviewed": True}
     _write_listing(known)
 
 
@@ -361,7 +402,9 @@ def forget_listing(pid: str) -> None:
         _write_listing(known)
 
 
-def changed_since_listing(pid: str) -> bool:
+def changed_since_listing(
+    pid: str, snapshot: "tuple[dict, str, int] | None" = None,
+) -> bool:
     """Whether this proposal's bytes differ from the ones that were recorded.
 
     False when nothing was ever recorded for it: there is then nothing to
@@ -371,9 +414,26 @@ def changed_since_listing(pid: str) -> bool:
     was, ino = _listed_entry(listed_digests(), pid)
     if not was:
         return False
-    if ino is not None and ino != _item_inode(pid):
-        return False  # a different file under the same id, never this one rewritten
-    return was != item_digest(pid)
+    snap = snapshot or _pending_snapshot(pid)
+    if snap is None:
+        return True
+    _item, digest, current_ino = snap
+    if ino is not None and ino != current_ino:
+        # A rename is a replacement, even if the replacement's JSON happens
+        # to parse the same way.  In particular, never let load_pending()
+        # silently replace this listing's digest with the attacker-selected
+        # inode before approve gets its comparison.
+        return True
+    return was != digest
+
+
+def _listed_snapshot(pid: str, snapshot: "tuple[dict, str, int]") -> bool:
+    """Whether this exact snapshot was shown by an explicit full listing."""
+    entry = listed_digests().get(pid)
+    was, ino = _listed_entry({pid: entry}, pid)
+    _item, digest, current_ino = snapshot
+    return (isinstance(entry, dict) and entry.get("reviewed") is True and bool(was)
+            and was == digest and (ino is None or ino == current_ino))
 
 
 def _write_listing(known: dict) -> None:
@@ -398,16 +458,22 @@ def load_pending() -> list[tuple[str, dict]]:
         return []
     items = []
     for f in sorted(pdir.glob("*.json")):
-        try:
-            items.append((f.stem, json.loads(f.read_text(encoding="utf-8"))))
-        except (json.JSONDecodeError, OSError):
-            continue
-    # Every read of the pile records the bytes of anything not recorded yet,
-    # and re-records nothing -- see record_listing. This is what `approve` has
-    # to compare against, and a proposal first seen by the SessionStart
-    # snapshot is as reviewed as one first seen by `lore pending`.
-    record_listing([pid for pid, _ in items])
+        snap = _pending_snapshot(f.stem)
+        if snap is not None:
+            items.append((f.stem, snap[0]))
     return items
+
+
+def _pending_snapshots() -> "list[tuple[str, dict, str, int]]":
+    pdir = ROOT / "pending"
+    if not pdir.exists():
+        return []
+    snapshots = []
+    for f in sorted(pdir.glob("*.json")):
+        snap = _pending_snapshot(f.stem)
+        if snap is not None:
+            snapshots.append((f.stem, *snap))
+    return snapshots
 
 
 ADJUDICATE_PROMPT = """You are de-duplicating a pile of staged memory lines for a \
@@ -544,6 +610,23 @@ def _print_item(pid: str, item: dict) -> None:
         print(f"{pid}  sync/UNVERIFIED  {op.get('class', '?')}/{op.get('op', '?')}")
         print(f"    !! not applied: {item.get('reason', 'mac did not verify')}")
         print(f"    from machine {op.get('machine_id', '?')}")
+        # The class/verb summary above is not a review of an unverified op:
+        # its payload is the mutation an attacker is asking the human to
+        # apply.  Show the exact UTF-8 byte sequence which the protocol signs
+        # (all eight security-relevant fields, including payload), uncut.
+        # record_listing() records the pending file after this display, and
+        # cmd_approve refuses a changed digest or inode, binding approval to
+        # the bytes represented here rather than merely this id and summary.
+        try:
+            signed = canonical_bytes(op).decode("utf-8")
+        except (KeyError, TypeError, ValueError):
+            # Malformed envelopes cannot apply, but must still be fully
+            # inspectable rather than hiding their payload behind an error.
+            signed = json.dumps(op, sort_keys=True, separators=(",", ":"),
+                                ensure_ascii=False)
+        print("    signed op bytes (UTF-8; approval binds to these exact bytes):")
+        print(f"    | {signed}")
+        print(f"    supplied mac: {op.get('mac')!r}")
     else:
         print(f"{pid}  skill/{item.get('action', 'add')}  {item.get('name')}")
         print(f"    {item.get('description')}")
@@ -570,7 +653,8 @@ def _print_item(pid: str, item: dict) -> None:
 
 
 def cmd_pending(args) -> int:
-    items = load_pending()
+    snapshots = _pending_snapshots()
+    items = [(pid, item) for pid, item, _digest, _inode in snapshots]
     if not items:
         print("no pending proposals.")
         return 0
@@ -583,7 +667,7 @@ def cmd_pending(args) -> int:
         _print_item(pid, item)
     # Record what was just shown, by digest, so `lore approve` can tell
     # whether it is applying the text this listing put in front of a human.
-    record_listing([pid for pid, _ in items], refresh=True)
+    _record_snapshots(snapshots)
     print(f"\n{len(items)} pending. approve: lore approve <id>|all   reject: lore reject <id>|all")
     return 0
 
@@ -622,7 +706,10 @@ def _forget_after_archive(pid: str) -> None:
     forget_listing(pid)
 
 
-def archive(pid: str, status: str) -> None:
+def archive(
+    pid: str, status: str,
+    *, expected_snapshot: "tuple[dict, str, int] | None" = None,
+) -> bool:
     """Move a resolved proposal from pending/ into pending/archive/, stamped
     with its resolution, and append the sync op that records it.
 
@@ -647,18 +734,30 @@ def archive(pid: str, status: str) -> None:
     and the proposal simply stays pending for a retry.
     """
     src = ROOT / "pending" / f"{pid}.json"
-    raw = src.read_text(encoding="utf-8")
-    try:
-        item = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        _quarantine_corrupt(pid, src, raw, exc)
-        _forget_after_archive(pid)
-        return
+    changed = False
+    if expected_snapshot is not None:
+        item, digest, inode = expected_snapshot
+        current = _pending_snapshot(pid)
+        changed = current is None or current[1:] != (digest, inode)
+        # Archive the action that actually landed, not a replacement that
+        # appeared while it was being applied.  When changed, src remains
+        # pending below so it cannot inherit this resolution.
+        item = dict(item)
+    else:
+        raw = src.read_text(encoding="utf-8")
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            _quarantine_corrupt(pid, src, raw, exc)
+            _forget_after_archive(pid)
+            return True
     item["status"] = status
     item["resolved"] = utcnow()
 
     dst_dir = private_dir(ROOT / "pending" / "archive")
     dst = dst_dir / f"{pid}.json"
+    if dst.exists():
+        dst = dst_dir / f"{pid}-{status}-{item['resolved'].replace(':', '')}.json"
     tmp = dst.with_name(dst.name + ".tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -670,9 +769,12 @@ def archive(pid: str, status: str) -> None:
         tmp.unlink(missing_ok=True)
         raise
 
-    # Only now -- the archive copy is confirmed on disk -- may the source go.
-    src.unlink()
-    _forget_after_archive(pid)
+    # Only an unchanged source may inherit the resolution and leave pending/.
+    # A replacement stays visible under its original id and retains the old
+    # listing, which makes a later approval fail closed until it is reviewed.
+    if not changed:
+        src.unlink()
+        _forget_after_archive(pid)
 
     # sync spec PR 3 ("pending" verb `resolve {uid, status}"): the archive
     # IS the resolution, whether approved or rejected -- appended right
@@ -690,6 +792,7 @@ def archive(pid: str, status: str) -> None:
             conn.close()
         except Exception:                                   # noqa: BLE001
             pass
+    return not changed
 
 
 def _quarantine_corrupt(pid: str, src: Path, raw: str, exc: json.JSONDecodeError) -> None:
@@ -717,13 +820,16 @@ def _quarantine_corrupt(pid: str, src: Path, raw: str, exc: json.JSONDecodeError
           f" pending/corrupt/{pid}.json rather than lost")
 
 
-def apply_item(pid: str, item: dict, force: bool) -> str | None:
+def apply_item(
+    pid: str, item: dict, force: bool,
+    *, snapshot: "tuple[dict, str, int] | None" = None,
+) -> str | None:
     # THE SAME PREDICATE `cmd_approve` uses, here as well as there, because
     # this is the function every OTHER caller reaches -- the TUI, a future
     # daemon, a test. `cmd_approve` checks first only so it can re-list the
     # proposal it is refusing; this is what makes the refusal true for
     # everyone.
-    if changed_since_listing(pid):
+    if changed_since_listing(pid, snapshot):
         return ("this proposal changed on disk since it was listed — refusing"
                 " to apply text that was never reviewed. Run `lore pending` to"
                 " read it as it stands now, then approve it again")
@@ -749,6 +855,14 @@ def apply_item(pid: str, item: dict, force: bool) -> str | None:
         # the dependency graph (it drives apply_item's own write paths), so
         # importing it at module level would close a cycle. Same pattern
         # gate.append_pending_stage_op already uses for its store import.
+        reviewed = snapshot or _pending_snapshot(pid)
+        if reviewed is None or reviewed[0] != item:
+            return ("this unverified sync proposal could not be read as the"
+                    " exact bytes being approved; run `lore pending` and try again")
+        if not _listed_snapshot(pid, reviewed):
+            return ("this unverified sync proposal was not fully listed for"
+                    " review. Run `lore pending`, read its signed op bytes,"
+                    " then approve it again")
         from .sync_apply import apply_op_after_approval
         op = item.get("op")
         if not isinstance(op, dict):
@@ -978,17 +1092,19 @@ def resolve_ids(spec: list[str]) -> list[str]:
 
 
 def cmd_approve(args) -> int:
-    ids = resolve_ids(args.ids)
+    snapshots = _pending_snapshots()
+    known = {pid for pid, _item, _digest, _inode in snapshots}
+    ids = [pid for pid, _item, _digest, _inode in snapshots] if args.ids == ["all"] \
+        else [pid for pid in args.ids if pid in known]
     if not ids:
         print("nothing matched.", file=sys.stderr)
         return 1
-    # BEFORE load_pending, which fills in digests for anything not recorded:
-    # what matters here is what was recorded before this command started.
-    changed_ids = {pid for pid in ids if changed_since_listing(pid)}
-    items = dict(load_pending())
+    items = {pid: (item, digest, inode) for pid, item, digest, inode in snapshots}
     failures = 0
     for pid in ids:
-        changed = pid in changed_ids
+        item, digest, inode = items[pid]
+        snapshot = (item, digest, inode)
+        changed = changed_since_listing(pid, snapshot)
         # THE ONE THING THAT BINDS THIS APPROVAL TO WHAT WAS REVIEWED. A
         # proposal whose bytes changed since `lore pending` showed them is
         # re-listed and refused rather than applied: approval is consent to a
@@ -1003,15 +1119,15 @@ def cmd_approve(args) -> int:
             print(f"{pid}: NOT applied — this proposal changed on disk since"
                   f" `lore pending` listed it. Here it is as it stands now;"
                   f" run `lore pending` and read it again before approving.")
-            _print_item(pid, items[pid])
+            _print_item(pid, item)
             continue
-        err = apply_item(pid, items[pid], args.force)
+        err = apply_item(pid, item, args.force, snapshot=snapshot)
         if err:
             failures += 1
             print(f"{pid}: NOT applied — {err}")
             continue
         try:
-            archive(pid, "approved")
+            archived = archive(pid, "approved", expected_snapshot=snapshot)
         except OSError as exc:
             # The write already landed (apply_item succeeded); only the
             # archive copy failed. `archive` left the source in pending/
@@ -1021,7 +1137,13 @@ def cmd_approve(args) -> int:
             print(f"{pid}: applied, but could not archive the proposal — {exc}."
                   f" It remains in pending/ for a retry.")
             continue
-        note = cross_project_note(items[pid])
+        if not archived:
+            failures += 1
+            print(f"{pid}: original reviewed proposal applied, but its pending"
+                  f" file changed before archive — the replacement remains pending"
+                  f" and must be reviewed separately.")
+            continue
+        note = cross_project_note(item)
         print(f"{pid}: applied." + (f" ({note})" if note else ""))
     return 1 if failures else 0
 

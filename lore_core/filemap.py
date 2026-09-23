@@ -37,10 +37,12 @@ pointer line when the map is non-empty).
 
 import os
 import sys
+from functools import wraps
 
 from .config import (FILEMAP_CAP, ROOT, one_line, project_root, project_slug,
                      valid_slug)
 from .gate import entry_key, forget_entry, gate_write, provenance_tag, record_entry, writer_class
+from .file_lock import atomic_write_text, locked_paths
 from .memory import match_entries, read_entries, render_entries, usage_line
 from .scrub import scrub_secrets
 from .store import db_connect
@@ -134,10 +136,7 @@ def write_filemap(slug: str, entries: list[str]) -> str | None:
             f"then retry. Current entries:\n{listing}"
         )
     path = filemap_path(slug)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(body, encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, body)
     return None
 
 
@@ -155,6 +154,15 @@ def _append_filemap_op(slug: str, op: str, payload: dict) -> None:
         pass
 
 
+def _serialized_filemap(fn):
+    @wraps(fn)
+    def wrapped(slug, *args, **kwargs):
+        with locked_paths(filemap_path(slug), lock_root=ROOT):
+            return fn(slug, *args, **kwargs)
+    return wrapped
+
+
+@_serialized_filemap
 def filemap_add(slug: str, path: str, purpose: str,
                 root: "str | None" = None, *, via: str = "direct") -> str | None:
     path = one_line(scrub_secrets(str(path)))
@@ -190,6 +198,7 @@ def filemap_add(slug: str, path: str, purpose: str,
     return err
 
 
+@_serialized_filemap
 def filemap_replace(slug: str, needle: str, path: str, purpose: str,
                     root: "str | None" = None, *, via: str = "direct") -> str | None:
     entries = read_entries(filemap_path(slug))
@@ -215,6 +224,7 @@ def filemap_replace(slug: str, needle: str, path: str, purpose: str,
     return err
 
 
+@_serialized_filemap
 def filemap_remove(slug: str, needle: str) -> str | None:
     entries = read_entries(filemap_path(slug))
     hits = match_entries(entries, needle)
