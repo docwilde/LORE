@@ -188,7 +188,7 @@ def db_connect() -> sqlite3.Connection:
     # reads as "unknown", because nothing in the store records what wrote it
     # and a retroactive label would be a guess dressed as a fact. Nothing
     # reads these columns for behavior, so old rows keep working untouched.
-    for _col in ("writer", "via"):
+    for _col in ("writer", "via", "source_engine"):
         try:
             conn.execute(f"ALTER TABLE beliefs ADD COLUMN {_col} TEXT")
         except sqlite3.OperationalError:
@@ -223,8 +223,13 @@ def db_connect() -> sqlite3.Connection:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS beliefs_uid ON beliefs(uid)")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS belief_evidence("
-        "belief_id INTEGER, session_id TEXT, project TEXT, note TEXT, created TEXT)"
+        "belief_id INTEGER, session_id TEXT, project TEXT, note TEXT, created TEXT,"
+        " source_engine TEXT)"
     )
+    try:
+        conn.execute("ALTER TABLE belief_evidence ADD COLUMN source_engine TEXT")
+    except sqlite3.OperationalError:
+        pass  # pre-existing evidence keeps unknown provenance
     conn.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS belief_fts USING fts5("
         "belief_id UNINDEXED, claim, tokenize='porter unicode61')"

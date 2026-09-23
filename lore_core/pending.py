@@ -909,7 +909,8 @@ def apply_item(
         except (TypeError, ValueError):
             confidence = 0.8
         belief_insert(conn, subject, claim, confidence, item.get("session_id"), slug,
-                      str(item.get("evidence") or "") or None, via="approved")
+                      str(item.get("evidence") or "") or None, via="approved",
+                      source_engine=item.get("source_engine"))
         conn.commit()
         return None
     if item.get("kind") == "memory":
@@ -932,11 +933,14 @@ def apply_item(
                                to_scope=item.get("to_scope") or scope)
         if action == "replace" and item.get("match"):
             err = memory_replace(scope, slug, item["match"], item["text"],
-                                 via="approved")
+                                 via="approved",
+                                 source_engine=item.get("source_engine"))
             if err and err.startswith("no entry matches"):
-                err = memory_add(scope, slug, item["text"], via="approved")
+                err = memory_add(scope, slug, item["text"], via="approved",
+                                 source_engine=item.get("source_engine"))
         else:
-            err = memory_add(scope, slug, item["text"], via="approved")
+            err = memory_add(scope, slug, item["text"], via="approved",
+                             source_engine=item.get("source_engine"))
         return err
     # Everything else is a skill proposal. Its "name" is AUTHORED BY A MODEL
     # (deriver.stage_proposals) or by whatever else staged it, and approval

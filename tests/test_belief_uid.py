@@ -26,6 +26,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import uuid
 from argparse import Namespace
 from pathlib import Path
 
@@ -253,7 +254,8 @@ class BeliefShowUnchanged(unittest.TestCase):
     def test_belief_show_output_is_byte_identical_in_shape(self):
         conn = lore.db_connect()
         bid, _ = lore.belief_insert(conn, f"project:{SLUG}", "shown belief", 0.75,
-                                    "s1", SLUG, "a note", via="direct")
+                                    "s1", SLUG, "a note", via="direct",
+                                    source_engine="unknown")
         conn.commit()
         conn.close()
         with quiet() as buf:
@@ -263,14 +265,76 @@ class BeliefShowUnchanged(unittest.TestCase):
         self.assertIn(
             f"[{bid}] (project:{SLUG}, conf 0.75, active, 1 evidence, via direct) shown belief",
             out)
-        # nothing user-facing changed: no uid VALUE leaks into the printed
-        # line (the project slug itself spells "uid", so a bare substring
-        # check on the word would false-positive -- assert on shape instead).
+        # The wire uid must never appear in the user-facing belief line.
         conn2 = lore.db_connect()
         stored_uid = conn2.execute("SELECT uid FROM beliefs WHERE id = ?", (bid,)).fetchone()[0]
         conn2.close()
         self.assertNotIn(stored_uid, out)
         self.assertNotRegex(out, UUID4_RE)
+
+    def test_belief_engine_origin_and_evidence_survive_reinforcement(self):
+        conn = lore.db_connect()
+        bid, created = lore.belief_insert(
+            conn, "user", "cross-engine provenance", 0.6,
+            "codex-session", None, "first assertion", via="derived",
+            source_engine="codex",
+        )
+        self.assertTrue(created)
+        lore.belief_reinforce(conn, bid, 0.8, "claude-session", None,
+                              "second assertion", source_engine="claude")
+        conn.commit()
+        row = conn.execute("SELECT source_engine FROM beliefs WHERE id = ?", (bid,)).fetchone()
+        evidence = conn.execute(
+            "SELECT source_engine FROM belief_evidence WHERE belief_id = ? ORDER BY rowid",
+            (bid,),
+        ).fetchall()
+        ops = [json.loads(payload) for (payload,) in conn.execute(
+            "SELECT payload FROM sync_ops WHERE class='belief' AND op IN ('insert', 'reinforce')"
+            " ORDER BY lamport"
+        )]
+        shown = lore.format_belief(conn, (bid, "user", "cross-engine provenance", 0.8, "active"),
+                                   with_evidence=True)
+        conn.close()
+        self.assertEqual(row, ("codex",))
+        self.assertEqual(evidence, [("codex",), ("claude",)])
+        self.assertEqual(ops[-2]["source_engine"], "codex")
+        self.assertEqual(ops[-1]["evidence"]["source_engine"], "claude")
+        self.assertIn("engine codex", shown)
+        self.assertIn("[codex]", shown)
+        self.assertIn("[claude]", shown)
+
+    def test_synced_user_model_belief_preserves_remote_engine(self):
+        from lore_core.sync_apply import _apply_belief
+
+        conn = lore.db_connect()
+        uid = str(uuid.uuid4())
+        insert = {
+            "op": "insert", "project_key": None,
+            "payload": {
+                "uid": uid, "subject": "user-model", "claim": "prefers concise status",
+                "confidence": 0.7, "via": "derived", "source_engine": "codex",
+                "evidence": {"session_id": "s-codex", "project_key": None,
+                             "note": "observed", "source_engine": "codex"},
+            },
+        }
+        reinforce = {
+            "op": "reinforce", "project_key": None,
+            "payload": {
+                "uid": uid, "confidence": 0.8,
+                "evidence": {"session_id": "s-claude", "project_key": None,
+                             "note": "confirmed", "source_engine": "claude"},
+            },
+        }
+        self.assertTrue(_apply_belief(conn, insert))
+        self.assertTrue(_apply_belief(conn, reinforce))
+        origin = conn.execute("SELECT source_engine FROM beliefs WHERE uid = ?", (uid,)).fetchone()
+        sources = conn.execute(
+            "SELECT source_engine FROM belief_evidence WHERE belief_id ="
+            " (SELECT id FROM beliefs WHERE uid = ?) ORDER BY rowid", (uid,),
+        ).fetchall()
+        conn.close()
+        self.assertEqual(origin, ("codex",))
+        self.assertEqual(sources, [("codex",), ("claude",)])
 
     def test_belief_list_output_has_no_uid_either(self):
         conn = lore.db_connect()

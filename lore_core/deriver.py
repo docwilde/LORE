@@ -1334,7 +1334,8 @@ def worker_run(jobfile: Path) -> int:
         # has to reach the same log a human reads.
         bstats: dict = {}
         derived = derive_conclusions(data, job["project"], job["session_id"],
-                                     stats=bstats)
+                                     stats=bstats,
+                                     source_engine=job.get("source_engine", "unknown"))
         cross = bstats.get("cross_subject", 0)
         # ISSUE #51: same accounting treatment -- a fold is a decision too
         # (evidence attached to an existing belief instead of a new row).
@@ -1561,7 +1562,8 @@ def relate_conclusion(conn, src: int, c: dict, session_id: str, acct: dict) -> i
 
 
 def derive_conclusions(data: dict, slug: str, session_id: str,
-                       stats: "dict | None" = None) -> int:
+                       stats: "dict | None" = None,
+                       source_engine: "str | None" = "unknown") -> int:
     """Deriver: auto-write the reviewer's conclusions to the belief store.
     No approval gate — beliefs are queryable data, they never enter context
     uninvited; the gate stays on core memory and skills.
@@ -1693,7 +1695,7 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
                 fold_note = f"{score:.0%} contained"
         if fold_id is not None:
             belief_reinforce(conn, fold_id, confidence, session_id, target_slug,
-                             evidence or claim)
+                             evidence or claim, source_engine=source_engine)
             acct["folded"] += 1
             folded_ids.append(fold_id)
             print(f"conclusion folded into existing [{fold_id}] ({fold_note}, same subject) —"
@@ -1706,6 +1708,7 @@ def derive_conclusions(data: dict, slug: str, session_id: str,
         bid, _created = belief_insert(
             conn, subject, claim, confidence,
             session_id, target_slug, evidence or None, via="derived",
+            source_engine=source_engine,
         )
         derived += 1
         acct["derived"] += 1

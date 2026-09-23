@@ -239,7 +239,7 @@ def stage_write(item: dict) -> str:
     pdir = private_dir(ROOT / "pending")
     stamp = utcnow().replace("-", "").replace(":", "").replace("T", "").rstrip("Z")
     payload = {"created": utcnow(), "derived_by": agent_id()} | dict(item)
-    if payload.get("kind") == "memory":
+    if payload.get("kind") in ("memory", "belief"):
         payload["source_engine"] = current_engine(payload.get("source_engine"))
     # sync spec PR 2 ("ids that cannot collide"): a staged proposal travels
     # on the wire like everything else, so it gets a uid in the payload at

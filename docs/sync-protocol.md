@@ -766,6 +766,11 @@ For memory, optional `source_engine` records the originating session's engine
 (for example `claude` or `codex`) so a receiving agent can see the fact's
 history. It does not alter user/project scope, trust, ordering, or merge rules.
 An older op without the field has unknown engine provenance.
+Belief inserts carry the same optional field for the first assertion;
+each belief evidence object may also carry it, so a later reinforcement
+from another engine retains its own source without changing the belief's
+original source. `user-model` remains a separate belief subject, shared
+across engines like `user` beliefs.
 
 **Evolving a payload field.** An op is durable: one written by an older
 version of this software MUST still apply, and one written by a newer
@@ -796,8 +801,8 @@ field may change:
 | `memory` / `filemap` | `remove` | `{key: string}` — `key` is the `entry_key` hash |
 | `memory` | `replace` | `{old_key: string, text: string, via: string, writer: string, source_engine?: string}` |
 | `filemap` | `replace` | `{old_key: string, text: string, via: string, writer: string}` |
-| `belief` | `insert` | `{uid: string, subject: string, claim: string, confidence: number, via: string, writer: string, created: string, evidence: {session_id: string, project_key: string\|null, note: string}}` |
-| `belief` | `reinforce` | `{uid: string, confidence: number, evidence: {...}}` |
+| `belief` | `insert` | `{uid: string, subject: string, claim: string, confidence: number, via: string, writer: string, created: string, source_engine?: string, evidence: {session_id: string, project_key: string\|null, note: string, source_engine?: string}}` |
+| `belief` | `reinforce` | `{uid: string, confidence: number, evidence: {session_id: string, project_key: string\|null, note: string, source_engine?: string}}` |
 | `belief` | `supersede` | `{uid: string, by_uid: string, reason: string}` |
 | `belief` | `retract` | `{uid: string}` |
 | `belief` | `status` | `{uid: string, status: "active"\|"dormant"}` |
