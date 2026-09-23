@@ -5,7 +5,10 @@ description: Maintain and recall persistent memory (Hermes-pattern). Use when th
 
 # lore — curated memory + session recall
 
-CLI (always via Bash): `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" <cmd>` — aliased below as `lore`.
+CLI (always via Bash): use the `lore()` function printed in the injected
+snapshot. Claude Code can also run `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py"
+<cmd>`; standalone Codex can run `bash codex/skills/lore/scripts/lore.sh
+<cmd>` from a LORE checkout.
 
 The current memory snapshot was injected at session start. A write reaches the files at once but reaches your context only at the next injection — next session by default, or within `LORE_REFRESH_SECS` when the mid-session refresh is on; the snapshot's own last rule says which applies. Either way `lore memory show` reads the files live. State lives in `~/.claude/lore/` (override: `LORE_ROOT`).
 
@@ -19,8 +22,8 @@ lore memory remove --scope user --match "substring"
 lore memory show
 ```
 
-- **user scope** (cap 1375 chars): who the user is, preferences, communication style. Global.
-- **project scope** (cap 2200 chars): this repo's environment facts, conventions, workarounds, corrections. Keyed by cwd.
+- **user scope** (default cap 9000 chars): who the user is, preferences, communication style. Global.
+- **project scope** (default cap 8800 chars): this repo's environment facts, conventions, workarounds, corrections. Keyed by the git repo root.
 - Store a fact **the moment you learn it** — a correction from the user, a discovered footgun, a preference. One line, dense, declarative, no prose.
 - Caps are hard. An over-cap write fails and lists all entries — consolidate overlapping entries with `replace` (merge several facts into one dense line), then retry. Consolidate proactively past 80% usage.
 - Do NOT store: task narration, one-off state, anything derivable from the repo (CLAUDE.md, git history), secrets or credentials.
@@ -33,7 +36,10 @@ lore search "deploy failure" --all             # widen beyond current project
 lore session <session-id> --grep "PGDATABASE"  # read matching context from one session
 ```
 
-Search auto-indexes incrementally first (fast). Results name sessions; `claude -r <id>` resumes one. Use this when a problem smells familiar, when the user references earlier work ("like we did last week"), or before re-deriving a solution.
+Search auto-indexes incrementally first (fast). Results name the source engine
+and show its resume command. Use this when a problem smells familiar, when the
+user references earlier work ("like we did last week"), or before re-deriving
+a solution.
 
 ## Belief store (Honcho-pattern)
 
