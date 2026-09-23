@@ -882,12 +882,8 @@ def _apply_session(conn: sqlite3.Connection, op: dict) -> bool:
     conflict: the author's latest upsert is authoritative, `msgs` replaces by
     session id the way index_sessions already does."
 
-    NOTE on the `machine_id` column sync.md also asks for here: not added.
-    Both production writers insert into `sessions` POSITIONALLY (`INSERT OR
-    REPLACE INTO sessions VALUES(?,?,?,?,?,?,?)`, store.py:443 and 545), so an
-    eighth column turns both into a column-count error. Adding it is a change
-    to the session indexer, not to the apply engine, and it buys `lore search`
-    a display label this PR has no other use for.
+    The engine label is informational metadata; old peers without it are
+    treated as Claude sessions.
     """
     verb, payload = op["op"], op["payload"]
     session_id = payload.get("session_id")
@@ -897,10 +893,11 @@ def _apply_session(conn: sqlite3.Connection, op: dict) -> bool:
 
     if verb == "upsert":
         conn.execute(
-            "INSERT OR REPLACE INTO sessions VALUES(?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO sessions(session_id, project, cwd, title,"
+            " first_ts, last_ts, messages, engine) VALUES(?,?,?,?,?,?,?,?)",
             (session_id, slug, payload.get("cwd"), payload.get("title"),
              payload.get("first_ts"), payload.get("last_ts"),
-             int(payload.get("messages") or 0)),
+             int(payload.get("messages") or 0), payload.get("engine") or "claude"),
         )
         return True
 

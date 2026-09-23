@@ -43,6 +43,8 @@ Everything runs as a plain CLI too — `python3 <plugin>/bin/lore.py --help`, st
 
 A project means the **git repo root**, so a session started in `repo/viz` shares the repo's memory instead of forking an invisible second scope.
 
+`lore index` and `lore search` read Claude transcripts from `~/.claude/projects` and native Codex transcripts from `${CODEX_HOME:-~/.codex}/sessions`. Both use the same project-scoped FTS5 index. Search hits and `lore session` display the source engine; it is provenance, not a separate memory scope. Codex sessions use ids prefixed with `codex:` in LORE. DOXA's Codex transcripts are already indexed in Claude-shaped form, so their matching native Codex rollouts are skipped when DOXA's thread sidecar is present. Override the native directory with `LORE_CODEX_SESSIONS_DIR`.
+
 - A project-scoped fact defaults to the repo it was learned in. When a session is clearly about a different repo (reviewing another repo's PR, discussing a plugin from its consumer), the reviewer can name that project explicitly; a resolvable name retargets the write and shows as a cross-project note in `/lore:pending`. An unresolvable name stays filed under the session's own project rather than guessing, flagged the same way.
 - `lore memory move --scope project --match "<substring>" --to <slug>` relocates an already-mis-scoped entry, cap-enforced on the destination like any other write.
 
@@ -198,6 +200,7 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_DUP_CONTAINMENT` | 0.60 | drop a proposal whose tokens an existing entry in the same scope already carries by this fraction (a `replace` that matches a live entry is exempt) |
 | `LORE_CLAUDE_BIN` | `which claude` | claude binary for the worker |
 | `LORE_SKILLS_DIR` | `~/.claude/skills` | where approved skills install |
+| `LORE_CODEX_SESSIONS_DIR` | `${CODEX_HOME:-~/.codex}/sessions` | native Codex rollout directory for session search indexing |
 | `LORE_REFRESH_ON_CHANGE` | `1` | re-inject the snapshot the prompt after its content changes; `0` opts out |
 | `LORE_REFRESH_SECS` | unset | optional periodic floor for that refresh (change-detection needs no setting) |
 | `LORE_REVIEW_SECS` | unset | mid-session deriver: spawn a detached incremental review at most this often; unset = SessionEnd/PreCompact only |

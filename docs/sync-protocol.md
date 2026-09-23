@@ -802,7 +802,7 @@ field may change:
 | `pending` | `resolve` | `{uid: string, status: string}` |
 | `skill` | `put` | `{name: string, body: string}` — `body` is the **complete `SKILL.md`**, frontmatter included, so a receiver reproduces the author's file byte for byte by writing it verbatim (ISSUE #73) |
 | `skill` | `remove` | `{name: string}` |
-| `session` | `upsert` | `{session_id: string, project_key: string\|null, machine_id: string, cwd: string, title: string, first_ts: string, last_ts: string, messages: integer}` |
+| `session` | `upsert` | `{session_id: string, project_key: string\|null, machine_id: string, cwd: string, title: string, first_ts: string, last_ts: string, messages: integer, engine?: string}`; `engine` is informational provenance and defaults to `claude` for older senders. |
 | `session` | `msgs` | `{session_id: string, rows: array}` |
 | `transcript` (opt-in) | `chunk` | `{session_id: string, from_line: integer, to_line: integer, lines: array<string>}` |
 | `tabset` (opt-in) | `put` / `remove` | `{project_key: string, machine_id: string, record: object}` |

@@ -47,6 +47,7 @@ __all__ = [
     'private_dir',
     'private_file',
     'PROJECTS_DIR',
+    'CODEX_SESSIONS_DIR',
     'MSG_TRUNC',
     'DIGEST_MSG_TRUNC',
     'DIGEST_TOTAL_CAP',
@@ -130,6 +131,10 @@ DIALECTIC_MODEL = os.environ.get("LORE_DIALECTIC_MODEL", "")
 REVIEW_MIN_MESSAGES = int(os.environ.get("LORE_REVIEW_MIN_MESSAGES", "3"))
 SKILLS_DIR = Path(os.environ.get("LORE_SKILLS_DIR", str(Path.home() / ".claude" / "skills")))
 PROJECTS_DIR = Path(os.environ.get("LORE_PROJECTS_DIR", str(Path.home() / ".claude" / "projects")))
+CODEX_SESSIONS_DIR = Path(os.environ.get(
+    "LORE_CODEX_SESSIONS_DIR",
+    str(Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "sessions"),
+))
 
 # SKILL NAME SHAPE (path traversal, two independent reports). A skill
 # proposal's "name" becomes a path component -- SKILLS_DIR / name / SKILL.md
