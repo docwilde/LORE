@@ -73,6 +73,14 @@ REFRESH_STAMP_TTL = 7 * 24 * 3600
 SYNC_PULL_STAMP = ROOT / ".sync" / "pull"
 
 
+def _cli_path() -> Path:
+    """The plugin CLI, or its bundled copy in an installed lore-core wheel."""
+    source_cli = Path(__file__).resolve().parents[1] / "bin" / "lore.py"
+    if source_cli.is_file():
+        return source_cli
+    return Path(__file__).resolve().parent / "_bin" / "lore.py"
+
+
 def sync_pull_interval() -> int:
     """Seconds between SessionStart pulls (LORE_SYNC_PULL_SECS, default 120).
 
@@ -175,12 +183,9 @@ def build_context(cwd: str, scope: str = "all") -> str:
     user_entries = read_entries(memory_path("user", slug))
     proj_entries = read_entries(memory_path("project", slug))
     pending = sorted((ROOT / "pending").glob("*.json")) if (ROOT / "pending").exists() else []
-    # bin/lore.py is what the agent should invoke, not this module: __file__
-    # here is lore_core/context.py since the extraction (2026-08-22), so the
-    # CLI entry point is derived from the package layout (lore_core/ and
-    # bin/ are always siblings under the repo root) rather than from
-    # __file__ directly -- byte-identical to the pre-extraction path.
-    me = str((Path(__file__).resolve().parent.parent / "bin" / "lore.py"))
+    # The plugin checkout uses bin/lore.py; a wheel uses its bundled copy.
+    # Both paths run the same CLI source and remain invocable by Python.
+    me = str(_cli_path())
 
     parts = [
         "LORE MEMORY — curated, hard-capped, Hermes-pattern. You maintain it.",
@@ -429,7 +434,7 @@ def _spawn_relocate(synthetic: str, cwd: str) -> None:
     Popen, so patching it module-wide would break the git calls this same
     reconciliation makes moments earlier."""
     import subprocess
-    cli = str(Path(__file__).resolve().parents[1] / "bin" / "lore.py")
+    cli = str(_cli_path())
     subprocess.Popen(
         [sys.executable, cli, "project", "move", synthetic, cwd],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -591,7 +596,7 @@ def _maybe_spawn_midsession_review(hook: dict, cwd: str, session: str, now: floa
         return
     _write_stamp(stamp, now)
     import subprocess
-    cli = str(Path(__file__).resolve().parents[1] / "bin" / "lore.py")
+    cli = str(_cli_path())
     env = dict(os.environ, LORE_NOTIFY="0", LORE_DEFER_DREAM="1")
     try:
         subprocess.Popen(
@@ -635,7 +640,7 @@ def _maybe_spawn_sync_pull(cwd: str, now: float) -> None:
         return
     _write_stamp(SYNC_PULL_STAMP, now)
     import subprocess
-    cli = str(Path(__file__).resolve().parents[1] / "bin" / "lore.py")
+    cli = str(_cli_path())
     env = dict(os.environ, LORE_NOTIFY="0")
     try:
         subprocess.Popen(

@@ -971,7 +971,8 @@ def _apply_transcript(conn: sqlite3.Connection, op: dict) -> bool:
     directory.mkdir(parents=True, exist_ok=True)
     held = 0
     if path.exists():
-        held = sum(1 for _ in path.open(encoding="utf-8"))
+        with path.open(encoding="utf-8") as stream:
+            held = sum(1 for _ in stream)
     to_line = int(payload.get("to_line") or 0)
     if to_line and to_line <= held:
         return True  # already held: append-only means never twice

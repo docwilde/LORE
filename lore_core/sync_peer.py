@@ -99,6 +99,7 @@ import os
 import socket
 import sqlite3
 import sys
+import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -629,15 +630,18 @@ class _PeerHandler(BaseHTTPRequestHandler):
         # the `400` the contract has for exactly this.
         try:
             parsed = urllib.parse.urlsplit(self.path)
-            # Drain any request body before answering: on HTTP/1.1 an undrained
-            # body desynchronises the next request on a kept-alive connection.
+            # Every peer endpoint is bodyless. Never drain an attacker-chosen
+            # Content-Length before authenticating: a slow or huge body could
+            # tie up an unbounded handler thread. Close on rejected framing.
+            has_transfer_encoding = bool(self.headers.get("Transfer-Encoding"))
             raw_length = (self.headers.get("Content-Length") or "0").strip()
             if not raw_length.isdigit():
                 raise ValueError(f"Content-Length {raw_length!r} is not a length")
             length = int(raw_length)
-            if length:
-                with contextlib.suppress(OSError):
-                    self.rfile.read(length)
+            if length or has_transfer_encoding:
+                self.close_connection = True
+                if method == "GET":
+                    raise ValueError("request bodies are not supported")
             status, payload = self.server.peer.handle(
                 method, parsed.path, urllib.parse.parse_qs(parsed.query),
                 self.headers)
@@ -653,6 +657,32 @@ class _PeerHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+
+class _BoundedPeerServer(ThreadingHTTPServer):
+    """Limit slow clients to a fixed number of handler threads."""
+
+    MAX_CLIENTS = 32
+
+    def __init__(self, *args, **kwargs):
+        self._client_slots = threading.BoundedSemaphore(self.MAX_CLIENTS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._client_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._client_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._client_slots.release()
 
 
 def peer_server(*, bind: str = "127.0.0.1", port: int = DEFAULT_PEER_PORT,
@@ -690,7 +720,7 @@ def peer_server(*, bind: str = "127.0.0.1", port: int = DEFAULT_PEER_PORT,
         conn.commit()
     finally:
         conn.close()
-    server = ThreadingHTTPServer((bind, port), _PeerHandler)
+    server = _BoundedPeerServer((bind, port), _PeerHandler)
     server.daemon_threads = True
     server.peer = PeerOps(machine_id=machine_id, loopback=loopback, auth=mode,
                           allow=allow, version=version, secret=secret)

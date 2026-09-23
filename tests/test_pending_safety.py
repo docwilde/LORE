@@ -464,6 +464,28 @@ class TestApprovalAppliesWhatWasListed(unittest.TestCase):
         self.assertNotIn(swapped["text"], entries)
         self.assertNotIn(self.reviewed["text"], entries)
 
+    def test_atomically_replaced_proposal_after_listing_is_refused(self):
+        """A rename changes the inode, which used to make record_listing()
+        silently bless the replacement when approve reloaded the pile."""
+        with quiet():
+            lore.cmd_pending(Namespace(cluster=False, all=True))
+        original_inode = (_pending_dir() / f"{self.pid}.json").stat().st_ino
+        swapped = dict(self.reviewed)
+        swapped["text"] = "An atomically swapped proposal must not inherit approval."
+        replacement = _pending_dir() / f".{self.pid}.replacement"
+        replacement.write_text(json.dumps(swapped), encoding="utf-8")
+        os.replace(replacement, _pending_dir() / f"{self.pid}.json")
+        self.assertNotEqual((_pending_dir() / f"{self.pid}.json").stat().st_ino,
+                            original_inode)
+
+        with quiet() as buf:
+            rc = lore.cmd_approve(Namespace(ids=[self.pid], force=False))
+
+        self.assertEqual(rc, 1)
+        self.assertIn("changed on disk", buf.getvalue())
+        entries = lore.read_entries(lore.memory_path("user", ""))
+        self.assertNotIn(swapped["text"], entries)
+
     def test_the_proposal_that_was_listed_still_applies(self):
         with quiet():
             lore.cmd_pending(Namespace(cluster=False, all=True))

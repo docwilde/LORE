@@ -271,6 +271,10 @@ def config_env_write(var: str, value: "str | None", *, secret: bool = False) -> 
         print(f"refusing: {var!r} is not a LORE_* variable — only lore's own"
               " switches are managed here.", file=sys.stderr)
         return 1
+    # The generic config command reaches this helper too. Redaction must be
+    # decided by the credential's name, not by which command called us.
+    secret = secret or var in {"LORE_SYNC_TOKEN", "LORE_SYNC_HMAC_KEY",
+                               "LORE_SYNC_PEER_SECRET"}
     path = claude_settings_path()
     settings: dict = {}
     if path.exists():

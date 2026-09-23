@@ -8,11 +8,9 @@
 # in-process) can DECLARE the dependency instead of reaching into a plugin
 # checkout on the machine and hoping it is there.
 #
-# Only `lore_core/` is packaged. `bin/`, `hooks/`, `commands/`, `skills/`
-# and `assets/` are plugin assets -- Claude Code loads them from the plugin
-# directory by path, they are not importable library code, and shipping
-# them in a wheel would put files nothing imports on the consumer's
-# sys.path.
+# Only `lore_core/` is importable. The wheel includes one copy of bin/lore.py
+# inside that package because context snapshots and detached jobs invoke it
+# by absolute path. Other plugin assets remain outside the wheel.
 #
 # Still stdlib-only at runtime: `dependencies` is deliberately empty and
 # hatchling is a BUILD requirement, present only while a wheel is made.
@@ -81,6 +79,9 @@ pattern = '"version":\s*"(?P<version>[^"]+)"'
 [tool.hatch.build.targets.wheel]
 packages = ["lore_core"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"bin/lore.py" = "lore_core/_bin/lore.py"
+
 [tool.hatch.build.targets.sdist]
 # plugin.json is in the sdist BECAUSE it is the version source: a wheel
 # built from an unpacked sdist has to be able to read it, and an sdist that
@@ -88,6 +89,7 @@ packages = ["lore_core"]
 # downstream packager can run the suite against what they received.
 include = [
     "/lore_core",
+    "/bin/lore.py",
     "/tests",
     "/.claude-plugin/plugin.json",
     "/CHANGELOG.md",

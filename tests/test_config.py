@@ -66,6 +66,14 @@ class TestConfigSetUnset(StageEnvMixin, unittest.TestCase):
         data = json.loads(self.settings.read_text(encoding="utf-8"))
         self.assertEqual(data["env"]["LORE_DISABLE_REVIEW"], "1")
 
+    def test_generic_config_redacts_sync_secrets(self):
+        for var in ("LORE_SYNC_TOKEN", "LORE_SYNC_HMAC_KEY", "LORE_SYNC_PEER_SECRET"):
+            value = f"sensitive-{var}"
+            rc, out = self._run(var, value)
+            self.assertEqual(rc, 0)
+            self.assertNotIn(value, out)
+            self.assertEqual(json.loads(self.settings.read_text())["env"][var], value)
+
     def test_round_trip_preserves_other_keys(self):
         self.settings.write_text(json.dumps(
             {"autoMemoryEnabled": False, "env": {"OTHER": "kept"}}), encoding="utf-8")

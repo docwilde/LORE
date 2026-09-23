@@ -6,6 +6,7 @@ plus the `lore memory` CLI command.
 
 import os
 import sys
+from functools import wraps
 from pathlib import Path
 
 from .config import (
@@ -29,6 +30,7 @@ from .gate import (
     record_entry,
     writer_class,
 )
+from .file_lock import atomic_write_text, locked_paths
 from .store import db_connect
 from .sync_oplog import append_op, resolve_project_key_for_slug
 
@@ -126,8 +128,7 @@ def write_entries(path: Path, entries: list[str], cap: int, label: str) -> str |
             f"  memory replace --scope {label} --match \"<substring>\" \"<merged fact>\"\n"
             f"or drop one with memory remove, then retry. Current entries:\n{listing}"
         )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    atomic_write_text(path, body)
     return None
 
 
@@ -190,6 +191,16 @@ def _append_memory_op(scope: str, slug: str, op: str, payload: dict) -> None:
         pass
 
 
+def _serialized_memory(fn):
+    """Keep each read, decision, write, and sidecar update in one file lock."""
+    @wraps(fn)
+    def wrapped(scope, slug, *args, **kwargs):
+        with locked_paths(memory_path(scope, slug), lock_root=ROOT):
+            return fn(scope, slug, *args, **kwargs)
+    return wrapped
+
+
+@_serialized_memory
 def memory_add(scope: str, slug: str, text: str, *, via: str = "direct",
                origin: "str | None" = None) -> str | None:
     """`via` (ISSUE #43) records HOW this entry got in — "direct" for a write
@@ -211,6 +222,7 @@ def memory_add(scope: str, slug: str, text: str, *, via: str = "direct",
     return err
 
 
+@_serialized_memory
 def memory_replace(scope: str, slug: str, needle: str, text: str, *,
                    via: str = "direct", origin: "str | None" = None) -> str | None:
     path = memory_path(scope, slug)
@@ -235,6 +247,7 @@ def memory_replace(scope: str, slug: str, needle: str, text: str, *,
     return err
 
 
+@_serialized_memory
 def memory_remove(scope: str, slug: str, needle: str) -> str | None:
     path = memory_path(scope, slug)
     entries = read_entries(path)
@@ -254,6 +267,17 @@ def memory_remove(scope: str, slug: str, needle: str) -> str | None:
     return err
 
 
+def _serialized_move(fn):
+    @wraps(fn)
+    def wrapped(scope, from_slug, needle, to_slug, *, to_scope=None):
+        destination_scope = to_scope or scope
+        with locked_paths(memory_path(scope, from_slug),
+                          memory_path(destination_scope, to_slug), lock_root=ROOT):
+            return fn(scope, from_slug, needle, to_slug, to_scope=to_scope)
+    return wrapped
+
+
+@_serialized_move
 def memory_move(scope: str, from_slug: str, needle: str, to_slug: str,
                 *, to_scope: "str | None" = None) -> str | None:
     """Retroactive cleanup for ISSUE #40: relocate an already-mis-scoped
