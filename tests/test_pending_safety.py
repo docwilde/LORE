@@ -269,7 +269,7 @@ class TestArchiveNeverLosesAnUnreviewedProposal(unittest.TestCase):
         self.assertIsNotNone(op)
         self.assertEqual(op["status"], "approved")
 
-    def test_archive_failure_leaves_the_source_present_raises_and_appends_no_resolve_op(self):
+    def test_archive_failure_keeps_a_visible_claim_and_appends_no_resolve_op(self):
         pid = lore.stage_write({"kind": "memory", "scope": "user", "action": "add",
                                 "text": "must survive a disk-full archive write"})
         item = json.loads((_pending_dir() / f"{pid}.json").read_text(encoding="utf-8"))
@@ -280,14 +280,88 @@ class TestArchiveNeverLosesAnUnreviewedProposal(unittest.TestCase):
             with self.assertRaises(OSError):
                 lore.archive(pid, "approved")
 
-        # source untouched -- the proposal is still pending, not lost
-        self.assertTrue((_pending_dir() / f"{pid}.json").exists())
+        # The unique claim survives, even if the original id is reused later.
+        claims = list(_pending_dir().glob(f"{pid}-claim-*.json"))
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(json.loads(claims[0].read_text(encoding="utf-8")), item)
+        _write_pending(pid, dict(item, text="new proposal at reused id"))
+        self.assertTrue(claims[0].exists())
+        self.assertTrue(lore.changed_since_listing(claims[0].stem),
+                        "the claim needs its own review before approval")
         self.assertFalse((_pending_dir() / "archive" / f"{pid}.json").exists())
         # no half-written temp file left behind either
         archive_dir = _pending_dir() / "archive"
         leftover = list(archive_dir.glob("*.tmp")) if archive_dir.exists() else []
         self.assertEqual(leftover, [])
         self.assertIsNone(_resolve_op_for_uid(uid))
+
+    def test_replacement_during_archive_is_not_unlinked(self):
+        pid = "archive-race-001"
+        original = {"kind": "memory", "scope": "user", "action": "add",
+                    "text": "reviewed original", "uid": "u-original"}
+        replacement = dict(original, text="unreviewed replacement", uid="u-replacement")
+        src = _write_pending(pid, original)
+        snapshot = (original, lore.item_digest(pid), src.stat().st_ino)
+        real_replace = os.replace
+
+        def replace_then_swap(source, destination):
+            if Path(destination).parent.name == "archive":
+                swap = src.with_name(f".{pid}.replacement")
+                swap.write_text(json.dumps(replacement), encoding="utf-8")
+                real_replace(swap, src)
+            return real_replace(source, destination)
+
+        with mock.patch("lore_core.pending.os.replace", side_effect=replace_then_swap):
+            archived = lore.archive(pid, "approved", expected_snapshot=snapshot)
+
+        self.assertFalse(archived)
+        self.assertEqual(json.loads(src.read_text(encoding="utf-8")), replacement)
+        archived_item = json.loads((_pending_dir() / "archive" / f"{pid}.json")
+                                   .read_text(encoding="utf-8"))
+        self.assertEqual(archived_item["text"], original["text"])
+        self.assertEqual(list(_pending_dir().glob("*-claim-*.json")), [])
+        self.assertIsNone(_resolve_op_for_uid("u-replacement"))
+
+    def test_failed_archive_keeps_claim_without_overwriting_replacement(self):
+        pid = "archive-race-002"
+        original = {"kind": "memory", "scope": "user", "action": "add",
+                    "text": "original"}
+        replacement = dict(original, text="replacement")
+        src = _write_pending(pid, original)
+
+        def fail_after_replacement(_fd):
+            _write_pending(pid, replacement)
+            raise OSError("disk full (simulated)")
+
+        with mock.patch("lore_core.pending.os.fsync", side_effect=fail_after_replacement):
+            with self.assertRaises(OSError):
+                lore.archive(pid, "rejected")
+
+        self.assertEqual(json.loads(src.read_text(encoding="utf-8")), replacement)
+        claims = list(_pending_dir().glob(f"{pid}-claim-*.json"))
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(json.loads(claims[0].read_text(encoding="utf-8")), original)
+        self.assertTrue(lore.changed_since_listing(claims[0].stem))
+
+    def test_changed_source_is_archived_from_snapshot_but_claim_needs_review(self):
+        pid = "archive-race-003"
+        original = {"kind": "memory", "scope": "user", "action": "add",
+                    "text": "reviewed original"}
+        replacement = dict(original, text="replacement before claim")
+        src = _write_pending(pid, original)
+        snapshot = (original, lore.item_digest(pid), src.stat().st_ino)
+        swap = src.with_name(f".{pid}.replacement")
+        swap.write_text(json.dumps(replacement), encoding="utf-8")
+        os.replace(swap, src)
+
+        self.assertFalse(lore.archive(pid, "approved", expected_snapshot=snapshot))
+        claims = list(_pending_dir().glob(f"{pid}-claim-*.json"))
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(json.loads(claims[0].read_text(encoding="utf-8")), replacement)
+        self.assertTrue(lore.changed_since_listing(claims[0].stem))
+        archived = json.loads((_pending_dir() / "archive" / f"{pid}.json")
+                              .read_text(encoding="utf-8"))
+        self.assertEqual(archived["text"], original["text"])
 
     def test_cmd_approve_reports_an_archive_failure_without_losing_the_proposal(self):
         pid = lore.stage_write({"kind": "memory", "scope": "user", "action": "add",
@@ -297,7 +371,8 @@ class TestArchiveNeverLosesAnUnreviewedProposal(unittest.TestCase):
             rc = lore.cmd_approve(Namespace(ids=[pid], force=False))
         self.assertEqual(rc, 1)
         self.assertIn(pid, out.getvalue())
-        self.assertTrue((_pending_dir() / f"{pid}.json").exists())
+        self.assertEqual(len(list(_pending_dir().glob(f"{pid}-claim-*.json"))), 1)
+        self.assertIn("claim id", out.getvalue())
 
     def test_archive_of_a_corrupt_source_quarantines_it_instead_of_losing_it(self):
         pid = "corrupt-001"

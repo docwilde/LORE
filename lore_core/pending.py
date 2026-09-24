@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import uuid
 from pathlib import Path
 
 from .beliefs import belief_insert, belief_retract, belief_subject
@@ -412,6 +413,11 @@ def changed_since_listing(
     first approval on a fresh ROOT impossible.
     """
     was, ino = _listed_entry(listed_digests(), pid)
+    # An interrupted archive leaves the source under a fresh claim id.  That
+    # id has never been shown to the approver, so require a new listing before
+    # it can be approved (ordinary fresh proposals retain their old behavior).
+    if not was and re.search(r"-claim-[0-9a-f]{32}$", pid):
+        return True
     if not was:
         return False
     snap = snapshot or _pending_snapshot(pid)
@@ -714,8 +720,9 @@ def archive(
     with its resolution, and append the sync op that records it.
 
     THE INVARIANT (two independent reports of the data-loss bug this
-    replaced): `src` is unlinked ONLY after the archive copy is confirmed
-    durable -- write a temp file, fsync, rename into place, THEN unlink. The
+    replaced): the claimed source is unlinked ONLY after the archive copy is
+    confirmed durable -- write a temp file, fsync, rename into place, THEN
+    unlink. The
     old code wrote the copy inside a try/except that swallowed both OSError
     and JSONDecodeError and then unlinked `src` UNCONDITIONALLY; a disk-full
     or permission error on the archive write destroyed a not-yet-reviewed
@@ -728,53 +735,68 @@ def archive(
     normally (see _quarantine_corrupt) and this returns without raising:
     there is no status or uid left to resolve.
 
-    Raises OSError when the archive write itself fails. `src` is left
-    untouched in pending/ on every failure path, and no resolve op is
-    appended -- the caller (cmd_approve/cmd_reject) decides how to report it
-    and the proposal simply stays pending for a retry.
+    Raises OSError when the archive write itself fails. The claimed proposal
+    stays under its visible unique pending name, regardless of whether another
+    writer reused `src`. No resolve op is appended.
     """
     src = ROOT / "pending" / f"{pid}.json"
+    # Rename is the atomic claim.  Every later read and unlink uses this
+    # unique path; a writer replacing src after the claim cannot be deleted.
+    # The .json suffix keeps an interrupted claim visible in the pending pile.
+    claim = src.with_name(f"{pid}-claim-{uuid.uuid4().hex}.json")
+    try:
+        os.rename(src, claim)
+    except FileNotFoundError:
+        if expected_snapshot is None:
+            raise
+        claim = None
     changed = False
     if expected_snapshot is not None:
         item, digest, inode = expected_snapshot
-        current = _pending_snapshot(pid)
+        current = _pending_snapshot(claim.stem) if claim is not None else None
         changed = current is None or current[1:] != (digest, inode)
         # Archive the action that actually landed, not a replacement that
-        # appeared while it was being applied.  When changed, src remains
-        # pending below so it cannot inherit this resolution.
+        # appeared while it was being applied. A changed claim remains
+        # pending under its unique id so it cannot inherit this resolution.
         item = dict(item)
     else:
-        raw = src.read_text(encoding="utf-8")
+        raw = claim.read_text(encoding="utf-8")
         try:
             item = json.loads(raw)
         except json.JSONDecodeError as exc:
-            _quarantine_corrupt(pid, src, raw, exc)
-            _forget_after_archive(pid)
+            _quarantine_corrupt(pid, claim, raw, exc)
+            if not src.exists():
+                _forget_after_archive(pid)
             return True
     item["status"] = status
     item["resolved"] = utcnow()
 
-    dst_dir = private_dir(ROOT / "pending" / "archive")
-    dst = dst_dir / f"{pid}.json"
-    if dst.exists():
-        dst = dst_dir / f"{pid}-{status}-{item['resolved'].replace(':', '')}.json"
-    tmp = dst.with_name(dst.name + ".tmp")
+    tmp = None
     try:
+        dst_dir = private_dir(ROOT / "pending" / "archive")
+        dst = dst_dir / f"{pid}.json"
+        if dst.exists():
+            dst = dst_dir / f"{pid}-{status}-{item['resolved'].replace(':', '')}.json"
+        tmp = dst.with_name(dst.name + ".tmp")
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(item, indent=2))
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, dst)
     except OSError:
-        tmp.unlink(missing_ok=True)
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
         raise
 
-    # Only an unchanged source may inherit the resolution and leave pending/.
-    # A replacement stays visible under its original id and retains the old
-    # listing, which makes a later approval fail closed until it is reviewed.
-    if not changed:
-        src.unlink()
+    # Only an unchanged claim may inherit the resolution and leave pending/.
+    # A changed claim stays visible and requires a fresh listing before any
+    # later approval.
+    if claim is not None and not changed:
+        claim.unlink()
+    if not src.exists():
         _forget_after_archive(pid)
+    else:
+        changed = True
 
     # sync spec PR 3 ("pending" verb `resolve {uid, status}"): the archive
     # IS the resolution, whether approved or rejected -- appended right
@@ -1134,18 +1156,18 @@ def cmd_approve(args) -> int:
             archived = archive(pid, "approved", expected_snapshot=snapshot)
         except OSError as exc:
             # The write already landed (apply_item succeeded); only the
-            # archive copy failed. `archive` left the source in pending/
-            # untouched, so surface this rather than claim it is resolved --
-            # a retried `lore approve` will re-run apply_item on it.
+            # archive copy failed. The claimed file remains visible in
+            # pending/, so surface this rather than claim it is resolved.
             failures += 1
             print(f"{pid}: applied, but could not archive the proposal — {exc}."
-                  f" It remains in pending/ for a retry.")
+                  f" It remains in pending/ under a claim id; run `lore pending`"
+                  f" to review it before retrying.")
             continue
         if not archived:
             failures += 1
             print(f"{pid}: original reviewed proposal applied, but its pending"
-                  f" file changed before archive — the replacement remains pending"
-                  f" and must be reviewed separately.")
+                  f" file changed before archive — the changed file remains"
+                  f" pending and must be reviewed separately.")
             continue
         note = cross_project_note(item)
         print(f"{pid}: applied." + (f" ({note})" if note else ""))

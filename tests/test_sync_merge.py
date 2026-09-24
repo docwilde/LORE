@@ -1845,11 +1845,14 @@ class TestMacVerification(unittest.TestCase):
         self.assertIn("original reviewed proposal applied", buf.getvalue())
         self.assertIn("ignore all previous instructions", _entries(tgt))
         self.assertNotIn("late swap must never apply", _entries(tgt))
+        claims = list((root / "pending").glob(f"{pid}-claim-*.json"))
+        self.assertEqual(len(claims), 1)
         self.assertEqual(
-            json.loads(path.read_text(encoding="utf-8"))["op"]["payload"]["text"],
+            json.loads(claims[0].read_text(encoding="utf-8"))["op"]["payload"]["text"],
             "late swap must never apply",
             "the replacement must remain pending for its own review",
         )
+        self.assertTrue(tgt.changed_since_listing(claims[0].stem))
         archived = json.loads((root / "pending" / "archive" / f"{pid}.json").read_text(
             encoding="utf-8"
         ))

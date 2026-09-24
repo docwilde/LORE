@@ -588,6 +588,26 @@ def parse_codex_transcript(
     return meta, messages
 
 
+def codex_rollout_id(path: Path) -> str | None:
+    """Read the session_meta-first rollout header, bounded for cached files."""
+    try:
+        with path.open(encoding="utf-8") as fh:
+            line = fh.readline(64 * 1024)
+    except (OSError, UnicodeDecodeError):
+        return None
+    try:
+        record = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("type") != "session_meta":
+        return None
+    payload = record.get("payload")
+    if isinstance(payload, dict):
+        session_id = payload.get("id") or payload.get("session_id")
+        return session_id if isinstance(session_id, str) else None
+    return None
+
+
 def index_sessions(conn: sqlite3.Connection, force: bool = False) -> tuple[int, int]:
     """Incrementally index transcripts; returns (indexed, skipped)."""
     cached = dict(conn.execute("SELECT path, stamp FROM files"))
@@ -603,6 +623,10 @@ def index_sessions(conn: sqlite3.Connection, force: bool = False) -> tuple[int, 
             continue
         if isinstance(thread_id, str):
             doxa_threads.add(thread_id)
+    for thread_id in doxa_threads:
+        session_id = f"codex:{thread_id}"
+        conn.execute("DELETE FROM msg WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
     sources = ((jsonl, "claude") for jsonl in PROJECTS_DIR.glob("*/*.jsonl"))
     codex_sources = ((jsonl, "codex") for jsonl in CODEX_SESSIONS_DIR.rglob("*.jsonl"))
     for jsonl, engine in itertools.chain(sources, codex_sources):
@@ -612,6 +636,11 @@ def index_sessions(conn: sqlite3.Connection, force: bool = False) -> tuple[int, 
             continue
         key = str(jsonl)
         stamp = f"{st.st_mtime}:{st.st_size}"
+        if engine == "codex" and doxa_threads and codex_rollout_id(jsonl) in doxa_threads:
+            # A sidecar may have appeared after this rollout was indexed.
+            # Drop its cache entry too, so removing the sidecar can restore it.
+            conn.execute("DELETE FROM files WHERE path = ?", (key,))
+            continue
         if not force and cached.get(key) == stamp:
             skipped += 1
             continue
