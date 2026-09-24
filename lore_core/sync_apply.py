@@ -830,6 +830,26 @@ def _prior_skill_put(conn: sqlite3.Connection, op: dict, name: str) -> "dict | N
     return best
 
 
+def _newer_skill_remove(conn: sqlite3.Connection, op: dict, name: str) -> bool:
+    """Whether a later removal already settled this skill's state."""
+    for op_id, machine_id, machine_seq, lamport, raw in conn.execute(
+        "SELECT op_id, machine_id, machine_seq, lamport, payload FROM sync_ops"
+        " WHERE class = 'skill' AND op = 'remove' AND applied = ?",
+        (APPLIED_YES,),
+    ):
+        if op_id == op["op_id"]:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("name") != name:
+            continue
+        if (lamport, machine_id, machine_seq) > canonical_key(op):
+            return True
+    return False
+
+
 def _apply_skill(conn: sqlite3.Connection, op: dict) -> bool:
     """sync.md: "Last `put` in canonical order wins; the losing body is staged
     as a pending skill proposal rather than silently overwritten. `remove` is
@@ -848,11 +868,16 @@ def _apply_skill(conn: sqlite3.Connection, op: dict) -> bool:
         return True  # unsafe name: refused, exactly as apply_item refuses one
 
     if verb == "remove":
+        prior = _prior_skill_put(conn, op, name)
+        if prior is not None and canonical_key(prior) > canonical_key(op):
+            return True  # a newer put already restored this skill
         if target.parent.exists():
             shutil.rmtree(target.parent, ignore_errors=True)
         return True
 
     if verb == "put":
+        if _newer_skill_remove(conn, op, name):
+            return True  # a later remove already retired this body
         body = payload.get("body") or ""
         prior = _prior_skill_put(conn, op, name)
         if prior is not None and prior["body"] == body:
@@ -882,6 +907,27 @@ def _apply_skill(conn: sqlite3.Connection, op: dict) -> bool:
 # session / transcript / tabset / worktree
 # ---------------------------------------------------------------------------
 
+def _newer_session_op(conn: sqlite3.Connection, op: dict,
+                      session_id: str) -> bool:
+    """Whether a later update to this session verb has already applied."""
+    for op_id, machine_id, machine_seq, lamport, raw in conn.execute(
+        "SELECT op_id, machine_id, machine_seq, lamport, payload FROM sync_ops"
+        " WHERE class = 'session' AND op = ? AND applied = ?",
+        (op["op"], APPLIED_YES),
+    ):
+        if op_id == op["op_id"]:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("session_id") != session_id:
+            continue
+        if (lamport, machine_id, machine_seq) > canonical_key(op):
+            return True
+    return False
+
+
 def _apply_session(conn: sqlite3.Connection, op: dict) -> bool:
     """sync.md: "A session has exactly one author machine, so there is no
     conflict: the author's latest upsert is authoritative, `msgs` replaces by
@@ -893,6 +939,17 @@ def _apply_session(conn: sqlite3.Connection, op: dict) -> bool:
     verb, payload = op["op"], op["payload"]
     session_id = payload.get("session_id")
     if not session_id:
+        return True
+    if verb == "msgs":
+        rows = payload.get("rows")
+        # A malformed newer op must not be recorded as applied: the ordering
+        # check would then suppress a valid older batch that arrives later.
+        # Validate the whole replacement before touching existing history.
+        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+            raise InvalidOp(
+                f"session {session_id} msgs must carry a list of row objects;"
+                " refusing to replace local history with it")
+    if verb in ("upsert", "msgs") and _newer_session_op(conn, op, session_id):
         return True
     slug = _local_slug(conn, op["project_key"])
 
@@ -907,20 +964,6 @@ def _apply_session(conn: sqlite3.Connection, op: dict) -> bool:
         return True
 
     if verb == "msgs":
-        rows = payload.get("rows")
-        if not isinstance(rows, list):
-            return True
-        # VALIDATE THE WHOLE BATCH BEFORE DELETING ANYTHING. "Replaces by
-        # session id" is a replace, not a truncate: the DELETE used to run
-        # first and the INSERT then skipped every row that was not a dict, so
-        # a verified op carrying `rows: ["nonsense"]` erased this machine's
-        # copy of a session's history and put nothing back. One bad row now
-        # refuses the op (and `_dispatch_isolated` records it failed) with the
-        # local history untouched.
-        if not all(isinstance(r, dict) for r in rows):
-            raise InvalidOp(
-                f"session {session_id} msgs carries a row that is not an"
-                " object; refusing to replace local history with it")
         conn.execute("DELETE FROM msg WHERE session_id = ?", (session_id,))
         conn.executemany(
             "INSERT INTO msg(session_id, project, ts, role, content) VALUES(?,?,?,?,?)",
@@ -978,8 +1021,11 @@ def _apply_transcript(conn: sqlite3.Connection, op: dict) -> bool:
     to_line = int(payload.get("to_line") or 0)
     if to_line and to_line <= held:
         return True  # already held: append-only means never twice
+    from_line = int(payload.get("from_line") or 1)
+    if from_line > held + 1:
+        return False  # hold until the missing earlier chunk arrives
     with path.open("a", encoding="utf-8") as fh:
-        for line in lines[max(0, held - int(payload.get("from_line") or 1) + 1):]:
+        for line in lines[max(0, held - from_line + 1):]:
             fh.write(str(line).rstrip("\n") + "\n")
     return True
 
@@ -1213,27 +1259,28 @@ def apply_ops(conn: sqlite3.Connection, ops: "list[dict]", *,
 
     if retry:
         retry_deferred(conn, key=key)
-        # Counted from THIS page's own held ops rather than from what the retry
-        # loop happened to land: the loop also drains ops held by earlier
-        # pulls, and subtracting that total from this page's `deferred` is what
-        # used to make a pull report `deferred: -1`.
-        still = _still_deferred(conn, deferred_ids)
-        report["applied"] += report["deferred"] - still
+        # Count outcomes for THIS page's held ops: retry also drains earlier
+        # pages, and a held op can fail terminally instead of landing.
+        applied, failed, still = _deferred_outcomes(conn, deferred_ids)
+        report["applied"] += applied
+        report["failed"] += failed
         report["deferred"] = still
     return report
 
 
-def _still_deferred(conn: sqlite3.Connection, op_ids: "set[str]") -> int:
-    """How many of `op_ids` are still held at `applied = 0`."""
-    if not op_ids:
-        return 0
-    held = 0
+def _deferred_outcomes(conn: sqlite3.Connection, op_ids: "set[str]") -> tuple[int, int, int]:
+    """Final applied, failed, and held counts for this page's deferred ops."""
+    applied = failed = held = 0
     for op_id in op_ids:
         row = conn.execute("SELECT applied FROM sync_ops WHERE op_id = ?",
                            (op_id,)).fetchone()
-        if row and row[0] == APPLIED_NO:
+        if row and row[0] == APPLIED_YES:
+            applied += 1
+        elif row and row[0] == APPLIED_FAILED:
+            failed += 1
+        elif row and row[0] == APPLIED_NO:
             held += 1
-    return held
+    return applied, failed, held
 
 
 def _log_refusal(what: str, why: str) -> None:
@@ -1285,6 +1332,11 @@ def _envelope_error(op: object) -> "str | None":
     for field in ("machine_seq", "lamport"):
         if not 0 <= op[field] < MAX_SIGNED_64:
             return f"{field} = {op[field]} is outside 0 .. 2**63 - 1"
+    if "project_key" not in op:
+        return "project_key is missing (docs/sync-protocol.md S3)"
+    if op["project_key"] is not None and not isinstance(op["project_key"], str):
+        return (f"project_key is {type(op['project_key']).__name__},"
+                " not str or null (docs/sync-protocol.md S3)")
     if not isinstance(op.get("payload"), dict):
         return (f"payload is {type(op.get('payload')).__name__},"
                 " not an object (docs/sync-protocol.md S3)")
@@ -1346,6 +1398,10 @@ def retry_deferred(conn: sqlite3.Connection, *, key: "str | None" = None) -> int
             })
         progress, applied = 0, 0
         for op in canonical_order(pending_ops):
+            if _class_disabled(op["class"]):
+                # The receive allow-list may have changed since this verified
+                # op was held. Keep it held so re-enabling the class can retry.
+                continue
             outcome = _dispatch_isolated(conn, op)
             if outcome is True:
                 _mark(conn, op["op_id"], APPLIED_YES)
@@ -1402,6 +1458,8 @@ def apply_op_after_approval(op: dict) -> "str | None":
         if not conn.execute(
                 "SELECT 1 FROM sync_ops WHERE op_id = ?", (op["op_id"],)).fetchone():
             _record(conn, op)
+        machine_id, _label = get_or_create_machine(conn)
+        observe_lamport(conn, machine_id, op["lamport"])
         outcome = _dispatch_isolated(conn, op)
         if outcome is False:
             # APPLIED_NO, not the `applied = 2` this row was staged at: 2 is

@@ -1106,6 +1106,31 @@ class TestPendingAndSkillRules(unittest.TestCase):
         self.assertEqual(report["deferred"], 0)
         self.assertTrue((keeper / "SKILL.md").exists())
 
+    def test_older_remove_cannot_delete_a_newer_put(self):
+        _, tgt = _machine("skill-late-remove")
+        remove = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                         cls="skill", verb="remove", payload={"name": "restored"})
+        put = _signed(tgt, machine_id=MACHINE_A, machine_seq=2, lamport=2,
+                      cls="skill", verb="put",
+                      payload={"name": "restored", "body": "newer body"})
+        _apply(tgt, [put])
+        report = _apply(tgt, [remove])
+        self.assertEqual(report["applied"], 1)
+        self.assertEqual((tgt.SKILLS_DIR / "restored" / "SKILL.md").read_text(),
+                         "newer body")
+
+    def test_older_put_cannot_restore_a_newer_remove(self):
+        _, tgt = _machine("skill-late-put")
+        put = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                      cls="skill", verb="put",
+                      payload={"name": "retired", "body": "old body"})
+        remove = _signed(tgt, machine_id=MACHINE_A, machine_seq=2, lamport=2,
+                         cls="skill", verb="remove", payload={"name": "retired"})
+        _apply(tgt, [remove])
+        report = _apply(tgt, [put])
+        self.assertEqual(report["applied"], 1)
+        self.assertFalse((tgt.SKILLS_DIR / "retired").exists())
+
     def test_a_skill_remove_with_a_traversing_name_stays_inside_skills_dir(self):
         """A skill name off the wire is as untrusted as one a model authored,
         and more so: `remove` resolves to `rmtree`, so a name carrying `..`
@@ -1176,6 +1201,43 @@ class TestSessionRules(unittest.TestCase):
         conn.close()
         self.assertEqual(rows, [("S-1", "the session, renamed",
                                  "2026-01-01T02:00:00Z", 9)])
+
+    def test_late_older_upsert_and_msgs_do_not_replace_newer_state(self):
+        _, tgt = _machine("sess-late")
+        old_upsert = self._upsert(tgt, 1, 1, title="old")
+        new_upsert = self._upsert(tgt, 2, 2, title="new")
+        old_msgs = self._msgs(tgt, 3, 3, [{"content": "old message"}])
+        new_msgs = self._msgs(tgt, 4, 4, [{"content": "new message"}])
+        _apply(tgt, [new_upsert, new_msgs])
+        report = _apply(tgt, [old_upsert, old_msgs])
+        self.assertEqual(report["applied"], 2)
+        conn = tgt.db_connect()
+        title = conn.execute(
+            "SELECT title FROM sessions WHERE session_id = 'S-1'"
+        ).fetchone()[0]
+        messages = conn.execute(
+            "SELECT content FROM msg WHERE session_id = 'S-1'"
+        ).fetchall()
+        self.assertEqual(title, "new")
+        self.assertEqual(messages,
+                         [("new message",)])
+        conn.close()
+
+    def test_malformed_newer_msgs_cannot_suppress_valid_older_rows(self):
+        _, tgt = _machine("sess-malformed-newer")
+        malformed = self._msgs(tgt, 2, 2, "not a list")
+        valid = self._msgs(tgt, 1, 1, [
+            {"ts": "t", "role": "user", "content": "needed history"}])
+        with quiet():
+            newer_report = _apply(tgt, [malformed])
+        self.assertEqual(newer_report["failed"], 1)
+        self.assertEqual(newer_report["applied"], 0)
+        self.assertEqual(_apply(tgt, [valid])["applied"], 1)
+        conn = tgt.db_connect()
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = 'S-1'"
+        ).fetchall(), [("needed history",)])
+        conn.close()
 
     def test_a_session_lands_under_the_receivers_own_slug_not_the_authors(self):
         """The same translation the belief subjects get: a slug is a checkout
@@ -1296,6 +1358,30 @@ class TestTranscriptChunks(unittest.TestCase):
                                  ["two", "three", "four", "five"])])
         self.assertEqual(self._held(tgt),
                          ["one", "two", "three", "four", "five"])
+
+    def test_chunk_with_gap_waits_for_missing_lines_and_then_lands(self):
+        _, tgt = _machine("chunk-gap")
+        later = self._chunk(tgt, 2, 2, 3, 4, ["three", "four"])
+        report = _apply(tgt, [later])
+        self.assertEqual(report["deferred"], 1)
+        self.assertEqual(report["applied"], 0)
+        held_files = list((tgt.ROOT / "transcripts").rglob("T-1.jsonl"))
+        self.assertTrue(not held_files or held_files[0].read_text() == "")
+        conn = tgt.db_connect()
+        state = conn.execute(
+            "SELECT applied FROM sync_ops WHERE op_id = ?", (later["op_id"],)
+        ).fetchone()[0]
+        self.assertEqual(state, 0)
+        conn.close()
+        report = _apply(tgt, [self._chunk(tgt, 1, 1, 1, 2, ["one", "two"])])
+        self.assertEqual(report["applied"], 1)
+        self.assertEqual(self._held(tgt), ["one", "two", "three", "four"])
+        conn = tgt.db_connect()
+        state = conn.execute(
+            "SELECT applied FROM sync_ops WHERE op_id = ?", (later["op_id"],)
+        ).fetchone()[0]
+        self.assertEqual(state, 1)
+        conn.close()
 
     def test_a_transcript_is_never_written_into_claude_codes_own_projects_dir(self):
         """sync.md is explicit about where these must NOT go: writing them
@@ -1827,7 +1913,7 @@ class TestMacVerification(unittest.TestCase):
         original_apply = pending_globals["apply_item"]
 
         def swap_after_snapshot(approved_pid, item, force, *, snapshot=None):
-            swapped = json.loads(path.read_text(encoding="utf-8"))
+            swapped = json.loads(json.dumps(item))
             swapped["op"]["payload"]["text"] = "late swap must never apply"
             replacement = root / "pending" / ".late-replacement.json"
             replacement.write_text(json.dumps(swapped), encoding="utf-8")
@@ -1846,13 +1932,13 @@ class TestMacVerification(unittest.TestCase):
         self.assertIn("ignore all previous instructions", _entries(tgt))
         self.assertNotIn("late swap must never apply", _entries(tgt))
         claims = list((root / "pending").glob(f"{pid}-claim-*.json"))
-        self.assertEqual(len(claims), 1)
+        self.assertEqual(len(claims), 0)
         self.assertEqual(
-            json.loads(claims[0].read_text(encoding="utf-8"))["op"]["payload"]["text"],
+            json.loads(path.read_text(encoding="utf-8"))["op"]["payload"]["text"],
             "late swap must never apply",
             "the replacement must remain pending for its own review",
         )
-        self.assertTrue(tgt.changed_since_listing(claims[0].stem))
+        self.assertTrue(tgt.changed_since_listing(pid))
         archived = json.loads((root / "pending" / "archive" / f"{pid}.json").read_text(
             encoding="utf-8"
         ))
@@ -2030,6 +2116,22 @@ class TestUnknownAndInvalidOps(unittest.TestCase):
         self.assertEqual(report["unknown"], 3)
         self.assertIn("the op that shares the page", _entries(tgt))
 
+    def test_missing_project_key_does_not_abort_the_page(self):
+        _, tgt = _machine("missing-project-key")
+        malformed = _signed(tgt, machine_id=MACHINE_A, machine_seq=1,
+                            lamport=1, cls="memory", verb="add",
+                            payload={"text": "bad"})
+        del malformed["project_key"]
+        good = _signed(tgt, machine_id=MACHINE_A, machine_seq=2,
+                       lamport=2, cls="memory", verb="add",
+                       payload={"text": "survives", "via": "direct",
+                                "writer": "terminal"})
+        with quiet():
+            report = _apply(tgt, [malformed, good])
+        self.assertEqual(report["unknown"], 1)
+        self.assertEqual(report["applied"], 1)
+        self.assertIn("survives", _entries(tgt))
+
     def test_one_ops_exception_does_not_abort_the_rest_of_the_page(self):
         """A VERIFIED op -- one from a machine the trust model already trusts
         for memory content -- whose payload the applier mishandles. `float()`
@@ -2150,6 +2252,61 @@ class TestReceiveSideClassAllowList(unittest.TestCase):
         self.assertEqual(report["applied"], 1)
         self.assertIn("an entry of a class that is on", _entries(tgt))
 
+    def test_a_held_op_stays_held_while_its_class_is_disabled(self):
+        _, tgt = _machine("classes-held")
+        appliers = tgt.apply_ops.__globals__["_APPLIERS"]
+        original = appliers["session"]
+        self.addCleanup(appliers.__setitem__, "session", original)
+        calls = []
+
+        def handler(conn, op):
+            calls.append(op["op_id"])
+            return len(calls) > 1
+
+        appliers["session"] = handler
+        op = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                     cls="session", verb="upsert", payload={"session_id": "s1"})
+        self.assertEqual(_apply(tgt, [op], retry=False)["deferred"], 1)
+        os.environ["LORE_SYNC_CLASSES"] = "memory"
+        self.addCleanup(os.environ.pop, "LORE_SYNC_CLASSES", None)
+        conn = tgt.db_connect()
+        self.assertEqual(tgt.retry_deferred(conn), 0)
+        self.assertEqual(calls, [op["op_id"]])
+        self.assertEqual(tgt.deferred_op_count(conn), 1)
+        os.environ["LORE_SYNC_CLASSES"] = "memory,sessions"
+        self.assertEqual(tgt.retry_deferred(conn), 1)
+        self.assertEqual(tgt.deferred_op_count(conn), 0)
+        conn.close()
+
+
+class TestDeferredReport(unittest.TestCase):
+    def test_retry_failure_is_reported_as_failed(self):
+        _, tgt = _machine("retry-report")
+        appliers = tgt.apply_ops.__globals__["_APPLIERS"]
+        original = appliers["worktree"]
+        self.addCleanup(appliers.__setitem__, "worktree", original)
+        calls = []
+
+        def handler(conn, op):
+            calls.append(op["op_id"])
+            if len(calls) == 1:
+                return False
+            raise ValueError("retry failed")
+
+        appliers["worktree"] = handler
+        op = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                     cls="worktree", verb="put", payload={"id": "x"})
+        with quiet():
+            report = _apply(tgt, [op])
+        self.assertEqual(report["applied"], 0)
+        self.assertEqual(report["failed"], 1)
+        self.assertEqual(report["deferred"], 0)
+        conn = tgt.db_connect()
+        self.assertEqual(conn.execute("SELECT applied FROM sync_ops WHERE op_id = ?",
+                                      (op["op_id"],)).fetchone()[0],
+                         tgt.apply_ops.__globals__["APPLIED_FAILED"])
+        conn.close()
+
 
 class TestApprovalOfAStagedOp(unittest.TestCase):
     """The other end of S5.2 -- and the one state the retry loop cannot see."""
@@ -2175,6 +2332,22 @@ class TestApprovalOfAStagedOp(unittest.TestCase):
         conn = tgt.db_connect()
         self.assertEqual(tgt.deferred_op_count(conn), 1,
                          "it must sit where the retry loop will find it")
+        conn.close()
+
+    def test_approval_advances_the_local_lamport_clock(self):
+        _, tgt = _machine("approved-clock")
+        op = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=100,
+                     cls="memory", verb="add",
+                     payload={"text": "an approved entry", "via": "direct",
+                              "writer": "terminal"},
+                     key="not-the-shared-secret")
+        self.assertEqual(_apply(tgt, [op])["unverified"], 1)
+        self.assertIsNone(tgt.apply_op_after_approval(op))
+        conn = tgt.db_connect()
+        local_id, _label = tgt.get_or_create_machine(conn)
+        self.assertGreaterEqual(
+            conn.execute("SELECT lamport FROM sync_machine WHERE machine_id = ?",
+                         (local_id,)).fetchone()[0], 100)
         conn.close()
 
     def test_approval_is_refused_when_the_slot_was_filled_meanwhile(self):

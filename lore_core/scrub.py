@@ -31,8 +31,14 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("pem", re.compile(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", re.DOTALL)),
     # JWT before the generic base64/hex rules: three base64url segments dotted.
     ("jwt", re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
-    # credentials embedded in a connection string: scheme://user:pass@host
-    ("conn-string", re.compile(r"([a-z][a-z0-9+.\-]*://[^\s:/@]+:)([^\s/@]{3,})(@)", re.IGNORECASE)),
+    # Credentials embedded in a connection string. The password may itself
+    # contain '/' or '@'; the host delimiter is the last '@' followed by a
+    # hostname (including a bracketed IPv6 literal). A URL in prose may end
+    # at whitespace rather than at the end of the whole message.
+    ("conn-string", re.compile(
+        r"[a-z][a-z0-9+.\-]*://[^\s:/@]+:[^\s]+@"
+        r"(?=(?:\[[^\]\s]+\]|[^\s/?#:@]+)(?::\d+)?(?:[/?#\s),;]|$))",
+        re.IGNORECASE)),
     ("openrouter", re.compile(r"sk-or-v1-[a-f0-9]+")),
     # stripe/openai-style live/test secret + restricted keys (underscore form)
     ("provider-secret", re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}")),
@@ -67,16 +73,24 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
 #   * `_key` IS ITS OWN KEYWORD, so `AWS_KEY=` and `LORE_SYNC_HMAC_KEY=` match.
 #     Deliberately `_key` and not `key`: the underscore is what makes it a
 #     config variable rather than `monkey`, `hotkey` or `keyboard`.
-#   * THE PAIR MAY BE QUOTED. `{"password": "hunter2hunter2hunter2"}` is the
-#     shape a pasted JSON body has, and a separator group that allowed no
-#     quotes could not reach the value at all. The quotes are captured into
-#     the separator and the value's own trailing punctuation is handed back by
-#     `_kv_sub`, so the surrounding JSON still parses after redaction.
+#   * Quoted values are handled first by KV_SECRET_QUOTED. The unquoted
+#     matcher must refuse an opening quote: otherwise a first word under
+#     eight characters is consumed with its quote and the rest leaks.
 KV_SECRET = re.compile(
     r"\b(\w*(?:password|passwd|secret|token|credential|api_key|apikey|_key)\w*)"
-    r"([\"']?\s*[=:]\s*[\"']?)"
+    r"([\"']?\s*[=:]\s*)"
+    r"(?![\"'])"
     r"(\S{8,})",
     re.IGNORECASE,
+)
+
+# The unquoted matcher stops at whitespace. Recheck quoted values as a whole
+# so a passphrase does not leave its second and later words in the index.
+KV_SECRET_QUOTED = re.compile(
+    r"\b(\w*(?:password|passwd|secret|token|credential|api_key|apikey|_key)\w*)"
+    r"([\"']?\s*[=:]\s*)([\"'])"
+    r"((?:\\.|(?!\3)[^\\])*)\3",
+    re.IGNORECASE | re.DOTALL,
 )
 
 # Trailing characters a value picked up from the text around it rather than
@@ -104,9 +118,9 @@ _VALUE_TRAILERS = "\"'`,;)]}>"
 # keyring:// are, so anchoring against them would be inventing a shape, not
 # citing one.
 REFERENCE_SHAPES: list[re.Pattern] = [
-    re.compile(r"\Aop://\S+\Z"),                           # 1Password CLI reference
-    re.compile(r"\Avault(?:://|:)\S+\Z", re.IGNORECASE),   # HashiCorp Vault path
-    re.compile(r"\Akeyring://\S+\Z", re.IGNORECASE),       # OS/credential-keyring reference
+    re.compile(r"\Aop://[^\s,=]+\Z"),                       # 1Password CLI reference
+    re.compile(r"\Avault(?:://|:)[^\s,=]+\Z", re.IGNORECASE),  # HashiCorp Vault path
+    re.compile(r"\Akeyring://[^\s,=]+\Z", re.IGNORECASE),   # OS/credential-keyring reference
     re.compile(r"\A\$\{[A-Za-z_][A-Za-z0-9_]*\}\Z"),       # ${VAR} shell expansion
     re.compile(r"\A\$[A-Za-z_][A-Za-z0-9_]*\Z"),           # $VAR shell expansion
     re.compile(r"\A<[^<>\s]+>\Z"),                          # <placeholder> in example commands
@@ -143,6 +157,13 @@ def _kv_sub(m: re.Match) -> str:
     return f"{key}{sep}[REDACTED:value]{trail}"
 
 
+def _quoted_kv_sub(m: re.Match) -> str:
+    key, sep, quote, value = m.groups()
+    if len(value.strip()) < 8 or any(pat.fullmatch(value) for pat in REFERENCE_SHAPES):
+        return m.group(0)
+    return f"{key}{sep}{quote}[REDACTED:value]{quote}"
+
+
 def _base64_sub(m: re.Match) -> str:
     run = m.group(0)
     # A long absolute path is a 40+ run over the same alphabet ("/" is base64).
@@ -163,7 +184,7 @@ def _base64_sub(m: re.Match) -> str:
     # side.
     if "+" in run or "=" in run:
         return "[REDACTED:base64]"
-    if run.startswith("/"):
+    if run.startswith("/") and max(len(part) for part in run.split("/")) < _PATH_SEGMENT_MAX:
         return run
     if "/" in run and max(len(part) for part in run.split("/")) < _PATH_SEGMENT_MAX:
         return run
@@ -181,6 +202,7 @@ def scrub_secrets(text: str) -> str:
     """
     for kind, pat in SECRET_PATTERNS:
         text = pat.sub(f"[REDACTED:{kind}]", text)
+    text = KV_SECRET_QUOTED.sub(_quoted_kv_sub, text)
     text = KV_SECRET.sub(_kv_sub, text)
     text = HEX_RUN.sub("[REDACTED:hex]", text)
     return BASE64_RUN.sub(_base64_sub, text)

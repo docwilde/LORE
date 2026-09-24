@@ -206,6 +206,56 @@ class TestScrubCredentialsThatUsedToSurvive(unittest.TestCase):
         self.assertEqual(out, '{"password": "[REDACTED:value]"}',
                          "the surrounding JSON must still parse")
 
+    def test_quoted_multiword_password_is_redacted_entirely(self):
+        self.assertEqual(lore.scrub_secrets('password="verylong phrase marker"'),
+                         'password="[REDACTED:value]"')
+
+    def test_quoted_multiword_password_with_short_first_word(self):
+        self.assertEqual(
+            lore.scrub_secrets('password="correct horse battery staple"'),
+            'password="[REDACTED:value]"',
+        )
+        self.assertEqual(
+            lore.scrub_secrets('{"password": "correct horse battery staple"}'),
+            '{"password": "[REDACTED:value]"}',
+        )
+
+    def test_connection_password_containing_at_sign_and_slash(self):
+        out = lore.scrub_secrets('postgres://admin:p@ss/w0rd@db.example.com')
+        self.assertEqual(out, '[REDACTED:conn-string]db.example.com')
+
+    def test_connection_password_with_ipv6_host(self):
+        self.assertEqual(
+            lore.scrub_secrets('postgres://user:secret@[::1]:5432/db'),
+            '[REDACTED:conn-string][::1]:5432/db',
+        )
+        self.assertEqual(
+            lore.scrub_secrets('mysql://u:p@ss/wo@rd@[2001:db8::1]:3306/table'),
+            '[REDACTED:conn-string][2001:db8::1]:3306/table',
+        )
+
+    def test_connection_string_in_the_middle_of_prose(self):
+        self.assertEqual(
+            lore.scrub_secrets(
+                'connect with postgres://admin:hunter2hunter2@db.internal and report back'),
+            'connect with [REDACTED:conn-string]db.internal and report back',
+        )
+
+    def test_quoted_secret_with_literal_newline(self):
+        self.assertEqual(
+            lore.scrub_secrets('password="correct\nhorse battery staple"'),
+            'password="[REDACTED:value]"',
+        )
+
+    def test_pointer_followed_by_inline_key_is_not_exempt(self):
+        self.assertEqual(
+            lore.scrub_secrets('password=op://vault/item,api_key=abcdefghijklmnop'),
+            'password=[REDACTED:value]',
+        )
+
+    def test_slash_prefixed_base64_body_is_not_a_path(self):
+        self.assertEqual(lore.scrub_secrets('/' + 'G' * 55), '[REDACTED:base64]')
+
     def test_base64_body_containing_a_slash_is_not_a_path(self):
         """The path carve-out asked only whether a slash was present, so any
         base64 body over an alphabet that includes `/` walked through it."""

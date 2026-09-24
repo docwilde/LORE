@@ -5,6 +5,7 @@ search, and the `lore search`/`lore session`/`lore index` CLI commands.
 """
 
 import contextlib
+import hashlib
 import itertools
 import json
 import os
@@ -410,13 +411,27 @@ def resolve_or_create_synthetic_slug(conn: sqlite3.Connection, key: str,
         "SELECT slug FROM sync_projects WHERE project_key = ?", (key,)).fetchone()
     if row:
         return row[0]
-    slug = f"sync-{re.sub(r'[^A-Za-z0-9]', '-', key)}"
-    conn.execute(
-        "INSERT INTO sync_projects(project_key, slug, origin, created) VALUES(?,?,?,?)",
-        (key, slug, origin, utcnow()),
-    )
-    conn.commit()
-    return slug
+    base = f"sync-{re.sub(r'[^A-Za-z0-9]', '-', key)}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    for suffix_length in (0, *range(12, 65, 4)):
+        slug = base if suffix_length == 0 else f"{base}-{digest[:suffix_length]}"
+        try:
+            conn.execute(
+                "INSERT INTO sync_projects(project_key, slug, origin, created) VALUES(?,?,?,?)",
+                (key, slug, origin, utcnow()),
+            )
+        except sqlite3.IntegrityError:
+            # Different project keys can flatten to the same slug. Keep the
+            # familiar base for the first key and use a stable suffix later.
+            row = conn.execute(
+                "SELECT slug FROM sync_projects WHERE project_key = ?", (key,)
+            ).fetchone()
+            if row:
+                return row[0]
+            continue
+        conn.commit()
+        return slug
+    raise sqlite3.IntegrityError("could not allocate a unique synthetic project slug")
 
 
 BOILERPLATE = re.compile(
@@ -621,6 +636,11 @@ def codex_rollout_id(path: Path) -> str | None:
 
 def index_sessions(conn: sqlite3.Connection, force: bool = False) -> tuple[int, int]:
     """Incrementally index transcripts; returns (indexed, skipped)."""
+    # Serialize both indexers before either reads the per-file cursor. A live
+    # pass with a stale lines_indexed value could otherwise append rows after
+    # this full pass has replaced them, duplicating the tail.
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     cached = dict(conn.execute("SELECT path, stamp FROM files"))
     indexed = skipped = 0
     # DOXA already stores its Codex sessions as Claude-shaped transcripts.
@@ -749,14 +769,14 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
     scrubs and inserts just those into the msg FTS table, and advances the
     count: idempotent and cheap enough for a UserPromptSubmit hook.
 
-    Two edges carry the correctness. A trailing line without its newline is an
-    append still in flight — left uncounted so the next pass reads it whole,
-    never half-consumed. And lines_indexed NULL/0 means the file was never
-    live-indexed (or a full reindex just reset it): the first live pass then
+    Two edges carry the correctness. A valid trailing JSON line is complete
+    even without its newline; an invalid trailing fragment is left uncounted
+    so the next pass reads it whole. And lines_indexed NULL/0 means the file
+    was never live-indexed (or a full reindex just reset it): the first live pass then
     deletes whatever full-index rows exist for the session before rereading
     from the top, so the two paths can interleave without double-inserting.
-    The stamp is written too, so a later index_sessions() sees the file as
-    current and does not redo what the live path already holds.
+    The stamp is written only when every line was consumed, so a later
+    index_sessions() cannot mistake an unindexed tail for a current file.
     """
     # resolve before keying: index_sessions stamps absolute PROJECTS_DIR paths,
     # and a relative path here would fork a second files row for the same file —
@@ -766,34 +786,60 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
         st = transcript.stat()
     except OSError:
         return 0, 0
+    owned_transaction = not conn.in_transaction
+    if owned_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    # Keep this pass rollbackable without taking ownership of a caller's
+    # transaction. In particular, a read error after the start==0 DELETE
+    # must restore those rows while preserving the caller's earlier writes.
+    savepoint = f"index_live_{uuid.uuid4().hex}"
+    conn.execute(f"SAVEPOINT {savepoint}")
     key = str(transcript)
     session_id = transcript.stem
     proj = transcript.parent.name
     engine = "claude"
-    row = conn.execute("SELECT lines_indexed FROM files WHERE path = ?", (key,)).fetchone()
-    start = int(row[0]) if row and row[0] else 0
+    file_row = conn.execute("SELECT lines_indexed FROM files WHERE path = ?", (key,)).fetchone()
+    start = int(file_row[0]) if file_row and file_row[0] else 0
+    existing_meta = conn.execute(
+        "SELECT cwd, title FROM sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    cwd = existing_meta[0] if existing_meta else None
+    title = existing_meta[1] if existing_meta else None
+    original_meta = (cwd, title)
     if start == 0:
         conn.execute("DELETE FROM msg WHERE session_id = ?", (session_id,))
     consumed = start
+    incomplete_tail = False
     new_rows: list[tuple] = []
     try:
         with transcript.open(encoding="utf-8") as fh:
             for i, raw in enumerate(fh, 1):
                 if i <= start:
                     continue
-                if not raw.endswith("\n"):
-                    break  # partial tail of an in-flight append; next pass gets it whole
-                consumed = i
                 try:
                     d = json.loads(raw)
                 except (json.JSONDecodeError, ValueError):
+                    if not raw.endswith("\n"):
+                        incomplete_tail = True
+                        break  # in-flight append; retry the whole line next pass
+                    consumed = i
                     continue
+                consumed = i
+                if isinstance(d, dict):
+                    if not cwd and d.get("cwd"):
+                        cwd = d["cwd"]
+                    if d.get("type") == "custom-title" and d.get("customTitle"):
+                        title = d["customTitle"]
+                    elif d.get("type") == "ai-title" and not title:
+                        title = d.get("aiTitle") or None
                 if not isinstance(d, dict) or d.get("type") not in ("user", "assistant") \
                         or d.get("isMeta"):
                     continue
                 if d.get("engine"):
                     engine = _engine_label(d["engine"])
-                text = extract_text(d.get("message", {}).get("content", ""))
+                message = d.get("message")
+                text = (extract_text(message.get("content", ""))
+                        if isinstance(message, dict) else "")
                 if text:
                     # scrub BEFORE truncating (0.31.1, Codex): a secret near the
                     # MSG_TRUNC boundary would otherwise survive as a raw partial
@@ -801,24 +847,31 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
                     new_rows.append((session_id, proj, d.get("timestamp") or "",
                                      d["type"], scrub_secrets(text)[:MSG_TRUNC]))
     except OSError:
+        conn.execute(f"ROLLBACK TO {savepoint}")
+        conn.execute(f"RELEASE {savepoint}")
+        if owned_transaction:
+            conn.rollback()
         return 0, start
     if new_rows:
         conn.executemany(
             "INSERT INTO msg(session_id, project, ts, role, content) VALUES(?,?,?,?,?)",
             new_rows)
+    if new_rows or (cwd, title) != original_meta:
         # keep the sessions row usable by print_hits; the exact recount is one
         # indexed lookup, cheaper than tracking a delta through the delete path.
         n = conn.execute("SELECT count(*) FROM msg WHERE session_id = ?",
                          (session_id,)).fetchone()[0]
         cur = conn.execute(
-            "UPDATE sessions SET messages = ?, last_ts = coalesce(?, last_ts), engine = ?"
+            "UPDATE sessions SET messages = ?, last_ts = coalesce(?, last_ts),"
+            " cwd = coalesce(cwd, ?), title = coalesce(?, title), engine = ?"
             " WHERE session_id = ?",
-            (n, new_rows[-1][2] or None, engine, session_id))
+            (n, new_rows[-1][2] if new_rows else None, cwd, title, engine, session_id))
         if cur.rowcount == 0:
             conn.execute("INSERT INTO sessions(session_id, project, cwd, title,"
                          " first_ts, last_ts, messages, engine) VALUES(?,?,?,?,?,?,?,?)",
-                         (session_id, proj, None, None,
-                          new_rows[0][2] or None, new_rows[-1][2] or None, n, engine))
+                         (session_id, proj, cwd, title,
+                          new_rows[0][2] if new_rows else None,
+                          new_rows[-1][2] if new_rows else None, n, engine))
         # SYNC (sync spec PR 3): same two verbs as the full-parse path above,
         # scoped to just the newly-consumed tail -- a streaming pass must not
         # re-emit ops for lines a prior pass already logged.
@@ -833,16 +886,19 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
             "first_ts": row[3] if row else None, "last_ts": row[4] if row else None,
             "messages": row[5] if row else n, "engine": engine,
         })
-        append_op(conn, "session", "msgs", pk, {
-            "session_id": session_id,
-            "rows": [{"ts": ts, "role": role, "content": text}
-                     for _sid, _proj, ts, role, text in new_rows],
-        })
-    if consumed != start or row is None:
+        if new_rows:
+            append_op(conn, "session", "msgs", pk, {
+                "session_id": session_id,
+                "rows": [{"ts": ts, "role": role, "content": text}
+                         for _sid, _proj, ts, role, text in new_rows],
+            })
+    if consumed != start or file_row is None or incomplete_tail:
         conn.execute(
             "INSERT OR REPLACE INTO files(path, stamp, lines_indexed) VALUES(?,?,?)",
-            (key, f"{st.st_mtime}:{st.st_size}", consumed))
-    conn.commit()
+            (key, None if incomplete_tail else f"{st.st_mtime}:{st.st_size}", consumed))
+    conn.execute(f"RELEASE {savepoint}")
+    if owned_transaction:
+        conn.commit()
     return len(new_rows), consumed
 
 

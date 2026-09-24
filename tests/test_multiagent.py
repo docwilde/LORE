@@ -10,8 +10,10 @@ import importlib.util
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # All state dirs must point away from the real store BEFORE the module
 # executes: lore.py reads them at import time into module constants.
@@ -143,6 +145,141 @@ class TestSnapshotScope(unittest.TestCase):
 
 
 class TestLiveIndex(unittest.TestCase):
+    def test_live_pass_leaves_caller_transaction_open(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "caller-txn.jsonl"
+        _transcript(t, [_msg("user", "indexed inside caller transaction")])
+        conn.execute("INSERT INTO msg(session_id, project, ts, role, content)"
+                     " VALUES('caller-marker', NULL, '', 'user', 'uncommitted')")
+
+        self.assertEqual(lore.index_live(conn, t), (1, 1))
+        self.assertTrue(conn.in_transaction)
+        other = lore.db_connect()
+        self.assertEqual(other.execute(
+            "SELECT count(*) FROM msg WHERE session_id IN (?, 'caller-marker')",
+            (t.stem,)).fetchone()[0], 0)
+        conn.rollback()
+        self.assertEqual(other.execute(
+            "SELECT count(*) FROM msg WHERE session_id IN (?, 'caller-marker')",
+            (t.stem,)).fetchone()[0], 0)
+        other.close()
+        conn.close()
+
+    def test_read_error_restores_deleted_rows_without_rolling_back_caller(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "read-error.jsonl"
+        _transcript(t, [_msg("user", "could not read")])
+        conn.execute("INSERT INTO msg(session_id, project, ts, role, content)"
+                     " VALUES(?, NULL, '', 'user', 'existing history')", (t.stem,))
+        conn.commit()
+        conn.execute("INSERT INTO msg(session_id, project, ts, role, content)"
+                     " VALUES('caller-marker-on-error', NULL, '', 'user', 'keep me')")
+
+        with patch.object(Path, "open", side_effect=OSError("read failed")):
+            self.assertEqual(lore.index_live(conn, t), (0, 0))
+        self.assertTrue(conn.in_transaction)
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("existing history",)])
+        conn.commit()
+        other = lore.db_connect()
+        self.assertEqual(other.execute(
+            "SELECT count(*) FROM msg WHERE session_id = 'caller-marker-on-error'"
+        ).fetchone()[0], 1)
+        self.assertEqual(other.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("existing history",)])
+        other.close()
+        conn.close()
+
+    def test_first_live_pass_preserves_cwd_and_title_when_full_index_skips(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "metadata.jsonl"
+        _transcript(t, [
+            _msg("user", "metadata-bearing message"),
+            json.dumps({"type": "custom-title", "customTitle": "Reviewed title"}),
+        ])
+        self.assertEqual(lore.index_live(conn, t), (1, 2))
+        row = conn.execute(
+            "SELECT cwd, title FROM sessions WHERE session_id = ?", (t.stem,)
+        ).fetchone()
+        self.assertEqual(row, ("/tmp/proj", "Reviewed title"))
+        lore.index_sessions(conn)
+        self.assertEqual(conn.execute(
+            "SELECT cwd, title FROM sessions WHERE session_id = ?", (t.stem,)
+        ).fetchone(), row)
+        with t.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"type": "custom-title",
+                                     "customTitle": "Later title"}) + "\n")
+        self.assertEqual(lore.index_live(conn, t), (0, 3))
+        self.assertEqual(conn.execute(
+            "SELECT cwd, title FROM sessions WHERE session_id = ?", (t.stem,)
+        ).fetchone(), ("/tmp/proj", "Later title"))
+
+    def test_full_index_waits_for_live_cursor_before_replacing_rows(self):
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "index-race.jsonl"
+        _transcript(t, [_msg("user", "race row one"), _msg("assistant", "race row two")])
+        setup = lore.db_connect()
+        lore.index_live(setup, t)
+        setup.close()
+        with t.open("a", encoding="utf-8") as stream:
+            stream.write(_msg("user", "race row three") + "\n")
+
+        live_paused = threading.Event()
+        release_live = threading.Event()
+        full_parsing = threading.Event()
+        failures = []
+        globals_ = lore.index_live.__globals__
+        original_extract = globals_["extract_text"]
+        original_parse = globals_["parse_transcript"]
+
+        def paused_extract(content):
+            if threading.current_thread().name == "live-index-race":
+                live_paused.set()
+                if not release_live.wait(3):
+                    raise AssertionError("live index was not released")
+            return original_extract(content)
+
+        def noticed_parse(path, *args, **kwargs):
+            if path == t:
+                full_parsing.set()
+            return original_parse(path, *args, **kwargs)
+
+        def run_index(fn):
+            conn = lore.db_connect()
+            try:
+                fn(conn)
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                conn.close()
+
+        globals_["extract_text"] = paused_extract
+        globals_["parse_transcript"] = noticed_parse
+        live = threading.Thread(target=lambda: run_index(lambda c: lore.index_live(c, t)),
+                                name="live-index-race")
+        full = threading.Thread(target=lambda: run_index(lore.index_sessions),
+                                name="full-index-race")
+        try:
+            live.start()
+            self.assertTrue(live_paused.wait(3))
+            full.start()
+            self.assertFalse(full_parsing.wait(0.2),
+                             "full pass read the file while live held its cursor")
+        finally:
+            release_live.set()
+            live.join(5)
+            if full.ident is not None:
+                full.join(5)
+            globals_["extract_text"] = original_extract
+            globals_["parse_transcript"] = original_parse
+        self.assertFalse(failures)
+        check = lore.db_connect()
+        self.assertEqual(check.execute(
+            "SELECT count(*) FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchone()[0], 3)
+        check.close()
+
     def test_incremental_and_scrubbed(self):
         conn = lore.db_connect()
         t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "livesess.jsonl"
@@ -171,15 +308,42 @@ class TestLiveIndex(unittest.TestCase):
     def test_partial_tail_deferred_to_next_pass(self):
         conn = lore.db_connect()
         t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "partial.jsonl"
-        # last line has no trailing newline: an append still in flight
-        _transcript(t, [_msg("user", "complete line"), _msg("user", "in-flight line")],
-                    newline_end=False)
+        # The JSONL tail is still incomplete, so it must not be stamped current.
+        last = _msg("user", "in-flight line")
+        _transcript(t, [_msg("user", "complete line"), last[:-1]], newline_end=False)
         added, consumed = lore.index_live(conn, t)
         self.assertEqual((added, consumed), (1, 1))
+        self.assertIsNone(conn.execute(
+            "SELECT stamp FROM files WHERE path = ?", (str(t),)
+        ).fetchone()[0])
         with t.open("a", encoding="utf-8") as fh:
-            fh.write("\n")  # the writer finishes its line
+            fh.write("}\n")  # the writer finishes its JSON object
         added2, consumed2 = lore.index_live(conn, t)
         self.assertEqual((added2, consumed2), (1, 2))
+
+    def test_valid_unterminated_tail_is_indexed_before_stamp(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "valid-eof.jsonl"
+        _transcript(t, [_msg("user", "valid last line")], newline_end=False)
+        self.assertEqual(lore.index_live(conn, t), (1, 1))
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("valid last line",)])
+        st = t.stat()
+        self.assertEqual(conn.execute(
+            "SELECT stamp FROM files WHERE path = ?", (str(t),)
+        ).fetchone()[0], f"{st.st_mtime}:{st.st_size}")
+        self.assertEqual(lore.index_live(conn, t), (0, 1))
+
+    def test_non_object_message_does_not_abort_later_rows(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "null-message.jsonl"
+        malformed = json.dumps({"type": "user", "message": None})
+        _transcript(t, [malformed, _msg("user", "after null")])
+        self.assertEqual(lore.index_live(conn, t), (1, 2))
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("after null",)])
 
     def test_reset_count_reowns_without_duplicating(self):
         conn = lore.db_connect()

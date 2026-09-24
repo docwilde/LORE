@@ -300,6 +300,56 @@ class PeerAddressing(unittest.TestCase):
         self.assertEqual(len(keys), 1, f"one machine, {len(keys)} cursors: {keys}")
         self.assertEqual(keys.pop(), "peer:workstation")
 
+    def test_distinct_endpoint_schemes_and_ports_have_independent_cursors(self):
+        direct = self.mod.peer_key("workstation")
+        endpoints = ("http://workstation", "https://workstation",
+                     "https://workstation:8765", "workstation:9100")
+        keys = [self.mod.peer_key(spec) for spec in endpoints]
+        self.assertEqual(len(set(keys + [direct])), len(keys) + 1)
+        self.assertEqual(self.mod.peer_key("http://workstation:80"), keys[0])
+        self.assertEqual(self.mod.peer_key("https://workstation:443"), keys[1])
+        self.assertEqual(self.mod.peer_key("http://workstation:9100"), keys[3])
+        conn = self.mod.db_connect()
+        for number, key in enumerate(keys + [direct]):
+            conn.execute("INSERT INTO sync_peers(peer, pulled_cursor) VALUES(?, ?)",
+                         (key, str(number)))
+        conn.commit()
+        self.assertEqual(dict(conn.execute(
+            "SELECT peer, pulled_cursor FROM sync_peers"
+        )), {key: str(number) for number, key in enumerate(keys + [direct])})
+        conn.close()
+
+    def test_ipv6_address_and_port_cannot_share_another_address_cursor(self):
+        self.assertNotEqual(
+            self.mod.peer_key("https://[::1]:8443"),
+            self.mod.peer_key("https://[::1:8443]"),
+        )
+        self.assertNotEqual(
+            self.mod.peer_key("http://[::1]:9000"),
+            self.mod.peer_key("http://[::1:9000]"),
+        )
+        self.assertEqual(self.mod.peer_key("https://[::1]:8443"),
+                         "peer:https://[::1]:8443")
+
+    def test_legacy_default_port_cursor_survives_spelling_change(self):
+        conn = self.mod.db_connect()
+        legacy_key = "peer:workstation"
+        conn.execute("INSERT INTO sync_peers(peer, pulled_cursor) VALUES(?, ?)",
+                     (legacy_key, "legacy-cursor"))
+        conn.commit()
+        for spec in ("workstation", "workstation:8765", "http://workstation:8765"):
+            key = self.mod.peer_key(spec)
+            self.assertEqual(key, legacy_key)
+            self.assertEqual(conn.execute(
+                "SELECT pulled_cursor FROM sync_peers WHERE peer = ?", (key,)
+            ).fetchone()[0], "legacy-cursor")
+        for changed_endpoint in ("http://workstation", "https://workstation"):
+            self.assertIsNone(conn.execute(
+                "SELECT pulled_cursor FROM sync_peers WHERE peer = ?",
+                (self.mod.peer_key(changed_endpoint),)
+            ).fetchone())
+        conn.close()
+
     def test_a_peer_named_hub_does_not_take_over_the_hubs_cursor(self):
         """The failure this catches: a tailnet node called `hub` sharing the
         hub's `sync_peers` row, so each transport resumes the other's drain

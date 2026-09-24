@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.58.3 — 2026-09-24
+
+- Preserve canonical order when applying synced skills, sessions, and transcript
+  chunks; reject malformed sync operations before recording them.
+- Give distinct peers separate cursors, index complete live session tails, and
+  give colliding synthetic project names stable unique slugs.
+- Redact slash-prefixed encoded secrets, adjacent reference tokens, and quoted
+  multiword credentials and URL passwords from stored memory and sync data.
+- Claim reviewed proposals before applying their writes, and bind clustered
+  pending listings to the reviewed content.
+- Honor class opt-outs for deferred sync operations, advance Lamport time after
+  manual approval, and report retried failures accurately.
+- Serialize live and full transcript indexing so they cannot duplicate messages,
+  and retain session metadata when live indexing runs first.
+- Keep IPv6 peer cursors distinct and reject malformed message batches before
+  they can suppress valid earlier session history.
+- Redact connection passwords in IPv6 URLs and prose, and preserve caller-owned
+  transactions during live indexing.
+
 ## 0.58.2 — 2026-09-24
 
 - Reindex native Codex rollouts when DOXA sidecars change, including files
