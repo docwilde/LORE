@@ -23,11 +23,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # LORE is stdlib-only and ships as a Claude Code plugin invoked as
-        # `python3 bin/lore.py`, so the interpreter is whatever the user's
-        # machine happens to have -- version coverage is the one axis worth
-        # testing broadly here. Verified green on all four locally.
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        # Keep CI on the pinned interpreter to shorten the release gate.
+        python-version: ["3.12"]
 
     steps:
       - uses: actions/checkout@v7

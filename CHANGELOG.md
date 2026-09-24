@@ -7,7 +7,9 @@
 - Give distinct peers separate cursors, index complete live session tails, and
   give colliding synthetic project names stable unique slugs.
 - Redact slash-prefixed encoded secrets, adjacent reference tokens, and quoted
-  multiword credentials from stored memory and sync data.
+  multiword credentials and URL passwords from stored memory and sync data.
+- Claim reviewed proposals before applying their writes, and bind clustered
+  pending listings to the reviewed content.
 
 ## 0.58.2 — 2026-09-24
 
