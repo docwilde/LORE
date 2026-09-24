@@ -232,26 +232,22 @@ def peer_url(spec: str) -> str:
 def peer_key(spec: str) -> str:
     """The `sync_peers.peer` row this peer's cursors live in.
 
-    The host, so `workstation`, `workstation:8765` and
-    `http://workstation:8765` are ONE peer with ONE cursor: they are one
-    machine, and a cursor per spelling would re-drain the whole log every time
-    somebody rewrote their settings.json.
-
-    The port joins the key only when it is not the default one this machine
-    would have dialled anyway. On a tailnet, one host is one machine and the
-    port is noise; two peers on ONE host is a thing that happens on a
-    multi-tenant box and in this repository's own tests, and giving them one
-    cursor would have each re-drain from the other's position. Changing
-    LORE_SYNC_PEER_PORT therefore costs one re-drain, which S9's idempotence
-    makes free of consequence and merely slow once.
+    Keep the legacy host key for the direct HTTP listener at peer_port(), so
+    bare names and explicit default-port spellings retain their cursors.
+    Other HTTP ports and every HTTPS endpoint need distinct rows: their
+    opaque cursors cannot be shared just because the host matches.
     """
     parsed = urllib.parse.urlsplit(peer_url(spec))
     host = (parsed.hostname or spec).strip().lower()
-    default = 443 if parsed.scheme == "https" else peer_port()
-    port = parsed.port
-    if port and port != default:
-        return f"{PEER_PREFIX}{host}:{port}"
-    return PEER_PREFIX + host
+    if parsed.scheme == "https":
+        port = parsed.port or 443
+        return f"{PEER_PREFIX}https://{host}" + (f":{port}" if port != 443 else "")
+    port = parsed.port or 80
+    if port == peer_port():
+        return PEER_PREFIX + host
+    if port == 80:
+        return f"{PEER_PREFIX}http://{host}"
+    return f"{PEER_PREFIX}{host}:{port}"
 
 
 def peer_label(key: str) -> str:

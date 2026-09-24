@@ -749,14 +749,14 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
     scrubs and inserts just those into the msg FTS table, and advances the
     count: idempotent and cheap enough for a UserPromptSubmit hook.
 
-    Two edges carry the correctness. A trailing line without its newline is an
-    append still in flight — left uncounted so the next pass reads it whole,
-    never half-consumed. And lines_indexed NULL/0 means the file was never
-    live-indexed (or a full reindex just reset it): the first live pass then
+    Two edges carry the correctness. A valid trailing JSON line is complete
+    even without its newline; an invalid trailing fragment is left uncounted
+    so the next pass reads it whole. And lines_indexed NULL/0 means the file
+    was never live-indexed (or a full reindex just reset it): the first live pass then
     deletes whatever full-index rows exist for the session before rereading
     from the top, so the two paths can interleave without double-inserting.
-    The stamp is written too, so a later index_sessions() sees the file as
-    current and does not redo what the live path already holds.
+    The stamp is written only when every line was consumed, so a later
+    index_sessions() cannot mistake an unindexed tail for a current file.
     """
     # resolve before keying: index_sessions stamps absolute PROJECTS_DIR paths,
     # and a relative path here would fork a second files row for the same file —
@@ -770,30 +770,35 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
     session_id = transcript.stem
     proj = transcript.parent.name
     engine = "claude"
-    row = conn.execute("SELECT lines_indexed FROM files WHERE path = ?", (key,)).fetchone()
-    start = int(row[0]) if row and row[0] else 0
+    file_row = conn.execute("SELECT lines_indexed FROM files WHERE path = ?", (key,)).fetchone()
+    start = int(file_row[0]) if file_row and file_row[0] else 0
     if start == 0:
         conn.execute("DELETE FROM msg WHERE session_id = ?", (session_id,))
     consumed = start
+    incomplete_tail = False
     new_rows: list[tuple] = []
     try:
         with transcript.open(encoding="utf-8") as fh:
             for i, raw in enumerate(fh, 1):
                 if i <= start:
                     continue
-                if not raw.endswith("\n"):
-                    break  # partial tail of an in-flight append; next pass gets it whole
-                consumed = i
                 try:
                     d = json.loads(raw)
                 except (json.JSONDecodeError, ValueError):
+                    if not raw.endswith("\n"):
+                        incomplete_tail = True
+                        break  # in-flight append; retry the whole line next pass
+                    consumed = i
                     continue
+                consumed = i
                 if not isinstance(d, dict) or d.get("type") not in ("user", "assistant") \
                         or d.get("isMeta"):
                     continue
                 if d.get("engine"):
                     engine = _engine_label(d["engine"])
-                text = extract_text(d.get("message", {}).get("content", ""))
+                message = d.get("message")
+                text = (extract_text(message.get("content", ""))
+                        if isinstance(message, dict) else "")
                 if text:
                     # scrub BEFORE truncating (0.31.1, Codex): a secret near the
                     # MSG_TRUNC boundary would otherwise survive as a raw partial
@@ -838,10 +843,10 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
             "rows": [{"ts": ts, "role": role, "content": text}
                      for _sid, _proj, ts, role, text in new_rows],
         })
-    if consumed != start or row is None:
+    if consumed != start or file_row is None or incomplete_tail:
         conn.execute(
             "INSERT OR REPLACE INTO files(path, stamp, lines_indexed) VALUES(?,?,?)",
-            (key, f"{st.st_mtime}:{st.st_size}", consumed))
+            (key, None if incomplete_tail else f"{st.st_mtime}:{st.st_size}", consumed))
     conn.commit()
     return len(new_rows), consumed
 

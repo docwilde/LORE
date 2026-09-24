@@ -171,15 +171,42 @@ class TestLiveIndex(unittest.TestCase):
     def test_partial_tail_deferred_to_next_pass(self):
         conn = lore.db_connect()
         t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "partial.jsonl"
-        # last line has no trailing newline: an append still in flight
-        _transcript(t, [_msg("user", "complete line"), _msg("user", "in-flight line")],
-                    newline_end=False)
+        # The JSONL tail is still incomplete, so it must not be stamped current.
+        last = _msg("user", "in-flight line")
+        _transcript(t, [_msg("user", "complete line"), last[:-1]], newline_end=False)
         added, consumed = lore.index_live(conn, t)
         self.assertEqual((added, consumed), (1, 1))
+        self.assertIsNone(conn.execute(
+            "SELECT stamp FROM files WHERE path = ?", (str(t),)
+        ).fetchone()[0])
         with t.open("a", encoding="utf-8") as fh:
-            fh.write("\n")  # the writer finishes its line
+            fh.write("}\n")  # the writer finishes its JSON object
         added2, consumed2 = lore.index_live(conn, t)
         self.assertEqual((added2, consumed2), (1, 2))
+
+    def test_valid_unterminated_tail_is_indexed_before_stamp(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "valid-eof.jsonl"
+        _transcript(t, [_msg("user", "valid last line")], newline_end=False)
+        self.assertEqual(lore.index_live(conn, t), (1, 1))
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("valid last line",)])
+        st = t.stat()
+        self.assertEqual(conn.execute(
+            "SELECT stamp FROM files WHERE path = ?", (str(t),)
+        ).fetchone()[0], f"{st.st_mtime}:{st.st_size}")
+        self.assertEqual(lore.index_live(conn, t), (0, 1))
+
+    def test_non_object_message_does_not_abort_later_rows(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "null-message.jsonl"
+        malformed = json.dumps({"type": "user", "message": None})
+        _transcript(t, [malformed, _msg("user", "after null")])
+        self.assertEqual(lore.index_live(conn, t), (1, 2))
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("after null",)])
 
     def test_reset_count_reowns_without_duplicating(self):
         conn = lore.db_connect()
