@@ -32,10 +32,13 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
     # JWT before the generic base64/hex rules: three base64url segments dotted.
     ("jwt", re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
     # Credentials embedded in a connection string. The password may itself
-    # contain '/' or '@'; the host delimiter is the '@' followed by a host.
+    # contain '/' or '@'; the host delimiter is the last '@' followed by a
+    # hostname (including a bracketed IPv6 literal). A URL in prose may end
+    # at whitespace rather than at the end of the whole message.
     ("conn-string", re.compile(
         r"[a-z][a-z0-9+.\-]*://[^\s:/@]+:[^\s]+@"
-        r"(?=[^\s/?#:@]+(?::\d+)?(?:[/?#]|$))", re.IGNORECASE)),
+        r"(?=(?:\[[^\]\s]+\]|[^\s/?#:@]+)(?::\d+)?(?:[/?#\s),;]|$))",
+        re.IGNORECASE)),
     ("openrouter", re.compile(r"sk-or-v1-[a-f0-9]+")),
     # stripe/openai-style live/test secret + restricted keys (underscore form)
     ("provider-secret", re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}")),
@@ -86,8 +89,8 @@ KV_SECRET = re.compile(
 KV_SECRET_QUOTED = re.compile(
     r"\b(\w*(?:password|passwd|secret|token|credential|api_key|apikey|_key)\w*)"
     r"([\"']?\s*[=:]\s*)([\"'])"
-    r"((?:\\.|(?!\3)[^\\\n])*)\3",
-    re.IGNORECASE,
+    r"((?:\\.|(?!\3)[^\\])*)\3",
+    re.IGNORECASE | re.DOTALL,
 )
 
 # Trailing characters a value picked up from the text around it rather than
