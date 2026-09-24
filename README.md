@@ -99,6 +99,7 @@ for setup and the [protocol](docs/sync-protocol.md) for the wire format.
 - **Search stays local.** Indexing needs no embeddings or API calls.
 - **Claude review uses the session's Anthropic endpoint.** LORE scrubs likely secrets before sending a digest.
 - **Derived beliefs are written without approval.** The [read gate](docs/manual.md#the-belief-gate-sits-on-read-not-on-write) limits when they can influence an agent.
+- **The write gate is advisory.** `LORE_WRITE_GATE` classifies callers; it is not a security boundary.
 - **Sync is opt-in.** Configured transports can carry memory, beliefs, proposals, skills, and selected scrubbed session text; treat the destination as private storage.
 - **Setup changes Claude settings with confirmation.** `lore teardown` reverses those changes.
 
