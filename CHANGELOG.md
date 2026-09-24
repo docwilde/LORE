@@ -12,6 +12,8 @@
   pending listings to the reviewed content.
 - Honor class opt-outs for deferred sync operations, advance Lamport time after
   manual approval, and report retried failures accurately.
+- Serialize live and full transcript indexing so they cannot duplicate messages,
+  and retain session metadata when live indexing runs first.
 
 ## 0.58.2 — 2026-09-24
 
