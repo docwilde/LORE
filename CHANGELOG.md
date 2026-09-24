@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.58.3 — 2026-09-24
+
+- Preserve canonical order when applying synced skills, sessions, and transcript
+  chunks; reject malformed sync operations before recording them.
+- Give distinct peers separate cursors, index complete live session tails, and
+  give colliding synthetic project names stable unique slugs.
+- Redact slash-prefixed encoded secrets, adjacent reference tokens, and quoted
+  multiword credentials from stored memory and sync data.
+
 ## 0.58.2 — 2026-09-24
 
 - Reindex native Codex rollouts when DOXA sidecars change, including files
