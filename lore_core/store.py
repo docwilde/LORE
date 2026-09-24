@@ -5,6 +5,7 @@ search, and the `lore search`/`lore session`/`lore index` CLI commands.
 """
 
 import contextlib
+import hashlib
 import itertools
 import json
 import os
@@ -410,13 +411,27 @@ def resolve_or_create_synthetic_slug(conn: sqlite3.Connection, key: str,
         "SELECT slug FROM sync_projects WHERE project_key = ?", (key,)).fetchone()
     if row:
         return row[0]
-    slug = f"sync-{re.sub(r'[^A-Za-z0-9]', '-', key)}"
-    conn.execute(
-        "INSERT INTO sync_projects(project_key, slug, origin, created) VALUES(?,?,?,?)",
-        (key, slug, origin, utcnow()),
-    )
-    conn.commit()
-    return slug
+    base = f"sync-{re.sub(r'[^A-Za-z0-9]', '-', key)}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    for suffix_length in (0, *range(12, 65, 4)):
+        slug = base if suffix_length == 0 else f"{base}-{digest[:suffix_length]}"
+        try:
+            conn.execute(
+                "INSERT INTO sync_projects(project_key, slug, origin, created) VALUES(?,?,?,?)",
+                (key, slug, origin, utcnow()),
+            )
+        except sqlite3.IntegrityError:
+            # Different project keys can flatten to the same slug. Keep the
+            # familiar base for the first key and use a stable suffix later.
+            row = conn.execute(
+                "SELECT slug FROM sync_projects WHERE project_key = ?", (key,)
+            ).fetchone()
+            if row:
+                return row[0]
+            continue
+        conn.commit()
+        return slug
+    raise sqlite3.IntegrityError("could not allocate a unique synthetic project slug")
 
 
 BOILERPLATE = re.compile(

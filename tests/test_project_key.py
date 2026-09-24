@@ -154,6 +154,20 @@ class SyncProjectsTable(unittest.TestCase):
             ("github.com/x/new-repo",)).fetchone()[0]
         self.assertEqual(n, 1)
 
+    def test_distinct_keys_with_same_flattening_get_distinct_slugs(self):
+        conn = lore.db_connect()
+        first = STORE.resolve_or_create_synthetic_slug(conn, "team/a")
+        second = STORE.resolve_or_create_synthetic_slug(conn, "team-a")
+        self.assertEqual(first, "sync-team-a")
+        self.assertTrue(second.startswith("sync-team-a-"))
+        self.assertNotEqual(first, second)
+        self.assertEqual(
+            STORE.resolve_or_create_synthetic_slug(conn, "team-a"), second)
+        self.assertEqual(conn.execute(
+            "SELECT count(*) FROM sync_projects WHERE slug IN (?, ?)",
+            (first, second),
+        ).fetchone()[0], 2)
+
     def test_survives_index_reset(self):
         conn = lore.db_connect()
         STORE.record_project_identity(conn, "k2", "slug-k2")
