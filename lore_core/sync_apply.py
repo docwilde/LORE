@@ -830,6 +830,26 @@ def _prior_skill_put(conn: sqlite3.Connection, op: dict, name: str) -> "dict | N
     return best
 
 
+def _newer_skill_remove(conn: sqlite3.Connection, op: dict, name: str) -> bool:
+    """Whether a later removal already settled this skill's state."""
+    for op_id, machine_id, machine_seq, lamport, raw in conn.execute(
+        "SELECT op_id, machine_id, machine_seq, lamport, payload FROM sync_ops"
+        " WHERE class = 'skill' AND op = 'remove' AND applied = ?",
+        (APPLIED_YES,),
+    ):
+        if op_id == op["op_id"]:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("name") != name:
+            continue
+        if (lamport, machine_id, machine_seq) > canonical_key(op):
+            return True
+    return False
+
+
 def _apply_skill(conn: sqlite3.Connection, op: dict) -> bool:
     """sync.md: "Last `put` in canonical order wins; the losing body is staged
     as a pending skill proposal rather than silently overwritten. `remove` is
@@ -848,11 +868,16 @@ def _apply_skill(conn: sqlite3.Connection, op: dict) -> bool:
         return True  # unsafe name: refused, exactly as apply_item refuses one
 
     if verb == "remove":
+        prior = _prior_skill_put(conn, op, name)
+        if prior is not None and canonical_key(prior) > canonical_key(op):
+            return True  # a newer put already restored this skill
         if target.parent.exists():
             shutil.rmtree(target.parent, ignore_errors=True)
         return True
 
     if verb == "put":
+        if _newer_skill_remove(conn, op, name):
+            return True  # a later remove already retired this body
         body = payload.get("body") or ""
         prior = _prior_skill_put(conn, op, name)
         if prior is not None and prior["body"] == body:
@@ -882,6 +907,27 @@ def _apply_skill(conn: sqlite3.Connection, op: dict) -> bool:
 # session / transcript / tabset / worktree
 # ---------------------------------------------------------------------------
 
+def _newer_session_op(conn: sqlite3.Connection, op: dict,
+                      session_id: str) -> bool:
+    """Whether a later update to this session verb has already applied."""
+    for op_id, machine_id, machine_seq, lamport, raw in conn.execute(
+        "SELECT op_id, machine_id, machine_seq, lamport, payload FROM sync_ops"
+        " WHERE class = 'session' AND op = ? AND applied = ?",
+        (op["op"], APPLIED_YES),
+    ):
+        if op_id == op["op_id"]:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("session_id") != session_id:
+            continue
+        if (lamport, machine_id, machine_seq) > canonical_key(op):
+            return True
+    return False
+
+
 def _apply_session(conn: sqlite3.Connection, op: dict) -> bool:
     """sync.md: "A session has exactly one author machine, so there is no
     conflict: the author's latest upsert is authoritative, `msgs` replaces by
@@ -893,6 +939,8 @@ def _apply_session(conn: sqlite3.Connection, op: dict) -> bool:
     verb, payload = op["op"], op["payload"]
     session_id = payload.get("session_id")
     if not session_id:
+        return True
+    if verb in ("upsert", "msgs") and _newer_session_op(conn, op, session_id):
         return True
     slug = _local_slug(conn, op["project_key"])
 
@@ -978,8 +1026,11 @@ def _apply_transcript(conn: sqlite3.Connection, op: dict) -> bool:
     to_line = int(payload.get("to_line") or 0)
     if to_line and to_line <= held:
         return True  # already held: append-only means never twice
+    from_line = int(payload.get("from_line") or 1)
+    if from_line > held + 1:
+        return False  # hold until the missing earlier chunk arrives
     with path.open("a", encoding="utf-8") as fh:
-        for line in lines[max(0, held - int(payload.get("from_line") or 1) + 1):]:
+        for line in lines[max(0, held - from_line + 1):]:
             fh.write(str(line).rstrip("\n") + "\n")
     return True
 
@@ -1285,6 +1336,11 @@ def _envelope_error(op: object) -> "str | None":
     for field in ("machine_seq", "lamport"):
         if not 0 <= op[field] < MAX_SIGNED_64:
             return f"{field} = {op[field]} is outside 0 .. 2**63 - 1"
+    if "project_key" not in op:
+        return "project_key is missing (docs/sync-protocol.md S3)"
+    if op["project_key"] is not None and not isinstance(op["project_key"], str):
+        return (f"project_key is {type(op['project_key']).__name__},"
+                " not str or null (docs/sync-protocol.md S3)")
     if not isinstance(op.get("payload"), dict):
         return (f"payload is {type(op.get('payload')).__name__},"
                 " not an object (docs/sync-protocol.md S3)")
