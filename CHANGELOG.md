@@ -10,6 +10,8 @@
   multiword credentials and URL passwords from stored memory and sync data.
 - Claim reviewed proposals before applying their writes, and bind clustered
   pending listings to the reviewed content.
+- Honor class opt-outs for deferred sync operations, advance Lamport time after
+  manual approval, and report retried failures accurately.
 
 ## 0.58.2 — 2026-09-24
 
