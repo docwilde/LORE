@@ -40,6 +40,8 @@ and relations between beliefs do not turn them into approved facts.
 
 Engine-origin labels add context, not authority. The [manual](docs/manual.md)
 explains the write gates, hooks, and belief model.
+Use `/lore:filemap` to inspect file maps; `LORE_FILEMAP_CAP` and
+`LORE_MACHINE_CAP` bound file maps and machine memory.
 
 ## Install
 
