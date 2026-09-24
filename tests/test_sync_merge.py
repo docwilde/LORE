@@ -2236,6 +2236,61 @@ class TestReceiveSideClassAllowList(unittest.TestCase):
         self.assertEqual(report["applied"], 1)
         self.assertIn("an entry of a class that is on", _entries(tgt))
 
+    def test_a_held_op_stays_held_while_its_class_is_disabled(self):
+        _, tgt = _machine("classes-held")
+        appliers = tgt.apply_ops.__globals__["_APPLIERS"]
+        original = appliers["session"]
+        self.addCleanup(appliers.__setitem__, "session", original)
+        calls = []
+
+        def handler(conn, op):
+            calls.append(op["op_id"])
+            return len(calls) > 1
+
+        appliers["session"] = handler
+        op = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                     cls="session", verb="upsert", payload={"session_id": "s1"})
+        self.assertEqual(_apply(tgt, [op], retry=False)["deferred"], 1)
+        os.environ["LORE_SYNC_CLASSES"] = "memory"
+        self.addCleanup(os.environ.pop, "LORE_SYNC_CLASSES", None)
+        conn = tgt.db_connect()
+        self.assertEqual(tgt.retry_deferred(conn), 0)
+        self.assertEqual(calls, [op["op_id"]])
+        self.assertEqual(tgt.deferred_op_count(conn), 1)
+        os.environ["LORE_SYNC_CLASSES"] = "memory,sessions"
+        self.assertEqual(tgt.retry_deferred(conn), 1)
+        self.assertEqual(tgt.deferred_op_count(conn), 0)
+        conn.close()
+
+
+class TestDeferredReport(unittest.TestCase):
+    def test_retry_failure_is_reported_as_failed(self):
+        _, tgt = _machine("retry-report")
+        appliers = tgt.apply_ops.__globals__["_APPLIERS"]
+        original = appliers["worktree"]
+        self.addCleanup(appliers.__setitem__, "worktree", original)
+        calls = []
+
+        def handler(conn, op):
+            calls.append(op["op_id"])
+            if len(calls) == 1:
+                return False
+            raise ValueError("retry failed")
+
+        appliers["worktree"] = handler
+        op = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                     cls="worktree", verb="put", payload={"id": "x"})
+        with quiet():
+            report = _apply(tgt, [op])
+        self.assertEqual(report["applied"], 0)
+        self.assertEqual(report["failed"], 1)
+        self.assertEqual(report["deferred"], 0)
+        conn = tgt.db_connect()
+        self.assertEqual(conn.execute("SELECT applied FROM sync_ops WHERE op_id = ?",
+                                      (op["op_id"],)).fetchone()[0],
+                         tgt.apply_ops.__globals__["APPLIED_FAILED"])
+        conn.close()
+
 
 class TestApprovalOfAStagedOp(unittest.TestCase):
     """The other end of S5.2 -- and the one state the retry loop cannot see."""
@@ -2261,6 +2316,22 @@ class TestApprovalOfAStagedOp(unittest.TestCase):
         conn = tgt.db_connect()
         self.assertEqual(tgt.deferred_op_count(conn), 1,
                          "it must sit where the retry loop will find it")
+        conn.close()
+
+    def test_approval_advances_the_local_lamport_clock(self):
+        _, tgt = _machine("approved-clock")
+        op = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=100,
+                     cls="memory", verb="add",
+                     payload={"text": "an approved entry", "via": "direct",
+                              "writer": "terminal"},
+                     key="not-the-shared-secret")
+        self.assertEqual(_apply(tgt, [op])["unverified"], 1)
+        self.assertIsNone(tgt.apply_op_after_approval(op))
+        conn = tgt.db_connect()
+        local_id, _label = tgt.get_or_create_machine(conn)
+        self.assertGreaterEqual(
+            conn.execute("SELECT lamport FROM sync_machine WHERE machine_id = ?",
+                         (local_id,)).fetchone()[0], 100)
         conn.close()
 
     def test_approval_is_refused_when_the_slot_was_filled_meanwhile(self):

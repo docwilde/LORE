@@ -1264,27 +1264,28 @@ def apply_ops(conn: sqlite3.Connection, ops: "list[dict]", *,
 
     if retry:
         retry_deferred(conn, key=key)
-        # Counted from THIS page's own held ops rather than from what the retry
-        # loop happened to land: the loop also drains ops held by earlier
-        # pulls, and subtracting that total from this page's `deferred` is what
-        # used to make a pull report `deferred: -1`.
-        still = _still_deferred(conn, deferred_ids)
-        report["applied"] += report["deferred"] - still
+        # Count outcomes for THIS page's held ops: retry also drains earlier
+        # pages, and a held op can fail terminally instead of landing.
+        applied, failed, still = _deferred_outcomes(conn, deferred_ids)
+        report["applied"] += applied
+        report["failed"] += failed
         report["deferred"] = still
     return report
 
 
-def _still_deferred(conn: sqlite3.Connection, op_ids: "set[str]") -> int:
-    """How many of `op_ids` are still held at `applied = 0`."""
-    if not op_ids:
-        return 0
-    held = 0
+def _deferred_outcomes(conn: sqlite3.Connection, op_ids: "set[str]") -> tuple[int, int, int]:
+    """Final applied, failed, and held counts for this page's deferred ops."""
+    applied = failed = held = 0
     for op_id in op_ids:
         row = conn.execute("SELECT applied FROM sync_ops WHERE op_id = ?",
                            (op_id,)).fetchone()
-        if row and row[0] == APPLIED_NO:
+        if row and row[0] == APPLIED_YES:
+            applied += 1
+        elif row and row[0] == APPLIED_FAILED:
+            failed += 1
+        elif row and row[0] == APPLIED_NO:
             held += 1
-    return held
+    return applied, failed, held
 
 
 def _log_refusal(what: str, why: str) -> None:
@@ -1402,6 +1403,10 @@ def retry_deferred(conn: sqlite3.Connection, *, key: "str | None" = None) -> int
             })
         progress, applied = 0, 0
         for op in canonical_order(pending_ops):
+            if _class_disabled(op["class"]):
+                # The receive allow-list may have changed since this verified
+                # op was held. Keep it held so re-enabling the class can retry.
+                continue
             outcome = _dispatch_isolated(conn, op)
             if outcome is True:
                 _mark(conn, op["op_id"], APPLIED_YES)
@@ -1458,6 +1463,8 @@ def apply_op_after_approval(op: dict) -> "str | None":
         if not conn.execute(
                 "SELECT 1 FROM sync_ops WHERE op_id = ?", (op["op_id"],)).fetchone():
             _record(conn, op)
+        machine_id, _label = get_or_create_machine(conn)
+        observe_lamport(conn, machine_id, op["lamport"])
         outcome = _dispatch_isolated(conn, op)
         if outcome is False:
             # APPLIED_NO, not the `applied = 2` this row was staged at: 2 is
