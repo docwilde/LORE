@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.58.2 — 2026-09-24
+
+- Reindex native Codex rollouts when DOXA sidecars change, including files
+  whose session metadata appears after the bounded header probe.
+
 ## 0.58.1 — 2026-09-24
 
 - Pending resolution claims the reviewed file before archiving. A concurrent

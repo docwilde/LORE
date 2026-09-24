@@ -543,7 +543,7 @@ def parse_codex_transcript(
             "internal": False}
     messages: list[tuple[str, str, str]] = []
     try:
-        fh = path.open(encoding="utf-8")
+        fh = path.open(encoding="utf-8", errors="replace")
     except OSError:
         return meta, messages
     with fh:
@@ -589,22 +589,33 @@ def parse_codex_transcript(
 
 
 def codex_rollout_id(path: Path) -> str | None:
-    """Read the session_meta-first rollout header, bounded for cached files."""
+    """Find rollout metadata within a bounded prefix of a cached file.
+
+    The full parser accepts session_meta after other records, so the cache
+    probe must do the same. Otherwise a sidecar can purge a cached session
+    without clearing the stamp needed to restore it later.
+    """
     try:
         with path.open(encoding="utf-8") as fh:
-            line = fh.readline(64 * 1024)
+            remaining = 64 * 1024
+            while remaining:
+                line = fh.readline(remaining)
+                if not line:
+                    break
+                remaining -= len(line)
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "session_meta":
+                    continue
+                payload = record.get("payload")
+                if isinstance(payload, dict):
+                    session_id = payload.get("id") or payload.get("session_id")
+                    return session_id if isinstance(session_id, str) else None
+                return None
     except (OSError, UnicodeDecodeError):
         return None
-    try:
-        record = json.loads(line)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(record, dict) or record.get("type") != "session_meta":
-        return None
-    payload = record.get("payload")
-    if isinstance(payload, dict):
-        session_id = payload.get("id") or payload.get("session_id")
-        return session_id if isinstance(session_id, str) else None
     return None
 
 
@@ -623,6 +634,35 @@ def index_sessions(conn: sqlite3.Connection, force: bool = False) -> tuple[int, 
             continue
         if isinstance(thread_id, str):
             doxa_threads.add(thread_id)
+    # A bounded header probe cannot identify every valid rollout: the full
+    # parser accepts session_meta anywhere. On a sidecar-set change, expire
+    # all native file stamps once so even a late header is restored when the
+    # sidecar disappears. Store the set in the same transaction as the index.
+    conn.execute("CREATE TABLE IF NOT EXISTS index_state(key TEXT PRIMARY KEY, value TEXT)")
+    sidecar_state = json.dumps(sorted(doxa_threads))
+    previous = conn.execute(
+        "SELECT value FROM index_state WHERE key = 'codex_sidecar_threads'"
+    ).fetchone()
+    changed_sidecars = previous is not None and previous[0] != sidecar_state
+    if previous is None:
+        # Migrating an existing index: expire native stamps when a native
+        # session may already have been purged, or can be purged now. A bare
+        # cached malformed file has no indexed session to recover.
+        changed_sidecars = not doxa_threads or any(
+            conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = ?",
+                (f"codex:{thread_id}",),
+            ).fetchone() for thread_id in doxa_threads
+        )
+    if changed_sidecars:
+        for key in list(cached):
+            if Path(key).is_relative_to(CODEX_SESSIONS_DIR):
+                conn.execute("DELETE FROM files WHERE path = ?", (key,))
+                cached.pop(key)
+    conn.execute(
+        "INSERT OR REPLACE INTO index_state(key, value) VALUES('codex_sidecar_threads', ?)",
+        (sidecar_state,),
+    )
     for thread_id in doxa_threads:
         session_id = f"codex:{thread_id}"
         conn.execute("DELETE FROM msg WHERE session_id = ?", (session_id,))
