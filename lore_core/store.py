@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import sys
 import uuid
 from pathlib import Path
@@ -44,6 +45,7 @@ __all__ = [
     'parse_codex_transcript',
     'index_sessions',
     'index_live',
+    'index_live_fd',
     'fts_expr',
     'CODE_TOKEN',
     'like_scan',
@@ -783,9 +785,42 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
     # each row re-owning the transcript in turn, redoing the other's work.
     transcript = Path(transcript).resolve()
     try:
-        st = transcript.stat()
+        with transcript.open('rb') as fh:
+            return index_live_fd(conn, fh.fileno(), transcript)
     except OSError:
         return 0, 0
+
+
+def _live_lines(fd: int, size: int):
+    """Read complete and trailing JSONL lines without moving the caller's offset."""
+    offset = 0
+    pending = b''
+    while offset < size:
+        chunk = os.pread(fd, min(65536, size - offset), offset)
+        if not chunk:
+            raise OSError('transcript shortened during read')
+        offset += len(chunk)
+        pending += chunk
+        while b'\n' in pending:
+            line, pending = pending.split(b'\n', 1)
+            yield (line + b'\n').decode('utf-8')
+    if pending:
+        yield pending.decode('utf-8')
+
+
+def index_live_fd(conn: sqlite3.Connection, fd: int, logical_path: Path) -> tuple[int, int]:
+    """Index a verified open JSONL file under an absolute logical path.
+
+    The path is used only for the session identity and ``files.path`` cursor:
+    it is never resolved, stat-ed, or opened. The caller owns the regular-file
+    descriptor, and bounded ``pread`` leaves its offset unchanged.
+    """
+    transcript = Path(logical_path)
+    if not transcript.is_absolute():
+        raise ValueError('logical_path must be absolute')
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError('fd must refer to a regular file')
     owned_transaction = not conn.in_transaction
     if owned_transaction:
         conn.execute("BEGIN IMMEDIATE")
@@ -812,41 +847,38 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
     incomplete_tail = False
     new_rows: list[tuple] = []
     try:
-        with transcript.open(encoding="utf-8") as fh:
-            for i, raw in enumerate(fh, 1):
-                if i <= start:
-                    continue
-                try:
-                    d = json.loads(raw)
-                except (json.JSONDecodeError, ValueError):
-                    if not raw.endswith("\n"):
-                        incomplete_tail = True
-                        break  # in-flight append; retry the whole line next pass
-                    consumed = i
-                    continue
+        for i, raw in enumerate(_live_lines(fd, st.st_size), 1):
+            if i <= start:
+                continue
+            try:
+                d = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                if not raw.endswith("\n"):
+                    incomplete_tail = True
+                    break  # in-flight append; retry the whole line next pass
                 consumed = i
-                if isinstance(d, dict):
-                    if not cwd and d.get("cwd"):
-                        cwd = d["cwd"]
-                    if d.get("type") == "custom-title" and d.get("customTitle"):
-                        title = d["customTitle"]
-                    elif d.get("type") == "ai-title" and not title:
-                        title = d.get("aiTitle") or None
-                if not isinstance(d, dict) or d.get("type") not in ("user", "assistant") \
-                        or d.get("isMeta"):
-                    continue
-                if d.get("engine"):
-                    engine = _engine_label(d["engine"])
-                message = d.get("message")
-                text = (extract_text(message.get("content", ""))
-                        if isinstance(message, dict) else "")
-                if text:
-                    # scrub BEFORE truncating (0.31.1, Codex): a secret near the
-                    # MSG_TRUNC boundary would otherwise survive as a raw partial
-                    # -- the same fix index_sessions got, its streaming twin missed.
-                    new_rows.append((session_id, proj, d.get("timestamp") or "",
-                                     d["type"], scrub_secrets(text)[:MSG_TRUNC]))
-    except OSError:
+                continue
+            consumed = i
+            if isinstance(d, dict):
+                if not cwd and d.get("cwd"):
+                    cwd = d["cwd"]
+                if d.get("type") == "custom-title" and d.get("customTitle"):
+                    title = d["customTitle"]
+                elif d.get("type") == "ai-title" and not title:
+                    title = d.get("aiTitle") or None
+            if not isinstance(d, dict) or d.get("type") not in ("user", "assistant") \
+                    or d.get("isMeta"):
+                continue
+            if d.get("engine"):
+                engine = _engine_label(d["engine"])
+            message = d.get("message")
+            text = (extract_text(message.get("content", ""))
+                    if isinstance(message, dict) else "")
+            if text:
+                # Scrub before truncation so a split secret never persists.
+                new_rows.append((session_id, proj, d.get("timestamp") or "",
+                                 d["type"], scrub_secrets(text)[:MSG_TRUNC]))
+    except (OSError, UnicodeDecodeError):
         conn.execute(f"ROLLBACK TO {savepoint}")
         conn.execute(f"RELEASE {savepoint}")
         if owned_transaction:
