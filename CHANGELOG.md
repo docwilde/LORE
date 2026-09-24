@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.58.4 — 2026-09-25
+
+- Add `index_live_fd(conn, fd, logical_path)` for callers that verify and open
+  a transcript themselves. The live indexer reads the descriptor without
+  resolving or reopening the logical path, preserves the caller's file offset,
+  and shares the canonical cursor and full-index interleaving behavior.
+
 ## 0.58.3 — 2026-09-24
 
 - Preserve canonical order when applying synced skills, sessions, and transcript

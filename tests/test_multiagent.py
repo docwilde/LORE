@@ -360,6 +360,83 @@ class TestLiveIndex(unittest.TestCase):
             "SELECT count(*) FROM msg WHERE session_id = 'reown'").fetchone()[0]
         self.assertEqual(n, 2)
 
+    def test_descriptor_ignores_replaced_path_and_shares_cursor(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "fd-session.jsonl"
+        _transcript(t, [_msg("user", "trusted original")])
+        replacement = t.with_name("untrusted.jsonl")
+        _transcript(replacement, [_msg("user", "untrusted replacement")])
+        with t.open("rb") as fh:
+            fh.seek(5)
+            offset = fh.tell()
+            t.rename(t.with_name("detached.jsonl"))
+            t.symlink_to(replacement)
+            self.assertEqual(lore.index_live_fd(conn, fh.fileno(), t), (1, 1))
+            self.assertEqual(fh.tell(), offset)
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("trusted original",)])
+        self.assertEqual(conn.execute(
+            "SELECT path, lines_indexed FROM files WHERE path = ?", (str(t),)
+        ).fetchone(), (str(t), 1))
+        self.assertIsNone(conn.execute(
+            "SELECT path FROM files WHERE path = ?", (str(replacement),)
+        ).fetchone())
+        # A full index resets this same row, and the next descriptor pass
+        # reowns the session instead of appending duplicate FTS rows.
+        t.unlink()
+        t.with_name("detached.jsonl").rename(t)
+        conn.execute("UPDATE files SET lines_indexed = NULL WHERE path = ?", (str(t),))
+        conn.commit()
+        with t.open("rb") as fh:
+            self.assertEqual(lore.index_live_fd(conn, fh.fileno(), t), (1, 1))
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("trusted original",)])
+        conn.close()
+
+    def test_descriptor_read_error_preserves_existing_rows_and_caller_transaction(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "fd-error.jsonl"
+        _transcript(t, [_msg("user", "existing history")])
+        self.assertEqual(lore.index_live(conn, t), (1, 1))
+        conn.execute("UPDATE files SET lines_indexed = NULL WHERE path = ?", (str(t),))
+        conn.execute("INSERT INTO msg(session_id, project, ts, role, content)"
+                     " VALUES('caller-marker-fd', NULL, '', 'user', 'keep me')")
+        with t.open("rb") as fh, patch("lore_core.store.os.pread", side_effect=OSError("read failed")):
+            self.assertEqual(lore.index_live_fd(conn, fh.fileno(), t), (0, 0))
+        self.assertTrue(conn.in_transaction)
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("existing history",)])
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = 'caller-marker-fd'"
+        ).fetchall(), [("keep me",)])
+        conn.rollback()
+        conn.close()
+
+    def test_descriptor_invalid_utf8_rolls_back_its_savepoint(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "fd-invalid-utf8.jsonl"
+        _transcript(t, [_msg("user", "existing history")])
+        self.assertEqual(lore.index_live(conn, t), (1, 1))
+        t.write_bytes(b'\xff\n')
+        conn.execute("UPDATE files SET lines_indexed = NULL WHERE path = ?", (str(t),))
+        conn.execute("INSERT INTO msg(session_id, project, ts, role, content)"
+                     " VALUES('caller-marker-utf8', NULL, '', 'user', 'keep me')")
+        with t.open("rb") as fh:
+            self.assertEqual(lore.index_live_fd(conn, fh.fileno(), t), (0, 0))
+        self.assertTrue(conn.in_transaction)
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("existing history",)])
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = 'caller-marker-utf8'"
+        ).fetchall(), [("keep me",)])
+        conn.rollback()
+        conn.close()
+        t.unlink()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
