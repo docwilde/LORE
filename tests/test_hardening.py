@@ -206,6 +206,19 @@ class TestScrubCredentialsThatUsedToSurvive(unittest.TestCase):
         self.assertEqual(out, '{"password": "[REDACTED:value]"}',
                          "the surrounding JSON must still parse")
 
+    def test_quoted_multiword_password_is_redacted_entirely(self):
+        self.assertEqual(lore.scrub_secrets('password="verylong phrase marker"'),
+                         'password="[REDACTED:value]"')
+
+    def test_pointer_followed_by_inline_key_is_not_exempt(self):
+        self.assertEqual(
+            lore.scrub_secrets('password=op://vault/item,api_key=abcdefghijklmnop'),
+            'password=[REDACTED:value]',
+        )
+
+    def test_slash_prefixed_base64_body_is_not_a_path(self):
+        self.assertEqual(lore.scrub_secrets('/' + 'G' * 55), '[REDACTED:base64]')
+
     def test_base64_body_containing_a_slash_is_not_a_path(self):
         """The path carve-out asked only whether a slash was present, so any
         base64 body over an alphabet that includes `/` walked through it."""

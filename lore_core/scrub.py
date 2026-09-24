@@ -79,6 +79,15 @@ KV_SECRET = re.compile(
     re.IGNORECASE,
 )
 
+# The unquoted matcher stops at whitespace. Recheck quoted values as a whole
+# so a passphrase does not leave its second and later words in the index.
+KV_SECRET_QUOTED = re.compile(
+    r"\b(\w*(?:password|passwd|secret|token|credential|api_key|apikey|_key)\w*)"
+    r"([\"']?\s*[=:]\s*)([\"'])"
+    r"((?:\\.|(?!\3)[^\\\n])*)\3",
+    re.IGNORECASE,
+)
+
 # Trailing characters a value picked up from the text around it rather than
 # from the secret: the closing quote of a JSON string, a comma, a closing
 # brace. Stripped before the reference-shape test and handed back after the
@@ -104,9 +113,9 @@ _VALUE_TRAILERS = "\"'`,;)]}>"
 # keyring:// are, so anchoring against them would be inventing a shape, not
 # citing one.
 REFERENCE_SHAPES: list[re.Pattern] = [
-    re.compile(r"\Aop://\S+\Z"),                           # 1Password CLI reference
-    re.compile(r"\Avault(?:://|:)\S+\Z", re.IGNORECASE),   # HashiCorp Vault path
-    re.compile(r"\Akeyring://\S+\Z", re.IGNORECASE),       # OS/credential-keyring reference
+    re.compile(r"\Aop://[^\s,=]+\Z"),                       # 1Password CLI reference
+    re.compile(r"\Avault(?:://|:)[^\s,=]+\Z", re.IGNORECASE),  # HashiCorp Vault path
+    re.compile(r"\Akeyring://[^\s,=]+\Z", re.IGNORECASE),   # OS/credential-keyring reference
     re.compile(r"\A\$\{[A-Za-z_][A-Za-z0-9_]*\}\Z"),       # ${VAR} shell expansion
     re.compile(r"\A\$[A-Za-z_][A-Za-z0-9_]*\Z"),           # $VAR shell expansion
     re.compile(r"\A<[^<>\s]+>\Z"),                          # <placeholder> in example commands
@@ -143,6 +152,13 @@ def _kv_sub(m: re.Match) -> str:
     return f"{key}{sep}[REDACTED:value]{trail}"
 
 
+def _quoted_kv_sub(m: re.Match) -> str:
+    key, sep, quote, value = m.groups()
+    if len(value.strip()) < 8 or any(pat.fullmatch(value) for pat in REFERENCE_SHAPES):
+        return m.group(0)
+    return f"{key}{sep}{quote}[REDACTED:value]{quote}"
+
+
 def _base64_sub(m: re.Match) -> str:
     run = m.group(0)
     # A long absolute path is a 40+ run over the same alphabet ("/" is base64).
@@ -163,7 +179,7 @@ def _base64_sub(m: re.Match) -> str:
     # side.
     if "+" in run or "=" in run:
         return "[REDACTED:base64]"
-    if run.startswith("/"):
+    if run.startswith("/") and max(len(part) for part in run.split("/")) < _PATH_SEGMENT_MAX:
         return run
     if "/" in run and max(len(part) for part in run.split("/")) < _PATH_SEGMENT_MAX:
         return run
@@ -182,5 +198,6 @@ def scrub_secrets(text: str) -> str:
     for kind, pat in SECRET_PATTERNS:
         text = pat.sub(f"[REDACTED:{kind}]", text)
     text = KV_SECRET.sub(_kv_sub, text)
+    text = KV_SECRET_QUOTED.sub(_quoted_kv_sub, text)
     text = HEX_RUN.sub("[REDACTED:hex]", text)
     return BASE64_RUN.sub(_base64_sub, text)
