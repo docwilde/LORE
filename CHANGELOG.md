@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.58.1 — 2026-09-24
+
+- Pending resolution claims the reviewed file before archiving. A concurrent
+  replacement stays visible for a separate review, and a failed archive keeps
+  its unique claim instead of losing a proposal.
+- Session indexing removes a native Codex entry when a DOXA sidecar takes over
+  its thread, and clears the rollout cache so removing the sidecar can restore
+  native indexing. The sidecar check reads only a bounded rollout header.
+
 ## 0.58.0 — 2026-09-24
 
 **One memory across Claude Code, Codex, and DOXA.**

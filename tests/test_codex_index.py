@@ -9,9 +9,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
-LORE = Path(__file__).resolve().parents[1] / "bin" / "lore.py"
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+LORE = ROOT / "bin" / "lore.py"
 
 
 def _run(env: dict[str, str], *args: str) -> str:
@@ -126,6 +129,151 @@ def test_live_index_keeps_doxa_engine(tmp_path: Path) -> None:
     assert db.execute("SELECT engine FROM sessions WHERE session_id='doxa'").fetchone() == ("codex",)
 
 
+def test_sidecar_replaces_previously_indexed_native_rollout(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    slug = re.sub(r"[^A-Za-z0-9]", "-", str(repo))
+    claude_dir = tmp_path / "claude" / slug
+    codex_dir = tmp_path / "codex" / "2026" / "09" / "24"
+    replaced = codex_dir / "rollout-replaced.jsonl"
+    kept = codex_dir / "rollout-kept.jsonl"
+    for path, thread_id, phrase in (
+        (replaced, "replaced-thread", "migration glacier note"),
+        (kept, "kept-thread", "unrelated glacier note"),
+    ):
+        _write(path, [
+            _codex_record("session_meta", {"id": thread_id, "cwd": str(repo)}),
+            _codex_record("response_item", {"type": "message", "role": "user",
+                                            "content": [{"type": "input_text", "text": phrase}]}),
+        ])
+    env = os.environ.copy()
+    env.update({
+        "LORE_ROOT": str(tmp_path / "lore"),
+        "LORE_PROJECTS_DIR": str(tmp_path / "claude"),
+        "LORE_CODEX_SESSIONS_DIR": str(tmp_path / "codex"),
+        "LORE_SKILLS_DIR": str(tmp_path / "skills"),
+    })
+    assert "indexed 2, unchanged 0" in _run(env, "index")
+    db = sqlite3.connect(tmp_path / "lore" / "state.db")
+    assert db.execute("SELECT count(*) FROM msg WHERE msg MATCH 'migration'").fetchone() == (1,)
+
+    doxa = claude_dir / "doxa-one.jsonl"
+    _write(doxa, [
+        {"type": "user", "engine": "codex", "cwd": str(repo),
+         "timestamp": "2026-09-24T12:00:00Z",
+         "message": {"content": "migration glacier note"}},
+    ])
+    sidecar = claude_dir / "doxa-one.codex.json"
+    sidecar.write_text(json.dumps({"thread_id": "replaced-thread"}), encoding="utf-8")
+    assert "indexed 1, unchanged 1" in _run(env, "index")
+    assert db.execute("SELECT session_id FROM sessions ORDER BY session_id").fetchall() == [
+        ("codex:kept-thread",), ("doxa-one",),
+    ]
+    assert db.execute("SELECT session_id FROM msg WHERE msg MATCH 'migration'").fetchall() == [
+        ("doxa-one",),
+    ]
+    assert db.execute("SELECT path FROM files ORDER BY path").fetchall() == [
+        (str(doxa),), (str(kept),),
+    ]
+    assert "indexed 2, unchanged 0" in _run(env, "index", "--force")
+    assert db.execute("SELECT session_id FROM msg WHERE msg MATCH 'migration'").fetchall() == [
+        ("doxa-one",),
+    ]
+
+    sidecar.unlink()
+    assert "indexed 1, unchanged 2" in _run(env, "index")
+    assert db.execute("SELECT session_id FROM sessions ORDER BY session_id").fetchall() == [
+        ("codex:kept-thread",), ("codex:replaced-thread",), ("doxa-one",),
+    ]
+
+
+def test_cached_malformed_rollout_probe_is_bounded(tmp_path: Path) -> None:
+    from lore_core import store
+
+    projects = tmp_path / "claude"
+    sidecar = projects / "project" / "doxa.codex.json"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text(json.dumps({"thread_id": "other-thread"}), encoding="utf-8")
+    rollouts = tmp_path / "codex"
+    malformed = rollouts / "rollout-malformed.jsonl"
+    malformed.parent.mkdir()
+    malformed.write_text("x" * (2 * 1024 * 1024) + "\n", encoding="utf-8")
+    st = malformed.stat()
+    stamp = f"{st.st_mtime}:{st.st_size}"
+
+    real_open = Path.open
+    bytes_read: list[int] = []
+
+    class MeteredFile:
+        def __init__(self, fh):
+            self.fh = fh
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self.fh.__exit__(*args)
+
+        def readline(self, size=-1):
+            assert 0 <= size <= 64 * 1024
+            data = self.fh.readline(size)
+            bytes_read.append(len(data))
+            return data
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            line = self.fh.readline()
+            if not line:
+                raise StopIteration
+            bytes_read.append(len(line))
+            assert sum(bytes_read) <= 2 * 64 * 1024
+            return line
+
+    def metered_open(path, *args, **kwargs):
+        fh = real_open(path, *args, **kwargs)
+        return MeteredFile(fh) if path == malformed else fh
+
+    with patch.object(store, "ROOT", tmp_path / "lore"), \
+         patch.object(store, "PROJECTS_DIR", projects), \
+         patch.object(store, "CODEX_SESSIONS_DIR", rollouts):
+        db = store.db_connect()
+        db.execute("INSERT INTO files(path, stamp) VALUES(?, ?)", (str(malformed), stamp))
+        db.commit()
+        with patch.object(Path, "open", metered_open):
+            assert store.index_sessions(db) == (0, 1)
+            assert store.index_sessions(db) == (0, 1)
+        db.close()
+    assert bytes_read == [64 * 1024, 64 * 1024]
+
+
+def test_cached_invalid_utf8_rollout_skips_safely(tmp_path: Path) -> None:
+    from lore_core import store
+
+    projects = tmp_path / "claude"
+    sidecar = projects / "project" / "doxa.codex.json"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text(json.dumps({"thread_id": "other-thread"}), encoding="utf-8")
+    rollouts = tmp_path / "codex"
+    malformed = rollouts / "rollout-invalid.jsonl"
+    malformed.parent.mkdir()
+    malformed.write_bytes(b"\xff\n")
+    st = malformed.stat()
+    stamp = f"{st.st_mtime}:{st.st_size}"
+
+    with patch.object(store, "ROOT", tmp_path / "lore"), \
+         patch.object(store, "PROJECTS_DIR", projects), \
+         patch.object(store, "CODEX_SESSIONS_DIR", rollouts):
+        db = store.db_connect()
+        db.execute("INSERT INTO files(path, stamp) VALUES(?, ?)", (str(malformed), stamp))
+        db.commit()
+        assert store.index_sessions(db) == (0, 1)
+        assert store.index_sessions(db) == (0, 1)
+        db.close()
+
+
 def test_legacy_sessions_get_claude_engine_on_migration(tmp_path: Path) -> None:
     root = tmp_path / "lore"
     root.mkdir()
@@ -151,6 +299,18 @@ class CodexIndexTests(unittest.TestCase):
     def test_live_index_keeps_doxa_engine(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             test_live_index_keeps_doxa_engine(Path(directory))
+
+    def test_sidecar_replaces_previously_indexed_native_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            test_sidecar_replaces_previously_indexed_native_rollout(Path(directory))
+
+    def test_cached_malformed_rollout_probe_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            test_cached_malformed_rollout_probe_is_bounded(Path(directory))
+
+    def test_cached_invalid_utf8_rollout_skips_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            test_cached_invalid_utf8_rollout_skips_safely(Path(directory))
 
     def test_legacy_sessions_get_claude_engine_on_migration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
