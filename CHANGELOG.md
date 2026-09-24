@@ -14,6 +14,8 @@
   manual approval, and report retried failures accurately.
 - Serialize live and full transcript indexing so they cannot duplicate messages,
   and retain session metadata when live indexing runs first.
+- Keep IPv6 peer cursors distinct and reject malformed message batches before
+  they can suppress valid earlier session history.
 
 ## 0.58.2 — 2026-09-24
 
