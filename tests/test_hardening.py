@@ -210,6 +210,20 @@ class TestScrubCredentialsThatUsedToSurvive(unittest.TestCase):
         self.assertEqual(lore.scrub_secrets('password="verylong phrase marker"'),
                          'password="[REDACTED:value]"')
 
+    def test_quoted_multiword_password_with_short_first_word(self):
+        self.assertEqual(
+            lore.scrub_secrets('password="correct horse battery staple"'),
+            'password="[REDACTED:value]"',
+        )
+        self.assertEqual(
+            lore.scrub_secrets('{"password": "correct horse battery staple"}'),
+            '{"password": "[REDACTED:value]"}',
+        )
+
+    def test_connection_password_containing_at_sign_and_slash(self):
+        out = lore.scrub_secrets('postgres://admin:p@ss/w0rd@db.example.com')
+        self.assertEqual(out, '[REDACTED:conn-string]db.example.com')
+
     def test_pointer_followed_by_inline_key_is_not_exempt(self):
         self.assertEqual(
             lore.scrub_secrets('password=op://vault/item,api_key=abcdefghijklmnop'),
