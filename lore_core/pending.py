@@ -584,6 +584,8 @@ def _cluster_pending(items) -> int:
             print(f"{pid}  filemap  {it.get('path')}")
         elif it.get("kind") == "belief":
             print(f"{pid}  belief   {it.get('claim') or 'id ' + str(it.get('id'))}")
+        elif it.get("kind") == "sync":
+            _print_item(pid, it)  # approval needs the complete signed bytes
         else:
             print(f"{pid}  skill/{it.get('action', 'add')}  {it.get('name')}")
     print("\nbulk ops take ids: lore approve <id...>   lore reject <id...>")
@@ -665,7 +667,16 @@ def cmd_pending(args) -> int:
         print("no pending proposals.")
         return 0
     if getattr(args, "cluster", False):
-        return _cluster_pending(items)
+        result = _cluster_pending(items)
+        # Bind every displayed id to the bytes read before clustering. Sync
+        # proposals are marked reviewed only because _cluster_pending prints
+        # their full signed op, just like the ordinary listing.
+        known = listed_digests()
+        for pid, item, digest, inode in snapshots:
+            known[pid] = {"sha256": digest, "ino": inode,
+                          "reviewed": item.get("kind") == "sync"}
+        _write_listing(known)
+        return result
     if len(items) > 50 and not getattr(args, "all", False):
         print(f"{len(items)} pending -- large pile. `lore pending --cluster` "
               "groups them by theme; `--all` lists every row anyway.")
@@ -715,6 +726,7 @@ def _forget_after_archive(pid: str) -> None:
 def archive(
     pid: str, status: str,
     *, expected_snapshot: "tuple[dict, str, int] | None" = None,
+    claimed_path: "Path | None" = None,
 ) -> bool:
     """Move a resolved proposal from pending/ into pending/archive/, stamped
     with its resolution, and append the sync op that records it.
@@ -743,13 +755,15 @@ def archive(
     # Rename is the atomic claim.  Every later read and unlink uses this
     # unique path; a writer replacing src after the claim cannot be deleted.
     # The .json suffix keeps an interrupted claim visible in the pending pile.
-    claim = src.with_name(f"{pid}-claim-{uuid.uuid4().hex}.json")
-    try:
-        os.rename(src, claim)
-    except FileNotFoundError:
-        if expected_snapshot is None:
-            raise
-        claim = None
+    claim = claimed_path
+    if claim is None:
+        claim = src.with_name(f"{pid}-claim-{uuid.uuid4().hex}.json")
+        try:
+            os.rename(src, claim)
+        except FileNotFoundError:
+            if expected_snapshot is None:
+                raise
+            claim = None
     changed = False
     if expected_snapshot is not None:
         item, digest, inode = expected_snapshot
@@ -1117,6 +1131,31 @@ def resolve_ids(spec: list[str]) -> list[str]:
     return [s for s in spec if s in known]
 
 
+def _claim_for_approval(pid: str, snapshot: "tuple[dict, str, int]") -> "Path | None":
+    """Claim exactly the reviewed file before any proposed mutation lands."""
+    src = ROOT / "pending" / f"{pid}.json"
+    claim = src.with_name(f"{pid}-claim-{uuid.uuid4().hex}.json")
+    try:
+        os.rename(src, claim)
+    except FileNotFoundError:
+        return None  # another approver already claimed it
+    current = _pending_snapshot(claim.stem)
+    if current is None or current[1:] != snapshot[1:]:
+        # Keep the changed proposal visible under its claim id for review.
+        return None
+    return claim
+
+
+def _release_approval_claim(pid: str, claim: Path) -> None:
+    """Restore a refused proposal without overwriting a replacement at pid."""
+    src = ROOT / "pending" / f"{pid}.json"
+    try:
+        os.link(claim, src)  # fails if another writer has reused the id
+    except OSError:
+        return  # unique claim remains visible and can be reviewed again
+    claim.unlink()
+
+
 def cmd_approve(args) -> int:
     snapshots = _pending_snapshots()
     known = {pid for pid, _item, _digest, _inode in snapshots}
@@ -1135,8 +1174,8 @@ def cmd_approve(args) -> int:
         # proposal whose bytes changed since `lore pending` showed them is
         # re-listed and refused rather than applied: approval is consent to a
         # text, not to an id. A proposal with no recorded digest was never
-        # listed by this ROOT (a fresh clone, a pile from a `--cluster` run,
-        # an id typed from a notification) and keeps the old behaviour --
+        # listed by this ROOT (a fresh clone or an id typed from a
+        # notification) and keeps the old behaviour --
         # there is nothing to compare it against, and refusing everything
         # unlisted would make the first approval after any `lore reset`
         # impossible.
@@ -1147,13 +1186,21 @@ def cmd_approve(args) -> int:
                   f" run `lore pending` and read it again before approving.")
             _print_item(pid, item)
             continue
+        claim = _claim_for_approval(pid, snapshot)
+        if claim is None:
+            failures += 1
+            print(f"{pid}: NOT applied — the proposal changed or another approval"
+                  " claimed it. Run `lore pending` to review what remains.")
+            continue
         err = apply_item(pid, item, args.force, snapshot=snapshot)
         if err:
+            _release_approval_claim(pid, claim)
             failures += 1
             print(f"{pid}: NOT applied — {err}")
             continue
         try:
-            archived = archive(pid, "approved", expected_snapshot=snapshot)
+            archived = archive(pid, "approved", expected_snapshot=snapshot,
+                               claimed_path=claim)
         except OSError as exc:
             # The write already landed (apply_item succeeded); only the
             # archive copy failed. The claimed file remains visible in

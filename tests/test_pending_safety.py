@@ -251,6 +251,33 @@ class TestArchiveNeverLosesAnUnreviewedProposal(unittest.TestCase):
     def setUp(self):
         _clear_state()
 
+    def test_second_approver_cannot_apply_a_claimed_proposal(self):
+        pid = "approval-race-001"
+        item = {"kind": "memory", "scope": "user", "action": "add",
+                "text": "approved exactly once", "uid": "u-approval-race"}
+        _write_pending(pid, item)
+        pending_globals = lore.cmd_approve.__globals__
+        original_apply = pending_globals["apply_item"]
+        calls = []
+
+        def apply_with_second_approver(approved_pid, proposal, force, *, snapshot=None):
+            calls.append(approved_pid)
+            with quiet():
+                second = lore.cmd_approve(Namespace(ids=[pid], force=False))
+            self.assertEqual(second, 1)
+            return original_apply(approved_pid, proposal, force, snapshot=snapshot)
+
+        pending_globals["apply_item"] = apply_with_second_approver
+        try:
+            with quiet():
+                first = lore.cmd_approve(Namespace(ids=[pid], force=False))
+        finally:
+            pending_globals["apply_item"] = original_apply
+        self.assertEqual(first, 0)
+        self.assertEqual(calls, [pid])
+        self.assertEqual(lore.read_entries(lore.memory_path("user", "")).count(
+            "approved exactly once"), 1)
+
     def test_happy_path_still_archives_unlinks_and_appends_resolve_with_uid(self):
         pid = lore.stage_write({"kind": "memory", "scope": "user", "action": "add",
                                 "text": "the happy path"})
@@ -538,6 +565,27 @@ class TestApprovalAppliesWhatWasListed(unittest.TestCase):
         entries = lore.read_entries(lore.memory_path("user", ""))
         self.assertNotIn(swapped["text"], entries)
         self.assertNotIn(self.reviewed["text"], entries)
+
+    def test_cluster_listing_binds_the_displayed_proposal(self):
+        with quiet():
+            lore.cmd_pending(Namespace(cluster=True, all=True))
+        swapped = dict(self.reviewed, text="unreviewed replacement after clustering")
+        _write_pending(self.pid, swapped)
+        with quiet():
+            rc = lore.cmd_approve(Namespace(ids=[self.pid], force=False))
+        self.assertEqual(rc, 1)
+        entries = lore.read_entries(lore.memory_path("user", ""))
+        self.assertNotIn(swapped["text"], entries)
+
+    def test_cluster_shows_unverified_sync_bytes_before_marking_reviewed(self):
+        pid = "unverified-cluster-001"
+        op = {"class": "memory", "op": "add", "payload": {"text": "signed payload"}}
+        _write_pending(pid, {"kind": "sync", "op": op, "reason": "bad mac"})
+        with quiet() as output:
+            lore.cmd_pending(Namespace(cluster=True, all=True))
+        self.assertIn("sync/UNVERIFIED", output.getvalue())
+        self.assertIn("signed payload", output.getvalue())
+        self.assertTrue(lore.listed_digests()[pid]["reviewed"])
 
     def test_atomically_replaced_proposal_after_listing_is_refused(self):
         """A rename changes the inode, which used to make record_listing()
