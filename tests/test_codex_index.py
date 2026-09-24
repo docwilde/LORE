@@ -166,7 +166,7 @@ def test_sidecar_replaces_previously_indexed_native_rollout(tmp_path: Path) -> N
     ])
     sidecar = claude_dir / "doxa-one.codex.json"
     sidecar.write_text(json.dumps({"thread_id": "replaced-thread"}), encoding="utf-8")
-    assert "indexed 1, unchanged 1" in _run(env, "index")
+    assert "indexed 2, unchanged 0" in _run(env, "index")
     assert db.execute("SELECT session_id FROM sessions ORDER BY session_id").fetchall() == [
         ("codex:kept-thread",), ("doxa-one",),
     ]
@@ -182,10 +182,41 @@ def test_sidecar_replaces_previously_indexed_native_rollout(tmp_path: Path) -> N
     ]
 
     sidecar.unlink()
-    assert "indexed 1, unchanged 2" in _run(env, "index")
+    assert "indexed 2, unchanged 1" in _run(env, "index")
     assert db.execute("SELECT session_id FROM sessions ORDER BY session_id").fetchall() == [
         ("codex:kept-thread",), ("codex:replaced-thread",), ("doxa-one",),
     ]
+
+
+def test_sidecar_restores_cached_rollout_with_metadata_beyond_probe(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    codex = tmp_path / "codex" / "rollout.jsonl"
+    _write(codex, [
+        _codex_record("event_msg", {"type": "task_started", "padding": "x" * (65 * 1024)}),
+        _codex_record("session_meta", {"id": "later-thread", "cwd": str(repo)}),
+        _codex_record("response_item", {"type": "message", "role": "user",
+                                        "content": [{"type": "input_text", "text": "later glacier"}]}),
+    ])
+    projects = tmp_path / "claude" / "project"
+    projects.mkdir(parents=True)
+    env = os.environ.copy()
+    env.update({"LORE_ROOT": str(tmp_path / "lore"),
+                "LORE_PROJECTS_DIR": str(tmp_path / "claude"),
+                "LORE_CODEX_SESSIONS_DIR": str(tmp_path / "codex")})
+    assert "indexed 1, unchanged 0" in _run(env, "index")
+    db = sqlite3.connect(tmp_path / "lore" / "state.db")
+    assert db.execute("SELECT session_id FROM sessions").fetchall() == [("codex:later-thread",)]
+
+    sidecar = projects / "doxa.codex.json"
+    sidecar.write_text(json.dumps({"thread_id": "later-thread"}), encoding="utf-8")
+    _run(env, "index")
+    assert db.execute("SELECT session_id FROM sessions").fetchall() == []
+    assert db.execute("SELECT path FROM files").fetchall() == []
+
+    sidecar.unlink()
+    assert "indexed 1, unchanged 0" in _run(env, "index")
+    assert db.execute("SELECT session_id FROM sessions").fetchall() == [("codex:later-thread",)]
 
 
 def test_cached_malformed_rollout_probe_is_bounded(tmp_path: Path) -> None:
@@ -271,6 +302,8 @@ def test_cached_invalid_utf8_rollout_skips_safely(tmp_path: Path) -> None:
         db.commit()
         assert store.index_sessions(db) == (0, 1)
         assert store.index_sessions(db) == (0, 1)
+        sidecar.write_text(json.dumps({"thread_id": "changed-thread"}), encoding="utf-8")
+        assert store.index_sessions(db) == (0, 0)
         db.close()
 
 
@@ -303,6 +336,10 @@ class CodexIndexTests(unittest.TestCase):
     def test_sidecar_replaces_previously_indexed_native_rollout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             test_sidecar_replaces_previously_indexed_native_rollout(Path(directory))
+
+    def test_sidecar_restores_cached_rollout_with_metadata_beyond_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            test_sidecar_restores_cached_rollout_with_metadata_beyond_probe(Path(directory))
 
     def test_cached_malformed_rollout_probe_is_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
