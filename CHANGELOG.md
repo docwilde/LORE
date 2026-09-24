@@ -16,6 +16,8 @@
   and retain session metadata when live indexing runs first.
 - Keep IPv6 peer cursors distinct and reject malformed message batches before
   they can suppress valid earlier session history.
+- Redact connection passwords in IPv6 URLs and prose, and preserve caller-owned
+  transactions during live indexing.
 
 ## 0.58.2 — 2026-09-24
 
