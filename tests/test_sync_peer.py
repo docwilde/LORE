@@ -319,6 +319,18 @@ class PeerAddressing(unittest.TestCase):
         )), {key: str(number) for number, key in enumerate(keys + [direct])})
         conn.close()
 
+    def test_ipv6_address_and_port_cannot_share_another_address_cursor(self):
+        self.assertNotEqual(
+            self.mod.peer_key("https://[::1]:8443"),
+            self.mod.peer_key("https://[::1:8443]"),
+        )
+        self.assertNotEqual(
+            self.mod.peer_key("http://[::1]:9000"),
+            self.mod.peer_key("http://[::1:9000]"),
+        )
+        self.assertEqual(self.mod.peer_key("https://[::1]:8443"),
+                         "peer:https://[::1]:8443")
+
     def test_legacy_default_port_cursor_survives_spelling_change(self):
         conn = self.mod.db_connect()
         legacy_key = "peer:workstation"

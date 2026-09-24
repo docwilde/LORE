@@ -940,6 +940,15 @@ def _apply_session(conn: sqlite3.Connection, op: dict) -> bool:
     session_id = payload.get("session_id")
     if not session_id:
         return True
+    if verb == "msgs":
+        rows = payload.get("rows")
+        # A malformed newer op must not be recorded as applied: the ordering
+        # check would then suppress a valid older batch that arrives later.
+        # Validate the whole replacement before touching existing history.
+        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+            raise InvalidOp(
+                f"session {session_id} msgs must carry a list of row objects;"
+                " refusing to replace local history with it")
     if verb in ("upsert", "msgs") and _newer_session_op(conn, op, session_id):
         return True
     slug = _local_slug(conn, op["project_key"])
@@ -955,20 +964,6 @@ def _apply_session(conn: sqlite3.Connection, op: dict) -> bool:
         return True
 
     if verb == "msgs":
-        rows = payload.get("rows")
-        if not isinstance(rows, list):
-            return True
-        # VALIDATE THE WHOLE BATCH BEFORE DELETING ANYTHING. "Replaces by
-        # session id" is a replace, not a truncate: the DELETE used to run
-        # first and the INSERT then skipped every row that was not a dict, so
-        # a verified op carrying `rows: ["nonsense"]` erased this machine's
-        # copy of a session's history and put nothing back. One bad row now
-        # refuses the op (and `_dispatch_isolated` records it failed) with the
-        # local history untouched.
-        if not all(isinstance(r, dict) for r in rows):
-            raise InvalidOp(
-                f"session {session_id} msgs carries a row that is not an"
-                " object; refusing to replace local history with it")
         conn.execute("DELETE FROM msg WHERE session_id = ?", (session_id,))
         conn.executemany(
             "INSERT INTO msg(session_id, project, ts, role, content) VALUES(?,?,?,?,?)",

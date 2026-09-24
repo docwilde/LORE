@@ -1223,6 +1223,22 @@ class TestSessionRules(unittest.TestCase):
                          [("new message",)])
         conn.close()
 
+    def test_malformed_newer_msgs_cannot_suppress_valid_older_rows(self):
+        _, tgt = _machine("sess-malformed-newer")
+        malformed = self._msgs(tgt, 2, 2, "not a list")
+        valid = self._msgs(tgt, 1, 1, [
+            {"ts": "t", "role": "user", "content": "needed history"}])
+        with quiet():
+            newer_report = _apply(tgt, [malformed])
+        self.assertEqual(newer_report["failed"], 1)
+        self.assertEqual(newer_report["applied"], 0)
+        self.assertEqual(_apply(tgt, [valid])["applied"], 1)
+        conn = tgt.db_connect()
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = 'S-1'"
+        ).fetchall(), [("needed history",)])
+        conn.close()
+
     def test_a_session_lands_under_the_receivers_own_slug_not_the_authors(self):
         """The same translation the belief subjects get: a slug is a checkout
         path flattened and is legitimately different on every machine, so what

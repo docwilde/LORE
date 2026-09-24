@@ -239,6 +239,10 @@ def peer_key(spec: str) -> str:
     """
     parsed = urllib.parse.urlsplit(peer_url(spec))
     host = (parsed.hostname or spec).strip().lower()
+    # Delimit an IPv6 address before appending a port. Without brackets,
+    # [::1]:8443 and [::1:8443] produce the same cursor key.
+    if ":" in host:
+        host = f"[{host}]"
     if parsed.scheme == "https":
         port = parsed.port or 443
         return f"{PEER_PREFIX}https://{host}" + (f":{port}" if port != 443 else "")
