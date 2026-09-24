@@ -13,6 +13,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # All state dirs must point away from the real store BEFORE the module
 # executes: lore.py reads them at import time into module constants.
@@ -144,6 +145,53 @@ class TestSnapshotScope(unittest.TestCase):
 
 
 class TestLiveIndex(unittest.TestCase):
+    def test_live_pass_leaves_caller_transaction_open(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "caller-txn.jsonl"
+        _transcript(t, [_msg("user", "indexed inside caller transaction")])
+        conn.execute("INSERT INTO msg(session_id, project, ts, role, content)"
+                     " VALUES('caller-marker', NULL, '', 'user', 'uncommitted')")
+
+        self.assertEqual(lore.index_live(conn, t), (1, 1))
+        self.assertTrue(conn.in_transaction)
+        other = lore.db_connect()
+        self.assertEqual(other.execute(
+            "SELECT count(*) FROM msg WHERE session_id IN (?, 'caller-marker')",
+            (t.stem,)).fetchone()[0], 0)
+        conn.rollback()
+        self.assertEqual(other.execute(
+            "SELECT count(*) FROM msg WHERE session_id IN (?, 'caller-marker')",
+            (t.stem,)).fetchone()[0], 0)
+        other.close()
+        conn.close()
+
+    def test_read_error_restores_deleted_rows_without_rolling_back_caller(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "read-error.jsonl"
+        _transcript(t, [_msg("user", "could not read")])
+        conn.execute("INSERT INTO msg(session_id, project, ts, role, content)"
+                     " VALUES(?, NULL, '', 'user', 'existing history')", (t.stem,))
+        conn.commit()
+        conn.execute("INSERT INTO msg(session_id, project, ts, role, content)"
+                     " VALUES('caller-marker-on-error', NULL, '', 'user', 'keep me')")
+
+        with patch.object(Path, "open", side_effect=OSError("read failed")):
+            self.assertEqual(lore.index_live(conn, t), (0, 0))
+        self.assertTrue(conn.in_transaction)
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("existing history",)])
+        conn.commit()
+        other = lore.db_connect()
+        self.assertEqual(other.execute(
+            "SELECT count(*) FROM msg WHERE session_id = 'caller-marker-on-error'"
+        ).fetchone()[0], 1)
+        self.assertEqual(other.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("existing history",)])
+        other.close()
+        conn.close()
+
     def test_first_live_pass_preserves_cwd_and_title_when_full_index_skips(self):
         conn = lore.db_connect()
         t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "metadata.jsonl"

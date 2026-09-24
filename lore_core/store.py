@@ -789,6 +789,11 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
     owned_transaction = not conn.in_transaction
     if owned_transaction:
         conn.execute("BEGIN IMMEDIATE")
+    # Keep this pass rollbackable without taking ownership of a caller's
+    # transaction. In particular, a read error after the start==0 DELETE
+    # must restore those rows while preserving the caller's earlier writes.
+    savepoint = f"index_live_{uuid.uuid4().hex}"
+    conn.execute(f"SAVEPOINT {savepoint}")
     key = str(transcript)
     session_id = transcript.stem
     proj = transcript.parent.name
@@ -842,6 +847,8 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
                     new_rows.append((session_id, proj, d.get("timestamp") or "",
                                      d["type"], scrub_secrets(text)[:MSG_TRUNC]))
     except OSError:
+        conn.execute(f"ROLLBACK TO {savepoint}")
+        conn.execute(f"RELEASE {savepoint}")
         if owned_transaction:
             conn.rollback()
         return 0, start
@@ -889,7 +896,9 @@ def index_live(conn: sqlite3.Connection, transcript: Path) -> tuple[int, int]:
         conn.execute(
             "INSERT OR REPLACE INTO files(path, stamp, lines_indexed) VALUES(?,?,?)",
             (key, None if incomplete_tail else f"{st.st_mtime}:{st.st_size}", consumed))
-    conn.commit()
+    conn.execute(f"RELEASE {savepoint}")
+    if owned_transaction:
+        conn.commit()
     return len(new_rows), consumed
 
 
