@@ -4,11 +4,20 @@
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest import mock
+
+# CI runs each test file as its own process from the repository root. Point
+# every possible LORE store at private test storage before importing the core.
+TEST_DIR = tempfile.TemporaryDirectory(prefix="lore-reviewed-resolution-")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+os.environ["LORE_ROOT"] = str(Path(TEST_DIR.name) / "root")
+os.environ["LORE_SKILLS_DIR"] = str(Path(TEST_DIR.name) / "skills")
+os.environ["LORE_PROJECTS_DIR"] = str(Path(TEST_DIR.name) / "projects")
 
 from lore_core import pending
 
