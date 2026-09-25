@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.58.5 — 2026-09-25
+
+- Add an exact-snapshot approval and rejection API for trusted interfaces. It
+  claims one pending file before mutation, verifies its reviewed bytes and inode,
+  and preserves any replacement staged under the same ID.
+- Require a recorded full review before applying unverified sync proposals.
+  Partial archive failures report whether the curated write already landed, so
+  callers can avoid an unsafe retry.
+
 ## 0.58.4 — 2026-09-25
 
 - Add `index_live_fd(conn, fd, logical_path)` for callers that verify and open
