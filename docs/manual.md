@@ -146,6 +146,19 @@ A staged write lands in the same `pending/` pile as every reviewer proposal —
 applies with `/lore:approve`, archives unapplied with `/lore:reject`.
 `/lore:pending` marks these rows with the context that wrote them.
 
+Native review UIs can use `lore_core.pending.record_full_review(pid, sha256,
+inode)` after showing the complete raw proposal and receiving an explicit
+human confirmation, then call `resolve_reviewed(pid, sha256, inode,
+"approve" | "reject")` for one proposal. The latter atomically moves the
+pending name into a private claim, verifies the claimed bytes and inode, and
+applies only that parsed item. A new proposal under the original ID is left
+untouched. Sync proposals require the full-review marker before approval.
+`PendingResolutionError.code` is a stable refusal code; `applied=True` means
+the curated approval landed but the archive failed, so a UI must report a
+partial completion and must not retry automatically. An archive failure or
+interrupted process may leave a claimed file in `pending/.claimed/` for manual
+recovery. The API never accepts a caller-supplied proposal body.
+
 **The gate is advisory** — forgeable via `AI_AGENT=..._agent` or
 `LORE_WRITE_GATE=off` — and does not distinguish a skill or a subagent from
 the interactive agent, since those carry the same marker. It stops writers

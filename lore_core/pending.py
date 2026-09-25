@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import stat
 import uuid
 from pathlib import Path
 
@@ -39,6 +40,9 @@ __all__ = [
     'cross_project_note',
     'archive',
     'apply_item',
+    'resolve_reviewed',
+    'record_full_review',
+    'PendingResolutionError',
     'skill_frontmatter',
     'skill_file_text',
     'resolve_ids',
@@ -281,6 +285,25 @@ def cross_project_note(item: dict) -> "str | None":
 LISTED_DIGESTS = ".listed"
 
 
+class PendingResolutionError(Exception):
+    """A reviewed resolution refused or partially completed without leaking item text.
+
+    ``applied`` means the curated write landed but archive failed. Callers
+    must show this distinction and must not blindly retry an approval.
+    """
+
+    def __init__(self, code: str, *, applied: bool = False) -> None:
+        self.code = code
+        self.applied = applied
+        super().__init__(code)
+
+
+def _valid_review_identity(pid: str, digest: str, inode: int) -> bool:
+    return (isinstance(pid, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", pid) is not None
+            and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+            and type(inode) is int and inode > 0)
+
+
 def item_digest(pid: str) -> "str | None":
     """sha256 of the bytes of `pending/<pid>.json`, or None when it is gone.
 
@@ -393,6 +416,29 @@ def _record_snapshots(snapshots: "list[tuple[str, dict, str, int]]") -> None:
     for pid, _item, digest, inode in snapshots:
         known[pid] = {"sha256": digest, "ino": inode, "reviewed": True}
     _write_listing(known)
+
+
+def record_full_review(pid: str, expected_sha256: str, expected_inode: int) -> None:
+    """Record a UI's completed full review of one exact pending snapshot.
+
+    This is a trusted UI boundary, not a model/tool endpoint. Call only after
+    the complete raw proposal has been displayed and a person explicitly
+    confirms review. The marker is required for unverified sync approval;
+    resolve_reviewed still independently claims and compares the file.
+    """
+    if not _valid_review_identity(pid, expected_sha256, expected_inode):
+        raise PendingResolutionError("invalid_request")
+    try:
+        snapshot = _claimed_snapshot(ROOT / "pending" / f"{pid}.json")
+    except (OSError, PendingResolutionError) as exc:
+        raise PendingResolutionError("pending_unavailable") from exc
+    if snapshot[1:] != (expected_sha256, expected_inode):
+        raise PendingResolutionError("pending_changed")
+    known = listed_digests()
+    known[pid] = {"sha256": expected_sha256, "ino": expected_inode, "reviewed": True}
+    _write_listing(known)
+    if not _listed_snapshot(pid, snapshot):
+        raise PendingResolutionError("review_record_failed")
 
 
 def forget_listing(pid: str) -> None:
@@ -829,6 +875,155 @@ def archive(
         except Exception:                                   # noqa: BLE001
             pass
     return not changed
+
+
+def _restore_claim(pid: str, claimed: Path) -> None:
+    """Return a refused proposal without ever replacing a newly staged one."""
+    source = ROOT / "pending" / f"{pid}.json"
+    try:
+        os.link(claimed, source, follow_symlinks=False)  # fails on reused id
+    except FileExistsError:
+        recovery = ROOT / "pending" / f"{pid}-recovered-{uuid.uuid4().hex}.json"
+        os.rename(claimed, recovery)
+        raise PendingResolutionError("id_reused_recovered") from None
+    except OSError as exc:
+        raise PendingResolutionError("claim_recovery_failed") from exc
+    claimed.unlink()
+
+
+def _private_claim_dir() -> Path:
+    directory = ROOT / "pending" / ".claimed"
+    try:
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    metadata = directory.lstat()
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o077):
+        raise PendingResolutionError("unsafe_claim_directory")
+    return directory
+
+
+def _claimed_snapshot(claimed: Path) -> "tuple[dict, str, int]":
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(claimed, flags)
+    try:
+        metadata = os.fstat(fd)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()
+                or metadata.st_nlink != 1 or metadata.st_size > 1024 * 1024):
+            raise PendingResolutionError("unsafe_proposal")
+        data = bytearray()
+        while len(data) <= 1024 * 1024:
+            chunk = os.read(fd, min(64 * 1024, 1024 * 1024 + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > 1024 * 1024:
+            raise PendingResolutionError("unsafe_proposal")
+        item = json.loads(data.decode("utf-8"))
+        if not isinstance(item, dict):
+            raise PendingResolutionError("invalid_proposal")
+        return item, hashlib.sha256(data).hexdigest(), metadata.st_ino
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise PendingResolutionError("invalid_proposal") from exc
+    finally:
+        os.close(fd)
+
+
+def _archive_claimed(pid: str, claimed: Path, item: dict, status: str, inode: int) -> None:
+    """Durably archive the claimed item; never unlink the original id path."""
+    resolved = dict(item)
+    resolved["status"] = status
+    resolved["resolved"] = utcnow()
+    archive_dir = private_dir(ROOT / "pending" / "archive")
+    name = f"{pid}-{status}-{uuid.uuid4().hex}.json"
+    destination = archive_dir / name
+    temporary = archive_dir / f".{name}.tmp"
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(resolved, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, destination)  # O_EXCL semantics: no archive overwrite
+        directory_fd = os.open(archive_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        if claimed.lstat().st_ino != inode:
+            raise OSError("claimed proposal was replaced before archive cleanup")
+        claimed.unlink()
+        claim_directory_fd = os.open(claimed.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(claim_directory_fd)
+        finally:
+            os.close(claim_directory_fd)
+        if not os.path.lexists(ROOT / "pending" / f"{pid}.json"):
+            _forget_after_archive(pid)
+        uid = item.get("uid")
+        if uid:
+            try:
+                conn = db_connect()
+                pk = pending_op_project_key(conn, item)
+                append_op(conn, "pending", "resolve", pk, {"uid": uid, "status": status})
+                conn.commit()
+                conn.close()
+            except Exception:  # noqa: BLE001 -- same best-effort rule as archive()
+                pass
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def resolve_reviewed(
+    pid: str, expected_sha256: str, expected_inode: int, decision: str,
+) -> None:
+    """Resolve exactly one previously reviewed pending file by atomic claim.
+
+    The caller must establish a real human review of the full bytes; this
+    function checks those bytes and inode itself after moving the file out of
+    the pending name. It never trusts a supplied item or a `reviewed` flag.
+    An unverified sync op additionally requires LORE's own full-listing mark.
+    New proposals under the reused id stay pending and are never unlinked.
+    """
+    if not _valid_review_identity(pid, expected_sha256, expected_inode) or decision not in ("approve", "reject"):
+        raise PendingResolutionError("invalid_request")
+    source = ROOT / "pending" / f"{pid}.json"
+    claim_dir = _private_claim_dir()
+    claimed = claim_dir / f"{pid}-{uuid.uuid4().hex}.json"
+    try:
+        os.rename(source, claimed)
+    except FileNotFoundError as exc:
+        raise PendingResolutionError("pending_unavailable") from exc
+    except OSError as exc:
+        raise PendingResolutionError("claim_failed") from exc
+    try:
+        snapshot = _claimed_snapshot(claimed)
+        item, digest, inode = snapshot
+        if digest != expected_sha256 or inode != expected_inode:
+            raise PendingResolutionError("pending_changed")
+        if changed_since_listing(pid, snapshot):
+            raise PendingResolutionError("pending_changed")
+        if item.get("kind") == "sync" and not _listed_snapshot(pid, snapshot):
+            raise PendingResolutionError("sync_full_listing_required")
+    except BaseException:
+        _restore_claim(pid, claimed)
+        raise
+    if decision == "approve":
+        try:
+            error = apply_item(pid, item, False, snapshot=snapshot)
+        except BaseException as exc:
+            _restore_claim(pid, claimed)
+            raise PendingResolutionError("apply_failed") from exc
+        if error:
+            _restore_claim(pid, claimed)
+            raise PendingResolutionError("apply_refused")
+    try:
+        _archive_claimed(pid, claimed, item, "approved" if decision == "approve" else "rejected", inode)
+    except OSError as exc:
+        # A curated write may already have landed. Keep the claimed proposal
+        # for recovery and tell the caller this was a partial completion.
+        raise PendingResolutionError("archive_failed", applied=decision == "approve") from exc
 
 
 def _quarantine_corrupt(pid: str, src: Path, raw: str, exc: json.JSONDecodeError) -> None:
