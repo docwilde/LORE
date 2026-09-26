@@ -1,18 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.59.0 — 2026-09-26
 
-- Add `lore sync resign` for a log that grew before `LORE_SYNC_HMAC_KEY`
-  existed: dry run by default, reporting how many of this machine's own ops
-  are unsigned, signed with the current key, signed with a different key, or
-  malformed, and how many `--apply` would resign. It never signs another
-  machine's ops — those are reported and left standing — and never
-  overwrites a signature that already verifies with the current key; an op
-  signed under a different key is skipped unless `--replace-foreign-key` is
-  also given. `--apply` backs up `state.db` next to itself with a timestamp
-  and writes in one transaction, touching only the `mac` column, so ids,
-  content, ordering, and authorship are unchanged and `lore sync export`
-  succeeds on the resigned backlog.
+**`lore sync resign` signs a backlog written before `LORE_SYNC_HMAC_KEY` existed.**
+
+- Dry run by default: counts this machine's ops as unsigned, signed with the current key, signed
+  with another key, or malformed. `--apply` signs the unsigned ones; `lore sync export` then succeeds.
+- Writes only `sync_ops.mac`, in one transaction, after a `state.db.bak-<UTC>` backup. Ids,
+  content, order and author are unchanged. Other machines' ops are never signed.
+- `--replace-foreign-key` also re-signs own ops that carry a different key; off by default.
+  8 tests in `tests/test_sync_resign.py`.
 
 ## 0.58.6 — 2026-09-26
 
