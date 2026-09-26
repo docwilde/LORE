@@ -841,6 +841,13 @@ def main() -> int:
     sp = sub.add_parser("approve", help="apply staged proposals")
     sp.add_argument("ids", nargs="+")
     sp.add_argument("--force", action="store_true")
+    sp.add_argument("--text",
+                    help="one memory proposal only: apply this text instead of "
+                         "the staged one (the archive keeps both)")
+    sp.add_argument("--match",
+                    help="one memory proposal only: replace the existing entry "
+                         "this substring names instead of adding; refused, not "
+                         "added, when nothing matches")
     sp.set_defaults(fn=cmd_approve)
 
     sp = sub.add_parser("reject", help="discard staged proposals")

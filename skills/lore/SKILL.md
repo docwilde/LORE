@@ -74,6 +74,7 @@ On session end a detached reviewer (cheap model, `--bare`, no tools) digests the
 ```sh
 lore pending            # list staged proposals
 lore approve <id>|all   # apply (memory writes cap-enforced; skills install to ~/.claude/skills)
+lore approve <id> --text "..." [--match "entry"]   # apply one memory proposal as edited; --match merges into that entry
 lore reject <id>|all
 lore status             # usage %, index size, pending count
 lore doctor             # environment checks, auto-memory conflict warning
