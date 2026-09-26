@@ -169,6 +169,27 @@ class MigrationBackfill(unittest.TestCase):
         for oid in outcome_ids:
             self.assertEqual(o_before[oid], o_after[oid])
 
+    def test_a_row_written_without_a_uid_after_the_migration_gets_one(self):
+        """A LORE older than 0.50.0 sharing the store inserts beliefs and
+        outcomes with uid NULL after the column exists; the next connect
+        names them, and leaves every row that already had a uid alone."""
+        _seed_pre_migration_store()
+        conn = lore.db_connect()
+        before = dict(conn.execute("SELECT id, uid FROM beliefs"))
+        conn.execute("INSERT INTO beliefs(subject, claim, confidence, status, created, updated)"
+                     " VALUES('s', 'written by an old LORE', 0.5, 'active', 'x', 'x')")
+        stale = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+        self.assertIsNone(conn.execute("SELECT uid FROM beliefs WHERE id=?", (stale,)).fetchone()[0])
+        conn.close()
+
+        conn = lore.db_connect()
+        after = dict(conn.execute("SELECT id, uid FROM beliefs"))
+        conn.close()
+        self.assertRegex(after[stale], UUID4_RE)
+        for bid, uid in before.items():
+            self.assertEqual(after[bid], uid)
+
     def test_unique_index_exists_on_both_tables(self):
         _seed_pre_migration_store()
         conn = lore.db_connect()
