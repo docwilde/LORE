@@ -99,6 +99,19 @@ def _migrate_sync_ops_slot(conn: sqlite3.Connection) -> None:
             conn.rollback()
 
 
+def _backfill_uids(conn: sqlite3.Connection, table: str) -> None:
+    """Give every `uid IS NULL` row of `table` a fresh uuid4 and commit.
+
+    A uuid4 is a name, not a fabricated fact about the row. The commit is
+    immediate, not left to the caller: a process that closes this connection
+    without writing anything else would otherwise roll the UPDATE back."""
+    rows = [(str(uuid.uuid4()), rid) for (rid,) in
+            conn.execute(f"SELECT id FROM {table} WHERE uid IS NULL")]
+    if rows:
+        conn.executemany(f"UPDATE {table} SET uid = ? WHERE id = ?", rows)
+        conn.commit()
+
+
 def db_connect() -> sqlite3.Connection:
     # PRIVATE, not merely present. state.db holds every indexed transcript,
     # every belief and every op this machine has ever seen; under the ordinary
@@ -211,18 +224,14 @@ def db_connect() -> sqlite3.Connection:
         conn.execute("ALTER TABLE beliefs ADD COLUMN uid TEXT")
     except sqlite3.OperationalError:
         pass  # column already present
-    else:
-        conn.executemany(
-            "UPDATE beliefs SET uid = ? WHERE id = ?",
-            [(str(uuid.uuid4()), bid) for (bid,) in
-             conn.execute("SELECT id FROM beliefs WHERE uid IS NULL")],
-        )
-        # commit now, not left to the caller: the ALTER above already
-        # auto-committed as DDL, so a process that closes this connection
-        # without writing anything else would otherwise roll the backfill
-        # UPDATE back -- and the ALTER, now a no-op on every later connect,
-        # would never give the backfill a second chance to run.
-        conn.commit()
+    # The back-fill runs on EVERY connect, not only the one that adds the
+    # column. Once the column exists, a LORE older than 0.50.0 still running
+    # against the same state.db (a stale plugin-cache hook) inserts beliefs
+    # without a uid, and nothing named them again: a real store collected
+    # 430 such rows between 2026-09-16 and 2026-09-23, none of which
+    # `lore sync seed` or `export` could carry. `uid IS NULL` reads the
+    # unique index, so the steady-state cost is one empty index probe.
+    _backfill_uids(conn, "beliefs")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS beliefs_uid ON beliefs(uid)")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS belief_evidence("
@@ -293,13 +302,7 @@ def db_connect() -> sqlite3.Connection:
         conn.execute("ALTER TABLE belief_outcomes ADD COLUMN uid TEXT")
     except sqlite3.OperationalError:
         pass  # column already present
-    else:
-        conn.executemany(
-            "UPDATE belief_outcomes SET uid = ? WHERE id = ?",
-            [(str(uuid.uuid4()), oid) for (oid,) in
-             conn.execute("SELECT id FROM belief_outcomes WHERE uid IS NULL")],
-        )
-        conn.commit()  # see the beliefs.uid migration above for why
+    _backfill_uids(conn, "belief_outcomes")  # every connect, as for beliefs
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS belief_outcomes_uid ON belief_outcomes(uid)")
     # SYNC OP LOG (sync spec PR 3, docs/plans/sync.md "The core: a local op
     # log"): every mutation to a synced class appends one row here, in the

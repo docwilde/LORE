@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.60.1 — 2026-09-26
+
+**Fix: beliefs written by a LORE older than 0.50.0 never got a uid, so sync could not carry them.**
+The one-time back-fill ran when the column was added; a stale 0.48.5 hook kept inserting after it.
+
+- **`_backfill_uids`** in `lore_core/store.py` now runs on every connect for `beliefs` and
+  `belief_outcomes`. Measured: 430 of 2001 beliefs on one store, 2026-09-16 to 2026-09-23.
+- Run `lore sync seed --apply` afterwards to add the newly named beliefs and their edges to the log.
+  1 new test in `tests/test_belief_uid.py`.
+
 ## 0.60.0 — 2026-09-26
 
 **`lore sync seed` back-fills the op log for state older than the log itself.**
