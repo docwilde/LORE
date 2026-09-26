@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased
+
+**Fix: an SSH key fingerprint made `lore sync seed` non-idempotent for memory.**
+A public fingerprint (`SHA256:` + 43 base64 chars, `ssh-keygen -lf`'s own output shape) is a hash
+OF a public key, not a secret, but it fell inside `BASE64_RUN`'s alphabet-and-length test and was
+redacted on every ingest. `seed`'s "covered" check then compared the disk entry's raw text against
+the log's already-scrubbed replay across a mismatch nothing narrowed to a timestamp — a false
+mismatch for exactly the entries `scrub_secrets` touches, which appended the same entry again on
+every `--apply` (the real store's dry run stuck at `memory would seed 1` forever).
+
+- `lore_core/scrub.py`: the fingerprint shape is exempted by prefix AND exact digest length
+  together, never by length alone — a secret pasted right after the literal text `SHA256:` still
+  redacts. The base64 rule for a real secret is unchanged.
+- `lore_core/sync_seed.py`: memory, file-map and skill coverage now compare through the SAME scrub
+  the log's replay already carries (`scrub_secrets` is idempotent on already-scrubbed text), not
+  raw disk text — so a legitimately-redacted entry stops re-seeding too, not only the fingerprint.
+  5 new tests in `tests/test_hardening.py` and `tests/test_sync_seed.py`.
+
+**Fix: a supersede naming a belief with no `uid` yet stayed "active" on every future receiver.**
+`belief_supersede` appends `{uid, by_uid, reason}` — and if the superseding belief's own `uid` was
+still unset at that moment (pre-0.60.1, before every connect back-filled one), it appended
+`by_uid: null`. That op can never apply (`_apply_belief`'s supersede verb needs both endpoints to
+resolve) and it is permanent, signed history, but `seed`'s `covered_supersede` set counted it as
+coverage anyway — checking only `uid`, never `by_uid` — so no later seed run was ever allowed to
+correct it. Measured on the real store: 132 source `superseded`, 2 stuck `active` after an
+export → import round trip, `deferred=13` reported (the 2 stuck supersedes, plus 9 `reinforce` and
+2 `edge` ops with the same `null`-reference shape from before the same back-fill — those name no
+belief at all and stay unresolvable; out of scope here, since they never affect belief status).
+
+- `lore_core/sync_seed.py`: a supersede op with no `by_uid` is no longer coverage, and `_plan_beliefs`
+  never emits one either — once the superseding belief has a real `uid` (as the connect-time
+  back-fill guarantees today), `seed --apply` appends a SECOND, correct supersede that converges
+  the status; the broken op stays in the log, inert, like any other unresolvable held op.
+  1 new test in `tests/test_sync_seed.py`, plus a `deferred=0` assertion added to the existing
+  end-to-end seed → export → import test for a clean chain.
+
+**Fix: `LORE_ROOT` was ignored when installing skills.**
+An import into a scratch `LORE_ROOT` (built to diagnose the two defects above) wrote skills into
+the real `~/.claude/skills` anyway, because `SKILLS_DIR` read only `LORE_SKILLS_DIR`, defaulting
+straight to the real path regardless of `LORE_ROOT`.
+
+- `lore_core/config.py`: the DEFAULT root still installs to `~/.claude/skills` — Claude Code only
+  ever reads that path, so the ordinary install must keep landing there — but any OTHER root now
+  installs under `<LORE_ROOT>/skills` instead. `LORE_SKILLS_DIR`, when set, still wins either way.
+  4 new tests in `tests/test_config.py`.
+
 ## 0.60.1 — 2026-09-26
 
 **Fix: beliefs written by a LORE older than 0.50.0 never got a uid, so sync could not carry them.**
