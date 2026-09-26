@@ -85,7 +85,8 @@ __all__ = [
 # this distribution in diagnostics output.
 BUILD_FINGERPRINT = "lore-bf-623047b2a8e895a5"
 
-ROOT = Path(os.environ.get("LORE_ROOT", str(Path.home() / ".claude" / "lore")))
+_DEFAULT_ROOT = Path.home() / ".claude" / "lore"
+ROOT = Path(os.environ.get("LORE_ROOT", str(_DEFAULT_ROOT)))
 # User memory is the one cap that binds in practice: it holds who the user
 # is across every project, so it fills with durable facts that never stop
 # being true, while project memory rotates with the repo. 9000 chars costs
@@ -129,7 +130,20 @@ BELIEF_DORMANT_DAYS = int(os.environ.get("LORE_BELIEF_DORMANT_DAYS", "45"))
 INCLUDE_DORMANT = os.environ.get("LORE_INCLUDE_DORMANT", "") not in ("", "0")
 DIALECTIC_MODEL = os.environ.get("LORE_DIALECTIC_MODEL", "")
 REVIEW_MIN_MESSAGES = int(os.environ.get("LORE_REVIEW_MIN_MESSAGES", "3"))
-SKILLS_DIR = Path(os.environ.get("LORE_SKILLS_DIR", str(Path.home() / ".claude" / "skills")))
+# Claude Code reads skills from ~/.claude/skills, not from LORE_ROOT -- so
+# the DEFAULT root's skills have to keep landing there, always. But an
+# explicit, non-default LORE_ROOT (a test's tmp dir, a scratch peer built for
+# a dry-run import) means this process's whole state lives somewhere else on
+# purpose, and installing skills to the real ~/.claude/skills anyway is a
+# write outside that sandbox nothing asked for -- observed live: an import
+# into a scratch ROOT to diagnose a sync bug wrote 22 skills into the
+# operator's actual ~/.claude/skills. LORE_SKILLS_DIR, when set, always wins
+# either way -- it is the explicit override this rule must never shadow.
+SKILLS_DIR = Path(os.environ.get(
+    "LORE_SKILLS_DIR",
+    str(Path.home() / ".claude" / "skills") if ROOT == _DEFAULT_ROOT
+    else str(ROOT / "skills"),
+))
 PROJECTS_DIR = Path(os.environ.get("LORE_PROJECTS_DIR", str(Path.home() / ".claude" / "projects")))
 CODEX_SESSIONS_DIR = Path(os.environ.get(
     "LORE_CODEX_SESSIONS_DIR",
