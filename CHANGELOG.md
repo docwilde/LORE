@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.59.0 — 2026-09-26
+
+**`lore sync resign` signs a backlog written before `LORE_SYNC_HMAC_KEY` existed.**
+
+- Dry run by default: counts this machine's ops as unsigned, signed with the current key, signed
+  with another key, or malformed. `--apply` signs the unsigned ones; `lore sync export` then succeeds.
+- Writes only `sync_ops.mac`, in one transaction, after a `state.db.bak-<UTC>` backup. Ids,
+  content, order and author are unchanged. Other machines' ops are never signed.
+- `--replace-foreign-key` also re-signs own ops that carry a different key; off by default.
+  8 tests in `tests/test_sync_resign.py`.
+
 ## 0.58.6 — 2026-09-26
 
 - Approve a memory proposal as edited: `lore approve <id> --text "..."` applies
