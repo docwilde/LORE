@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+**`lore sync seed` back-fills the op log for state older than the log itself.**
+
+- The op log records changes since sync was switched on, not a snapshot of what
+  already existed — a store that curated memory, beliefs, skills or a file map
+  first has all of that on disk with no op describing how it got there. `lore
+  sync export` and hub `bootstrap` can only ever ship what the log holds, so a
+  fresh peer built from either one used to reproduce a fragment.
+- Dry run by default: reports, per class, how many ops it would append.
+  `--apply` writes one op per piece of state the log cannot already reproduce
+  — memory (user/project scope; machine memory is never seeded), file maps,
+  beliefs (insert, edges, and status: retracted/dormant/superseded), and
+  skills — in one transaction, after a `state.db.bak-<UTC>` backup. Every op
+  reuses the existing wire shape (`memory`/`filemap` `add`, `belief`
+  `insert`/`edge`/`retract`/`status`/`supersede`, `skill` `put`); no new op
+  kind. Never touches the files or tables it is seeding from — only
+  `sync_ops` is written.
+- `pending` is deliberately not seeded: it is a human-review queue, not
+  curated truth, and resurrecting stale proposals on every peer would be
+  actively harmful.
+- Idempotent: a second `--apply` appends nothing and takes no backup.
+  Respects `LORE_SYNC_CLASSES`. Refuses cleanly with no `LORE_SYNC_HMAC_KEY`.
+  12 tests in `tests/test_sync_seed.py`, including an end-to-end seed →
+  export → import round trip compared by content across every class.
+
 ## 0.59.0 — 2026-09-26
 
 **`lore sync resign` signs a backlog written before `LORE_SYNC_HMAC_KEY` existed.**
