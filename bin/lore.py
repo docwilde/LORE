@@ -1068,6 +1068,14 @@ def main() -> int:
     syp.add_argument("--cwd")
     syp.set_defaults(fn=cmd_sync_resign, scmd="resign")
     syp = syncsub.add_parser(
+        "seed",
+        help="back-fill the op log for portable state this store held before"
+             " the log existed (dry run by default)")
+    syp.add_argument("--apply", action="store_true",
+                     help="write the missing ops; default is a dry-run report")
+    syp.add_argument("--cwd")
+    syp.set_defaults(fn=cmd_sync_seed, scmd="seed")
+    syp = syncsub.add_parser(
         "export", help="write a signed, portable op bundle for offline transfer")
     syp.add_argument("path", help="new bundle file (never overwritten)")
     syp.set_defaults(fn=cmd_sync_export, scmd="export")

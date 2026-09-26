@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.60.0 — 2026-09-26
+
+**`lore sync seed` back-fills the op log for state older than the log itself.**
+
+- Appends one signed op per memory entry, file map row, belief (insert, edge, status) and skill
+  the log cannot reproduce. `export` and `bootstrap` previously shipped only a fragment.
+- Dry run by default; `--apply` writes `sync_ops` only, in one transaction, after a
+  `state.db.bak-<UTC>` backup. Existing op kinds only; machine memory and `pending` are not seeded.
+- Idempotent: a second `--apply` appends 0. 12 tests in `tests/test_sync_seed.py`, including
+  seed → export → import compared by content.
+
 ## 0.59.0 — 2026-09-26
 
 **`lore sync resign` signs a backlog written before `LORE_SYNC_HMAC_KEY` existed.**

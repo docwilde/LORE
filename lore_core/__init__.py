@@ -36,6 +36,8 @@ in deriver.py's docstring):
     sync_transfer  offline signed-op bundle export/import
     sync_resign  `lore sync resign` -- sign this machine's own unsigned
                backlog with the current LORE_SYNC_HMAC_KEY
+    sync_seed  `lore sync seed` -- back-fill the op log for portable state
+               this store held before the log (or the key) existed
     context    memory snapshot rendering + SessionStart/refresh/MOTD
 
 Off that graph, importing nothing from the package and imported by
@@ -68,6 +70,7 @@ from .sync_peer import *  # noqa: F401,F403
 from .sync_cmds import *  # noqa: F401,F403
 from .sync_transfer import *  # noqa: F401,F403
 from .sync_resign import *  # noqa: F401,F403
+from .sync_seed import *  # noqa: F401,F403
 from .relocate import *  # noqa: F401,F403
 from .context import *  # noqa: F401,F403
 
@@ -90,6 +93,7 @@ from . import sync_peer as _sync_peer
 from . import sync_cmds as _sync_cmds
 from . import sync_transfer as _sync_transfer
 from . import sync_resign as _sync_resign
+from . import sync_seed as _sync_seed
 from . import relocate as _relocate
 from . import context as _context
 
@@ -113,6 +117,7 @@ __all__ = [
     *_sync_cmds.__all__,
     *_sync_transfer.__all__,
     *_sync_resign.__all__,
+    *_sync_seed.__all__,
     *_relocate.__all__,
     *_context.__all__,
 ]

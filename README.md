@@ -91,6 +91,7 @@ lore sync bootstrap              # initialize a new machine
 lore sync export <new-file>      # create an offline bundle
 lore sync import <file>          # verify and merge a bundle
 lore sync resign --apply         # sign this machine's own backlog with the current key
+lore sync seed --apply           # back-fill ops for state older than the log itself
 ```
 
 Machines must share `LORE_SYNC_HMAC_KEY` to verify operations. You can choose
