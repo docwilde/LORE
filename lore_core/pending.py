@@ -731,7 +731,9 @@ def cmd_pending(args) -> int:
     # Record what was just shown, by digest, so `lore approve` can tell
     # whether it is applying the text this listing put in front of a human.
     _record_snapshots(snapshots)
-    print(f"\n{len(items)} pending. approve: lore approve <id>|all   reject: lore reject <id>|all")
+    print(f"\n{len(items)} pending. approve: lore approve <id>|all   reject: lore reject <id>|all"
+          "\n  edit a memory proposal as you approve it: lore approve <id> --text \"...\""
+          " [--match \"entry to replace\"]")
     return 0
 
 
@@ -772,10 +774,16 @@ def _forget_after_archive(pid: str) -> None:
 def archive(
     pid: str, status: str,
     *, expected_snapshot: "tuple[dict, str, int] | None" = None,
-    claimed_path: "Path | None" = None,
+    claimed_path: "Path | None" = None, record: "dict | None" = None,
 ) -> bool:
     """Move a resolved proposal from pending/ into pending/archive/, stamped
     with its resolution, and append the sync op that records it.
+
+    `record`, when given, is what the archive stores in place of the
+    reviewed item: an edited approval archives the text that actually
+    landed, with the proposal as staged under `edited_from`. It never
+    changes which file is claimed or compared -- that stays
+    `expected_snapshot`.
 
     THE INVARIANT (two independent reports of the data-loss bug this
     replaced): the claimed source is unlinked ONLY after the archive copy is
@@ -818,7 +826,7 @@ def archive(
         # Archive the action that actually landed, not a replacement that
         # appeared while it was being applied. A changed claim remains
         # pending under its unique id so it cannot inherit this resolution.
-        item = dict(item)
+        item = dict(record if record is not None else item)
     else:
         raw = claim.read_text(encoding="utf-8")
         try:
@@ -1054,7 +1062,19 @@ def _quarantine_corrupt(pid: str, src: Path, raw: str, exc: json.JSONDecodeError
 def apply_item(
     pid: str, item: dict, force: bool,
     *, snapshot: "tuple[dict, str, int] | None" = None,
+    strict_match: bool = False, origin: "str | None" = None,
 ) -> str | None:
+    """Apply one proposal. None on success, else why it was refused.
+
+    `strict_match` and `origin` are for an approval the reviewer EDITED
+    (`lore approve <id> --text/--match`), and are keyword arguments rather
+    than fields read from `item` because `item` is a file anyone running as
+    this user can write: a staged proposal must not be able to claim a
+    reviewer's edit for itself. `strict_match` refuses a `replace` whose
+    match finds nothing instead of falling back to an add -- a reviewer who
+    said "merge into X" meant X, and a duplicate beside it is the one outcome
+    they ruled out. `origin` is the provenance label the ledger records.
+    """
     # THE SAME PREDICATE `cmd_approve` uses, here as well as there, because
     # this is the function every OTHER caller reaches -- the TUI, a future
     # daemon, a test. `cmd_approve` checks first only so it can re-list the
@@ -1164,13 +1184,15 @@ def apply_item(
                                to_scope=item.get("to_scope") or scope)
         if action == "replace" and item.get("match"):
             err = memory_replace(scope, slug, item["match"], item["text"],
-                                 via="approved",
+                                 via="approved", origin=origin,
                                  source_engine=item.get("source_engine"))
-            if err and err.startswith("no entry matches"):
+            if err and err.startswith("no entry matches") and not strict_match:
                 err = memory_add(scope, slug, item["text"], via="approved",
+                                 origin=origin,
                                  source_engine=item.get("source_engine"))
         else:
             err = memory_add(scope, slug, item["text"], via="approved",
+                             origin=origin,
                              source_engine=item.get("source_engine"))
         return err
     # Everything else is a skill proposal. Its "name" is AUTHORED BY A MODEL
@@ -1351,7 +1373,45 @@ def _release_approval_claim(pid: str, claim: Path) -> None:
     claim.unlink()
 
 
+def _edited(item: dict, text: "str | None",
+            match: "str | None") -> "tuple[dict | None, str | None]":
+    """The proposal as the reviewer amended it, or why it cannot be amended.
+
+    An edit is consent to the staged proposal PLUS the reviewer's change, so
+    it rides the same listing check, claim and archive as a plain approval;
+    what it changes is only what lands. The staged fields it replaced are
+    kept under `edited_from`, so the archive shows both texts.
+    """
+    if item.get("kind") != "memory":
+        return None, (f"--text/--match edit memory proposals only; this is a"
+                      f" {item.get('kind') or 'skill'} proposal -- reject it and"
+                      f" write the fact yourself")
+    action = item.get("action") or "add"
+    if action not in ("add", "replace"):
+        return None, (f"a memory {action} carries no text to edit -- approve or"
+                      f" reject it as staged")
+    if text is not None and not text.strip():
+        return None, "--text is empty -- `lore reject` is how a proposal is discarded"
+    if match is not None and not match.strip():
+        return None, "--match is empty -- it would match every entry"
+    edited = dict(item)
+    edited["edited_from"] = {k: item[k] for k in ("action", "match", "text") if k in item}
+    if text is not None:
+        edited["text"] = text
+    if match is not None:
+        edited["action"] = "replace"
+        edited["match"] = match
+    return edited, None
+
+
 def cmd_approve(args) -> int:
+    text = getattr(args, "text", None)
+    match = getattr(args, "match", None)
+    editing = text is not None or match is not None
+    if editing and (args.ids == ["all"] or len(args.ids) != 1):
+        print("--text/--match edit exactly one proposal -- name one id, not"
+              " several or `all`.", file=sys.stderr)
+        return 1
     snapshots = _pending_snapshots()
     known = {pid for pid, _item, _digest, _inode in snapshots}
     ids = [pid for pid, _item, _digest, _inode in snapshots] if args.ids == ["all"] \
@@ -1381,13 +1441,23 @@ def cmd_approve(args) -> int:
                   f" run `lore pending` and read it again before approving.")
             _print_item(pid, item)
             continue
+        applied = item
+        if editing:
+            applied, why = _edited(item, text, match)
+            if why:
+                failures += 1
+                print(f"{pid}: NOT applied — {why}")
+                continue
         claim = _claim_for_approval(pid, snapshot)
         if claim is None:
             failures += 1
             print(f"{pid}: NOT applied — the proposal changed or another approval"
                   " claimed it. Run `lore pending` to review what remains.")
             continue
-        err = apply_item(pid, item, args.force, snapshot=snapshot)
+        # A plain approval calls apply_item exactly as it always has.
+        edit_args = ({"strict_match": match is not None,
+                      "origin": f"edited on approval of {pid}"} if editing else {})
+        err = apply_item(pid, applied, args.force, snapshot=snapshot, **edit_args)
         if err:
             _release_approval_claim(pid, claim)
             failures += 1
@@ -1395,7 +1465,8 @@ def cmd_approve(args) -> int:
             continue
         try:
             archived = archive(pid, "approved", expected_snapshot=snapshot,
-                               claimed_path=claim)
+                               claimed_path=claim,
+                               record=applied if editing else None)
         except OSError as exc:
             # The write already landed (apply_item succeeded); only the
             # archive copy failed. The claimed file remains visible in
@@ -1412,7 +1483,8 @@ def cmd_approve(args) -> int:
                   f" pending and must be reviewed separately.")
             continue
         note = cross_project_note(item)
-        print(f"{pid}: applied." + (f" ({note})" if note else ""))
+        print(f"{pid}: applied{' as edited' if editing else ''}."
+              + (f" ({note})" if note else ""))
     return 1 if failures else 0
 
 

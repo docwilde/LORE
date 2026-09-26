@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.58.6 — 2026-09-26
+
+- Approve a memory proposal as edited: `lore approve <id> --text "..."` applies
+  the reviewer's wording instead of the staged one, and `--match "..."` makes it
+  replace the existing entry that substring names — refused, never added as a
+  duplicate, when nothing matches. It takes the same listing check, claim and
+  archive as a plain approval. The archive keeps the staged text under
+  `edited_from`, and the provenance ledger records the entry as approved,
+  edited on approval of that id. A reworded or merged proposal no longer has
+  to be rejected and rewritten by hand, which archived facts that landed as
+  `rejected`.
+
 ## 0.58.5 — 2026-09-25
 
 - Add an exact-snapshot approval and rejection API for trusted interfaces. It
