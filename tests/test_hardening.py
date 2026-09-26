@@ -168,6 +168,51 @@ class TestScrubSecrets(unittest.TestCase):
         self.assertEqual(lore.scrub_secrets(text), text)
 
 
+class TestScrubSSHFingerprint(unittest.TestCase):
+    """A public key fingerprint (`ssh-keygen -lf`'s own output shape) is a
+    hash OF a public key, not a secret -- it lets nobody derive the key it
+    names, the same way a file's sha256sum is not a leak of the file. It
+    nonetheless falls inside BASE64_RUN's alphabet-and-length test (43
+    unpadded base64 characters, sometimes containing `+`), so before the
+    exemption it redacted on every ingest -- and that false positive is what
+    made `lore sync seed` re-append a USER.md entry holding one forever (the
+    disk text never matched what the log's replay, itself scrubbed, held).
+    """
+
+    FINGERPRINT = "SHA256:ycBfdVr4rT9kuK3cLZzC5J69ii3W7G8F7gZhF3InVfk"
+
+    def test_fingerprint_passes_unredacted(self):
+        text = f"key fingerprint is {self.FINGERPRINT} docwilde@host (ED25519)"
+        self.assertEqual(lore.scrub_secrets(text), text)
+
+    def test_fingerprint_containing_a_plus_still_passes(self):
+        # "+" is otherwise a redact-on-sight signal for a base64 run (see
+        # _base64_sub) -- a real fingerprint may legitimately contain one,
+        # and the exemption has to be checked before that rule, not after.
+        fp = "SHA256:a+cBfdVr4rT9kuK3cLZzC5J69ii3W7G8F7gZhF3InVf"
+        self.assertEqual(len(fp) - len("SHA256:"), 43)
+        self.assertEqual(lore.scrub_secrets(fp), fp)
+
+    def test_43_char_base64_without_the_prefix_is_still_redacted(self):
+        """The exemption is the prefix AND the length together -- a base64
+        run that merely happens to be 43 characters, with nothing calling it
+        a fingerprint, is not exempt from anything."""
+        blob = "ycBfdVr4rT9kuK3cLZzC5J69ii3W7G8F7gZhF3InVzz"
+        self.assertEqual(len(blob), 43)
+        out = lore.scrub_secrets(f"random blob {blob} end")
+        self.assertNotIn(blob, out)
+        self.assertIn("[REDACTED:base64]", out)
+
+    def test_sha256_prefix_with_wrong_length_is_still_redacted(self):
+        """A secret pasted right after the literal text "SHA256:" is not a
+        fingerprint just because it shares the prefix -- only the exact
+        32-byte-digest length is exempt."""
+        secret = "ycBfdVr4rT9kuK3cLZzC5J69ii3W7G8F7gZhF3InVzzQ"  # 44 chars
+        out = lore.scrub_secrets(f"SHA256:{secret}")
+        self.assertNotIn(secret, out)
+        self.assertIn("[REDACTED:", out)
+
+
 class TestScrubCredentialsThatUsedToSurvive(unittest.TestCase):
     """One test per credential shape that reached the FTS index and a model
     prompt intact. Each string is the literal one that was observed passing
