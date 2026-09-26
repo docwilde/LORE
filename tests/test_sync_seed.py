@@ -168,6 +168,58 @@ class SeedTests(unittest.TestCase):
         self.assertIn("Pre-log user fact.", text)
         self.assertIn("Logged user fact.", text)
 
+    def test_memory_containing_an_ssh_fingerprint_is_seeded_exactly_once(self):
+        """The false-positive that made seed non-idempotent: a public SSH
+        key fingerprint (`SHA256:` + 43 base64 chars) reads as a secret to
+        BASE64_RUN, so once the seeded op's payload was scrubbed on the way
+        into the log (append_op's own _scrub_payload), the disk entry's RAW
+        text never matched the log's replay again -- every dry run showed
+        `memory would seed 1` forever, and every --apply appended a second
+        copy. Fixed at the scrub layer (the fingerprint SHAPE is no longer
+        redacted at all), so this is now a plain single seed, no different
+        from any other pre-log entry."""
+        fp = "SHA256:ycBfdVr4rT9kuK3cLZzC5J69ii3W7G8F7gZhF3InVfk"
+        _py(self.prelog_env,
+            "from lore_core import memory_add; "
+            f"memory_add('user', '', 'My key fingerprint: {fp}')")
+
+        first = _cli(self.keyed_env, "sync", "seed", "--apply")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("memory  seeded 1", first.stdout)
+        self.assertEqual(_op_count(self.keyed_env, "memory"), 1)
+
+        # The fingerprint survives on disk unredacted (defect (a)) --
+        text = (self.root / "USER.md").read_text(encoding="utf-8")
+        self.assertIn(fp, text)
+        self.assertNotIn("[REDACTED:", text)
+
+        # -- and a second, third dry run report nothing left to seed (b).
+        second = _cli(self.keyed_env, "sync", "seed")
+        self.assertIn("would seed:         0", second.stdout)
+        applied_again = _cli(self.keyed_env, "sync", "seed", "--apply")
+        self.assertIn("seeded:             0", applied_again.stdout)
+        self.assertEqual(_op_count(self.keyed_env, "memory"), 1)
+
+    def test_memory_containing_a_real_secret_is_seeded_exactly_once(self):
+        """The general form of the same idempotency fix, for a false
+        positive `scrub_secrets` gets RIGHT: a genuinely secret-shaped
+        base64 blob is still redacted going into the log, but seed must
+        compare the disk entry through the same scrub rather than raw, or
+        this would re-seed forever exactly like the fingerprint did."""
+        secret = "QUJ+" * 12 + "=="  # 50 chars, base64-shaped -- redacted whole
+        _py(self.prelog_env,
+            "from lore_core import memory_add; "
+            f"memory_add('user', '', 'API blob: {secret}')")
+
+        first = _cli(self.keyed_env, "sync", "seed", "--apply")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("memory  seeded 1", first.stdout)
+
+        second = _cli(self.keyed_env, "sync", "seed", "--apply")
+        self.assertIn("seeded:             0", second.stdout,
+                      "a legitimately-redacted entry must not re-seed")
+        self.assertEqual(_op_count(self.keyed_env, "memory"), 1)
+
     def test_machine_memory_is_never_seeded(self):
         _py(self.prelog_env,
             "from lore_core import memory_add; "
@@ -245,6 +297,87 @@ class SeedTests(unittest.TestCase):
         # Idempotent: nothing left to seed.
         second = _cli(self.keyed_env, "sync", "seed", "--apply")
         self.assertIn("seeded:             0", second.stdout)
+
+    def test_broken_historical_supersede_self_heals_on_reseed(self):
+        """The defect this reproduces: `belief_supersede` (an ORDINARY write,
+        real dreamer reconciliation, not a seed) appends `{uid, by_uid,
+        reason}` -- and if the superseding belief's OWN `uid` column was
+        still unset at that moment (pre-0.60.1, before every connect
+        back-filled one), it appended `by_uid: null`. That op can never
+        apply on any receiver (`_apply_belief`'s supersede verb needs BOTH
+        endpoints to resolve) and it is permanent, signed history -- nothing
+        may rewrite it. `covered_supersede` used to count it as coverage
+        anyway (it checked only `uid`, never `by_uid`), so the belief stayed
+        "active" on every future receiver forever, on every seed run, with
+        no way out. Fixed: an existing supersede with no `by_uid` is not
+        coverage, so once the superseding belief HAS a uid (as it does
+        here, and as 0.60.1's connect-time back-fill guarantees today),
+        `seed --apply` emits a SECOND, correct supersede op that converges
+        the status -- the broken op stays in the log, inert, exactly as any
+        other genuinely-unresolvable held op does."""
+        out = _py(self.keyed_env,
+            "from lore_core import belief_insert, db_connect;"
+            " from lore_core.sync_oplog import append_op;"
+            " c = db_connect();"
+            " a, _ = belief_insert(c, 'user', 'Old duplicate fact.', 0.6, None, None, None, via='direct');"
+            " b, _ = belief_insert(c, 'user', 'Winning fact.', 0.9, None, None, None, via='direct');"
+            " a_uid = c.execute('SELECT uid FROM beliefs WHERE id=?', (a,)).fetchone()[0];"
+            " b_uid = c.execute('SELECT uid FROM beliefs WHERE id=?', (b,)).fetchone()[0];"
+            " c.execute(\"UPDATE beliefs SET status='superseded', superseded_by=?,"
+            " resolution='same fact' WHERE id=?\", (b, a));"
+            # The historical write itself: exactly the shape belief_supersede
+            # appends when the winner's uid was still unset -- constructed
+            # directly rather than by reverting the fix, since the shape
+            # (not the code path that once produced it) is what a receiver
+            # has to cope with.
+            " append_op(c, 'belief', 'supersede', None,"
+            " {'uid': a_uid, 'by_uid': None, 'reason': 'same fact'});"
+            " c.commit(); print(a_uid, b_uid)")
+        a_uid, b_uid = out.split()
+
+        # Dry run sees the belief as needing a (correct) supersede -- the
+        # broken historical op present in the log is not coverage.
+        dry = _cli(self.keyed_env, "sync", "seed")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("belief  would seed 1", dry.stdout)
+
+        applied = _cli(self.keyed_env, "sync", "seed", "--apply")
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        self.assertIn("belief  seeded 1", applied.stdout)
+
+        payloads = json.loads(_py(self.keyed_env,
+            "import json; from lore_core import db_connect; c = db_connect(); "
+            "print(json.dumps([r[0] for r in c.execute("
+            "\"SELECT payload FROM sync_ops WHERE class='belief' AND op='supersede'\""
+            ").fetchall()]))"))
+        supersedes = [json.loads(p) for p in payloads]
+        self.assertEqual(len(supersedes), 2)  # the broken one, plus the seeded fix
+        by_uids = {p.get("by_uid") for p in supersedes}
+        self.assertEqual(by_uids, {None, b_uid})
+
+        # A second reseed emits nothing further -- the corrected op is now
+        # coverage for this belief's uid.
+        again = _cli(self.keyed_env, "sync", "seed", "--apply")
+        self.assertIn("seeded:             0", again.stdout)
+
+        # Export + import into a fresh peer converges to the source's own
+        # status -- the broken op is held forever (genuinely unresolvable),
+        # the corrected one lands.
+        bundle = Path(self.tmp.name) / "supersede-heal-bundle.json"
+        exported = _cli(self.keyed_env, "sync", "export", bundle)
+        self.assertEqual(exported.returncode, 0, exported.stderr)
+        dest_root = Path(self.tmp.name) / "supersede-heal-dest"
+        dest_env = _env(dest_root, "eeeeeeee-5555-4555-8555-555555555555", key=KEY)
+        imported = _cli(dest_env, "sync", "import", bundle)
+        self.assertEqual(imported.returncode, 0, imported.stderr)
+        self.assertIn("deferred=1", imported.stdout)  # the broken op, held forever
+        self.assertIn("failed=0", imported.stdout)
+
+        dst_status = _py(dest_env,
+            "from lore_core import db_connect; c = db_connect(); "
+            f"print(c.execute('SELECT status FROM beliefs WHERE uid=?', ({a_uid!r},))"
+            ".fetchone()[0])").strip()
+        self.assertEqual(dst_status, "superseded")
 
     def test_belief_edge_seeded_and_logged_edge_untouched(self):
         out = _py(self.prelog_env,
@@ -395,6 +528,11 @@ class SeedTests(unittest.TestCase):
         self.assertEqual(imported.returncode, 0, imported.stderr)
         self.assertIn("unverified=0", imported.stdout)
         self.assertIn("failed=0", imported.stdout)
+        # A clean supersede chain (no historical poison) has no dependency
+        # ordering problem at all -- insert-before-status within one seed
+        # run, one page, one retry-to-fixpoint apply -- so it must converge
+        # with NOTHING held.
+        self.assertIn("deferred=0", imported.stdout)
 
         # -- memory: byte-identical curated files --
         self.assertEqual((self.root / "USER.md").read_text(encoding="utf-8"),

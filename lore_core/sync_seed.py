@@ -53,17 +53,39 @@ FOUR SEEDED CLASSES, one skipped class:
 touching anything, per class:
   - memory/filemap entry: replay every APPLIED op of that class already in
     the log, in canonical order, against an EMPTY scope (`_replay_bucket`);
-    an entry is covered when it appears (case-insensitively) in the result.
-    Never a timestamp: an old, unsynced entry and a freshly-logged one look
-    identical on disk, so the log itself -- replayed -- is the only honest
-    oracle for "can the log already produce this".
+    an entry is covered when its SCRUBBED text (scrub_secrets -- the same
+    pass `append_op` already runs over every payload leaf) appears
+    (case-insensitively) in the result. Scrubbed, not raw: `append_op`
+    scrubs a payload's string leaves on the way into the log (sync_oplog.py
+    `_scrub_payload`), so an entry whose disk text is secret-shaped reaches
+    the log already redacted. Comparing the raw disk text against that
+    would never match -- not a timestamp problem, a SPACE problem, and it
+    made `seed --apply` re-append the same entry forever (an SSH key
+    fingerprint that reads as a base64 secret to the scrubber was the case
+    that surfaced it). Comparing both sides through the same scrub is
+    idempotent on text already scrubbed (scrub_secrets' own contract), so
+    an entry with nothing secret-shaped in it compares exactly as before.
+    Never a timestamp either way: an old, unsynced entry and a
+    freshly-logged one look identical on disk, so the log itself --
+    replayed -- is the only honest oracle for "can the log already produce
+    this".
   - belief insert: covered when SOME applied `belief`/`insert` op (this
     machine's or a peer's -- an op that arrived from a peer is already the
     log reproducing this belief, and re-seeding it would falsely attest to
     authorship this machine does not have) carries this belief's `uid`.
   - belief status (retracted/dormant/superseded): covered when an applied
     op of the matching verb (`retract`/`status`/`supersede`) already names
-    this belief's `uid`.
+    this belief's `uid` -- and, for `supersede` specifically, ALSO carries a
+    real `by_uid`. A `supersede` op with `by_uid: null` names no belief at
+    all (it was written when the superseding belief's own `uid` was still
+    unset -- pre-0.60.1, before every connect back-filled one) and can
+    never apply; treating it as coverage would freeze that belief as
+    "active" on every future receiver forever, with no path to a fix
+    because the log is append-only. Not covering it lets a later seed run
+    -- once the superseding belief has the `uid` it does today -- emit a
+    SECOND, correct `supersede` op that lands and converges the status; the
+    first stays in the log at applied=0, an inert artifact of the moment it
+    was written, exactly as any other genuinely-unresolvable held op does.
   - belief edge: covered when an applied `edge` op already carries this
     exact (src_uid, dst_uid, rel) triple.
   - skill: covered when replaying every applied `put`/`remove` op for this
@@ -100,6 +122,7 @@ from .config import ROOT, SKILLS_DIR, private_file, valid_skill_name
 from .filemap import filemap_path
 from .gate import entry_key, entry_provenance
 from .memory import memory_bucket, memory_path, read_entries
+from .scrub import scrub_secrets
 from .store import db_connect
 from .sync_apply import APPLIED_YES, canonical_key
 from .sync_oplog import (
@@ -213,7 +236,15 @@ def _plan_memory(conn: sqlite3.Connection) -> "list[_Descriptor]":
         bucket = memory_bucket(scope, slug)
         replayed_lower = {e.lower() for e in _replay_bucket(ops, "memory", bucket)}
         for entry in current:
-            if entry.lower() in replayed_lower:
+            # Compare in the SAME space the log's replay produced: `append_op`
+            # already scrubbed every replayed entry's text on the way in, so
+            # comparing this disk entry's raw text against it is comparing
+            # across a scrub the log already applied and the plan has not --
+            # a false mismatch for exactly the entries scrub_secrets touches
+            # (an SSH key fingerprint, e.g., that reads as a base64 secret).
+            # scrub_secrets is idempotent on already-scrubbed text, so this
+            # changes nothing for an entry with nothing secret-shaped in it.
+            if scrub_secrets(entry).lower() in replayed_lower:
                 continue
             prov = entry_provenance("memory", bucket, entry)
             plan.append(("memory", "add", pk, {
@@ -239,7 +270,9 @@ def _plan_filemap(conn: sqlite3.Connection) -> "list[_Descriptor]":
         ops = _applied_ops(conn, "filemap", pk)
         replayed_lower = {e.lower() for e in _replay_bucket(ops, "filemap", slug)}
         for entry in current:
-            if entry.lower() in replayed_lower:
+            # Same reasoning as `_plan_memory` above -- compare through the
+            # same scrub the log's replay already carries.
+            if scrub_secrets(entry).lower() in replayed_lower:
                 continue
             prov = entry_provenance("filemap", slug, entry)
             plan.append(("filemap", "add", pk, {
@@ -281,7 +314,12 @@ def _plan_beliefs(conn: sqlite3.Connection) -> "list[_Descriptor]":
             covered_retract.add(payload["uid"])
         elif op == "status" and payload.get("uid") and payload.get("status") == "dormant":
             covered_dormant.add(payload["uid"])
-        elif op == "supersede" and payload.get("uid"):
+        elif op == "supersede" and payload.get("uid") and payload.get("by_uid"):
+            # A `by_uid`-less supersede names no belief and can never apply
+            # (see the module docstring's "belief status" bullet) -- do NOT
+            # count it as coverage, or the belief it names stays "active" on
+            # every future receiver forever, with no later seed run ever
+            # allowed to correct it.
             covered_supersede.add(payload["uid"])
         elif op == "edge" and payload.get("src_uid") and payload.get("dst_uid"):
             covered_edges.add((payload["src_uid"], payload["dst_uid"], payload.get("rel") or ""))
@@ -322,8 +360,17 @@ def _plan_beliefs(conn: sqlite3.Connection) -> "list[_Descriptor]":
         elif status == "superseded" and uid not in covered_supersede:
             by_row = by_id.get(superseded_by) if superseded_by else None
             by_uid = by_row[1] if by_row else None
-            plan.append(("belief", "supersede", project_key,
-                        {"uid": uid, "by_uid": by_uid, "reason": resolution or ""}))
+            # Never emit a supersede this store cannot yet back up: a
+            # `by_uid`-less op can never apply on any receiver (see
+            # `_apply_belief`'s supersede verb -- both endpoints must
+            # resolve), so it is not "seeded, but broken" -- it is not
+            # seeded. Left for a later run, once `superseded_by`'s row has
+            # been given a uid (belief_insert always mints one today; a row
+            # still missing one is pre-0.60.1 history the connect-time
+            # back-fill has not reached yet).
+            if by_uid:
+                plan.append(("belief", "supersede", project_key,
+                            {"uid": uid, "by_uid": by_uid, "reason": resolution or ""}))
 
     for src, dst, rel, source, session_id, note, _edge_created in conn.execute(
         "SELECT src, dst, rel, source, session_id, note, created FROM belief_edges"
@@ -390,7 +437,12 @@ def _plan_skills(conn: sqlite3.Connection) -> "list[_Descriptor]":
             continue
         name = name_dir.name
         ordered = sorted(ops_by_name.get(name, []), key=canonical_key)
-        if _skill_replay(ordered) == body:
+        # Same space, same reason as `_plan_memory`: a `put` op's `body` was
+        # scrubbed on its way into the log, so the replay is scrubbed text --
+        # compare it against the disk body scrubbed the same way rather than
+        # raw, or a body with anything secret-shaped in it (a fingerprint, a
+        # KV_SECRET-shaped line) would look uncovered forever.
+        if _skill_replay(ordered) == scrub_secrets(body):
             continue
         plan.append(("skill", "put", None, {"name": name, "body": body}))
     return plan
