@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Add `lore sync resign` for a log that grew before `LORE_SYNC_HMAC_KEY`
+  existed: dry run by default, reporting how many of this machine's own ops
+  are unsigned, signed with the current key, signed with a different key, or
+  malformed, and how many `--apply` would resign. It never signs another
+  machine's ops — those are reported and left standing — and never
+  overwrites a signature that already verifies with the current key; an op
+  signed under a different key is skipped unless `--replace-foreign-key` is
+  also given. `--apply` backs up `state.db` next to itself with a timestamp
+  and writes in one transaction, touching only the `mac` column, so ids,
+  content, ordering, and authorship are unchanged and `lore sync export`
+  succeeds on the resigned backlog.
+
 ## 0.58.6 — 2026-09-26
 
 - Approve a memory proposal as edited: `lore approve <id> --text "..."` applies

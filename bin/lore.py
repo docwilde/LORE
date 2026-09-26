@@ -1056,6 +1056,18 @@ def main() -> int:
     syp.add_argument("--cwd")
     syp.set_defaults(fn=cmd_sync_status, scmd="status")
     syp = syncsub.add_parser(
+        "resign",
+        help="sign this machine's own unsigned ops with the current"
+             " LORE_SYNC_HMAC_KEY (dry run by default)")
+    syp.add_argument("--apply", action="store_true",
+                     help="write the new signatures; default is a dry-run report")
+    syp.add_argument("--replace-foreign-key", action="store_true",
+                     dest="replace_foreign_key",
+                     help="also resign this machine's own ops that are signed"
+                          " with a different key (never a foreign machine's ops)")
+    syp.add_argument("--cwd")
+    syp.set_defaults(fn=cmd_sync_resign, scmd="resign")
+    syp = syncsub.add_parser(
         "export", help="write a signed, portable op bundle for offline transfer")
     syp.add_argument("path", help="new bundle file (never overwritten)")
     syp.set_defaults(fn=cmd_sync_export, scmd="export")
