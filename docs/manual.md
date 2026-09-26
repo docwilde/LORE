@@ -220,7 +220,7 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_MEMORY_PROPOSAL_CAP` | 3 | memory proposals one review may stage — the ceiling the prompt states *and* staging enforces |
 | `LORE_DUP_CONTAINMENT` | 0.60 | drop a proposal whose tokens an existing entry in the same scope already carries by this fraction (a `replace` that matches a live entry is exempt) |
 | `LORE_CLAUDE_BIN` | `which claude` | claude binary for the worker |
-| `LORE_SKILLS_DIR` | `~/.claude/skills` | where approved skills install |
+| `LORE_SKILLS_DIR` | `~/.claude/skills`, or `$LORE_ROOT/skills` under a non-default `LORE_ROOT` | where approved skills install — Claude Code always reads `~/.claude/skills`, so the default `LORE_ROOT` keeps installing there; a scratch/test root installs under itself instead, never into the real one, unless this is set explicitly |
 | `LORE_CODEX_SESSIONS_DIR` | `${CODEX_HOME:-~/.codex}/sessions` | native Codex rollout directory for session search indexing |
 | `LORE_REFRESH_ON_CHANGE` | `1` | re-inject the snapshot the prompt after its content changes; `0` opts out |
 | `LORE_REFRESH_SECS` | unset | optional periodic floor for that refresh (change-detection needs no setting) |

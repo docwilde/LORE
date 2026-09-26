@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.60.2 — 2026-09-27
+
+**Fix: an SSH key fingerprint was redacted, so `lore sync seed` re-seeded its memory entry forever.**
+
+- **`lore_core/scrub.py`** exempts `SHA256:` + exactly 43 base64 chars (`ssh-keygen -lf` output).
+  Any other 40+ base64 run, including one after a literal `SHA256:`, is still redacted.
+- **`lore_core/sync_seed.py`** compares memory, file map and skill text through `scrub_secrets`
+  before checking coverage, so any legitimately redacted entry stops re-seeding. 5 new tests.
+
+**Fix: a supersede recorded before 0.60.1 with `by_uid: null` left the belief active on receivers.**
+
+- `seed` no longer counts such an op as coverage and never emits one; `--apply` appends a correct
+  supersede. Measured: 132 superseded on the source, 130 after import; now 132. 1 new test.
+- Not fixed: 9 `reinforce` and 2 `edge` ops of the same vintage name no belief and stay deferred.
+
+**Fix: skills imported into a custom `LORE_ROOT` were written to the real `~/.claude/skills`.**
+
+- **`SKILLS_DIR`**: the default root still uses `~/.claude/skills`; any other root uses
+  `<LORE_ROOT>/skills`. `LORE_SKILLS_DIR` still wins. 4 new tests in `tests/test_config.py`.
+
 ## 0.60.1 — 2026-09-26
 
 **Fix: beliefs written by a LORE older than 0.50.0 never got a uid, so sync could not carry them.**

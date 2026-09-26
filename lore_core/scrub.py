@@ -141,6 +141,31 @@ HEX_RUN = re.compile(r"\b[a-fA-F0-9]{40,}\b")
 # own `={0,2}` already.
 BASE64_RUN = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])")
 
+# `ssh-keygen -lf` prints a public key's fingerprint as "SHA256:" followed by
+# the unpadded base64 of the 32-byte SHA-256 digest -- always exactly 43
+# characters (ceil(256 / 6)), never padded (ssh-keygen strips the trailing
+# `=` a 43-length group would otherwise need). That is a PUBLIC hash of a
+# PUBLIC key: printing it lets nobody derive the key it names, the same way
+# printing a file's sha256sum is not a leak of the file. It nonetheless falls
+# inside BASE64_RUN's alphabet-and-length test, so without an exemption it
+# was redacted on every ingest -- and, because the redacted text then never
+# matches the disk entry `sync_seed`'s coverage check replays from the log
+# (see sync_seed.py), a memory entry holding one never stopped re-seeding.
+# The exemption is intentionally narrow: it names the exact prefix AND pins
+# the run to the exact digest length, so it can never widen into "any base64
+# after a colon" -- a real secret pasted right after literal text "SHA256:"
+# still redacts, because it is not 43 characters.
+_SSH_FINGERPRINT_PREFIX = "SHA256:"
+_SSH_FINGERPRINT_LEN = 43  # base64(sha256(pubkey)), unpadded
+
+
+def _is_ssh_fingerprint(m: re.Match) -> bool:
+    run = m.group(0)
+    if len(run) != _SSH_FINGERPRINT_LEN or "=" in run:
+        return False
+    start = m.start() - len(_SSH_FINGERPRINT_PREFIX)
+    return start >= 0 and m.string[start:m.start()] == _SSH_FINGERPRINT_PREFIX
+
 
 def _kv_sub(m: re.Match) -> str:
     key, sep, value = m.group(1), m.group(2), m.group(3)
@@ -166,6 +191,12 @@ def _quoted_kv_sub(m: re.Match) -> str:
 
 def _base64_sub(m: re.Match) -> str:
     run = m.group(0)
+    # An ssh-keygen fingerprint before anything else: it can legitimately
+    # contain "+" (checked below as a redact-on-sight signal for everything
+    # else), so it has to be excluded before that check runs, not folded
+    # into the path carve-outs underneath it.
+    if _is_ssh_fingerprint(m):
+        return run
     # A long absolute path is a 40+ run over the same alphabet ("/" is base64).
     # Digests are full of them via Bash/Read tool lines and via URLs, and
     # redacting paths would gut the index's main value — so a run that STARTS

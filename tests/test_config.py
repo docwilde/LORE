@@ -244,5 +244,86 @@ class TestMemoryCaps(unittest.TestCase):
         importlib.reload(cfg)
 
 
+class TestSkillsDirDefault(unittest.TestCase):
+    """Defect: SKILLS_DIR ignored LORE_ROOT entirely -- it always read
+    LORE_SKILLS_DIR or fell straight back to the real ~/.claude/skills, so
+    an import into a SCRATCH LORE_ROOT (built to diagnose a sync bug, say)
+    wrote its skills into the operator's real ~/.claude/skills anyway.
+    Fixed: the DEFAULT root still installs to ~/.claude/skills -- Claude
+    Code only ever reads that path, so the ordinary install must keep
+    landing there -- but any OTHER root installs under itself, unless
+    LORE_SKILLS_DIR names an explicit override, which wins either way (see
+    docs/manual.md's table)."""
+
+    def _skills_dir_for(self, root_value: "str | None") -> "tuple[Path, Path]":
+        """(ROOT, SKILLS_DIR) `lore_core.config` computes at import time when
+        LORE_ROOT is `root_value` (None = unset -- the true default, not
+        this test FILE's own top-level override) and LORE_SKILLS_DIR is
+        unset. Reloads the module under a patched environment and restores
+        both immediately, capturing the two values in between -- returning
+        the module itself would be reloaded (and so re-mutated) again by
+        the restore before the caller ever saw it."""
+        import importlib
+        import lore_core.config as cfg
+        saved = os.environ.copy()
+        try:
+            os.environ.pop("LORE_SKILLS_DIR", None)
+            if root_value is None:
+                os.environ.pop("LORE_ROOT", None)
+            else:
+                os.environ["LORE_ROOT"] = root_value
+            importlib.reload(cfg)
+            return cfg.ROOT, cfg.SKILLS_DIR
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+            importlib.reload(cfg)
+
+    def test_default_root_keeps_installing_to_home_skills(self):
+        root, skills = self._skills_dir_for(None)
+        self.assertEqual(root, Path.home() / ".claude" / "lore")
+        self.assertEqual(skills, Path.home() / ".claude" / "skills")
+
+    def test_custom_root_never_touches_home_skills(self):
+        custom = tempfile.mkdtemp(prefix="lore-custom-root-")
+        root, skills = self._skills_dir_for(custom)
+        self.assertEqual(root, Path(custom))
+        self.assertEqual(skills, Path(custom) / "skills")
+        self.assertNotEqual(skills, Path.home() / ".claude" / "skills")
+
+    def test_explicit_skills_dir_overrides_a_custom_root(self):
+        custom_root = tempfile.mkdtemp(prefix="lore-custom-root-")
+        explicit = tempfile.mkdtemp(prefix="lore-explicit-skills-")
+        import importlib
+        import lore_core.config as cfg
+        saved = os.environ.copy()
+        try:
+            os.environ["LORE_ROOT"] = custom_root
+            os.environ["LORE_SKILLS_DIR"] = explicit
+            importlib.reload(cfg)
+            self.assertEqual(cfg.SKILLS_DIR, Path(explicit))
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+            importlib.reload(cfg)
+
+    def test_explicit_skills_dir_overrides_the_default_root_too(self):
+        """The override was never in question under the default root -- this
+        pins that the fix did not narrow it to only the custom-root case."""
+        explicit = tempfile.mkdtemp(prefix="lore-explicit-skills-")
+        import importlib
+        import lore_core.config as cfg
+        saved = os.environ.copy()
+        try:
+            os.environ.pop("LORE_ROOT", None)
+            os.environ["LORE_SKILLS_DIR"] = explicit
+            importlib.reload(cfg)
+            self.assertEqual(cfg.SKILLS_DIR, Path(explicit))
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+            importlib.reload(cfg)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
