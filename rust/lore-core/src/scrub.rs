@@ -102,7 +102,7 @@ mod tests {
         assert!(clean.contains("token=${MY_TOKEN}"));
         assert!(clean.contains("token=op://vault/item/field"));
         assert!(!clean.contains("ghp_"));
-        let fingerprint=format!("SHA256:{}","a".repeat(42)+"+");
+        let fingerprint=format!("SHA256:{}","g".repeat(42)+"+");
         assert_eq!(scrub(&fingerprint).unwrap(),fingerprint);
     }
 }
