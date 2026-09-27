@@ -61,8 +61,15 @@ fn emit(cfg:&Config,conn:&Connection,sid:&str,project:&str,_new_rows:&[Message])
     store::append_op(cfg,conn,"session","upsert",Some(&pk),&json!({"session_id":sid,"project_key":pk,"machine_id":mid,"cwd":cwd,"title":title,"first_ts":first,"last_ts":last,"messages":count,"engine":engine}))?;
     // Canonical msgs is a complete replacement, never a tail or a chunk.
     // Read the current persisted snapshot inside this same mutation lock.
-    let mut stmt=conn.prepare("SELECT ts,role,content FROM msg WHERE session_id=? ORDER BY rowid LIMIT 20001")?;let rows=stmt.query_map([sid],|r|Ok(json!({"ts":r.get::<_,String>(0)?,"role":r.get::<_,String>(1)?,"content":r.get::<_,String>(2)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
-    if rows.len()>MAX_MESSAGES{return Err(Error::TooLarge)}
+    let mut stmt=conn.prepare("SELECT ts,role,content FROM msg WHERE session_id=? ORDER BY rowid LIMIT 20001")?;
+    let mut cursor=stmt.query([sid])?;let mut rows=Vec::new();let mut budget=crate::MAX_FRAME_BYTES;
+    while let Some(row)=cursor.next()? {
+        if rows.len()>=MAX_MESSAGES{return Err(Error::TooLarge);}
+        let ts=crate::graph::db_text(row,0,128,&mut budget)?;
+        let role=crate::graph::db_text(row,1,32,&mut budget)?;
+        let content=crate::graph::db_text(row,2,65536,&mut budget)?;
+        rows.push(json!({"ts":ts,"role":role,"content":content}));
+    }
     let payload=json!({"session_id":sid,"rows":rows});if serde_json::to_vec(&payload).map_err(|_|Error::Unavailable)?.len()>crate::MAX_FRAME_BYTES{return Err(Error::TooLarge)}
     store::append_op(cfg,conn,"session","msgs",Some(&pk),&payload)?;Ok(())
 }

@@ -28,10 +28,10 @@ fn lock(cfg:&Config)->Result<Option<File>> {
 }
 fn read(conn:&rusqlite::Connection)->Result<BTreeMap<i64,Belief>> {
     let mut stmt=conn.prepare("SELECT id,uid,subject,claim,confidence FROM beliefs WHERE status='active' ORDER BY subject,id LIMIT 4097")?;
-    let mut rows=BTreeMap::new();let mut size=0usize;
-    for row in stmt.query_map([],|r|Ok(Belief{id:r.get(0)?,uid:r.get(1)?,subject:r.get(2)?,claim:r.get(3)?,confidence:r.get(4)?}))? {
-        let row=row?;size=size.saturating_add(row.claim.len()+row.subject.len()+128);
-        if size>crate::MAX_FRAME_BYTES||rows.len()>=4096{return Err(Error::TooLarge);}
+    let mut rows=BTreeMap::new();let mut budget=crate::MAX_FRAME_BYTES;let mut cursor=stmt.query([])?;
+    while let Some(row)=cursor.next()? {
+        if rows.len()>=4096{return Err(Error::TooLarge);}
+        let row=Belief{id:row.get(0)?,uid:crate::graph::db_text(row,1,128,&mut budget)?,subject:crate::graph::db_text(row,2,1024,&mut budget)?,claim:crate::graph::db_text(row,3,65536,&mut budget)?,confidence:row.get(4)?};
         rows.insert(row.id,row);
     }
     Ok(rows)
