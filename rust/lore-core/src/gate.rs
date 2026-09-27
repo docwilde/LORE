@@ -129,6 +129,10 @@ pub fn cwd(req: &Value) -> Result<&Path> {
         assert_eq!(entry_key("memory","user","Ä  B"),entry_key("memory","user","ä b"));
         assert_eq!(current_engine("../bad"),"unknown");
     }
+    #[test] fn disabled_sync_does_not_open_database_or_create_store_during_replay() {
+        let temp=tempfile::tempdir().unwrap();let mut cfg=Config::for_root(temp.path().join("absent"));cfg.sync.enabled=false;
+        append_file_op(&cfg,"memory","add",Some("project"),&json!({"text":"fixture"})).unwrap();assert!(!cfg.root.exists());
+    }
     #[test] fn model_json_cannot_grant_review_or_choose_provenance() {
         let temp=tempfile::tempdir().unwrap(); let cfg=Config::for_root(temp.path().join("lore"));
         let auth=Authority::Model{agent:"owner".into(),engine:"codex".into(),session_id:"s".into()};
