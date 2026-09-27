@@ -71,7 +71,7 @@ impl Fixture {
     fn assert_not_curated(&self){assert!(!self.root.join("USER.md").exists());assert!(!self.root.join("projects").join(config::project_slug(&self.cwd)).join("MEMORY.md").exists());}
 }
 fn pidfd(pid:u32)->OwnedFd {let fd=unsafe{libc::syscall(libc::SYS_pidfd_open,pid,0)} as i32;assert!(fd>=0,"owned process handle unavailable: {}",std::io::Error::last_os_error());unsafe{OwnedFd::from_raw_fd(fd)}}
-fn exited(fd:&OwnedFd,timeout:Duration)->bool {let mut poll=libc::pollfd{fd:fd.as_raw_fd(),events:libc::POLLIN,revents:0};unsafe{libc::poll(&mut poll,1,timeout.as_millis().min(i32::MAX as u128) as i32)}>0}
+fn exited(fd:&OwnedFd,timeout:Duration)->bool {let mut poll=libc::pollfd{fd:fd.as_raw_fd(),events:libc::POLLIN,revents:0};(unsafe{libc::poll(&mut poll,1,timeout.as_millis().min(i32::MAX as u128) as i32)})>0}
 struct OwnedWorker {child:Option<Child>,leader:OwnedFd,descendants:Vec<OwnedFd>,output:PathBuf,error:PathBuf}
 impl OwnedWorker {
     fn observe_provider(&mut self,home:&Path){let deadline=Instant::now()+Duration::from_secs(3);loop{if let Ok(raw)=fs::read(home.join("ready")){if let Ok(value)=serde_json::from_slice::<Value>(&raw){self.descendants.push(pidfd(value["descendant"].as_u64().unwrap() as u32));return;}}assert!(Instant::now()<deadline,"owned fake provider did not start");std::thread::sleep(Duration::from_millis(5));}}

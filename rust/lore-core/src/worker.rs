@@ -12,19 +12,38 @@ pub fn run(cfg:&Config,req:&Value,engine:&str)->Result<()> {
     let authority=Authority::Derived{agent:"doxa-deriver".into(),engine:engine.into()};
     let Some(job)=crate::review::build_review_job(cfg,req,&authority)? else{return Ok(());};
     let program=std::env::var("LORE_CLAUDE_BIN").ok().filter(|s|!s.trim().is_empty()).unwrap_or_else(||"claude".into());
-    let model=std::env::var("LORE_DERIVER_MODEL").ok().filter(|s|!s.is_empty())
-        .or_else(||std::env::var("LORE_REVIEW_MODEL").ok().filter(|s|!s.is_empty())).unwrap_or_else(||"haiku".into());
-    if model.len()>128||model.starts_with('-')||model.chars().any(char::is_control){return Err(Error::InvalidRequest);}
     let deadline=Instant::now()+Duration::from_secs(150);
-    let mut response=provider(&program,&model,job.prompt(),true,deadline)?;
-    // --bare skips stored OAuth credentials. Retry only an explicit pre-model
-    // authentication refusal; arbitrary provider failures are never retried.
+    let response=review_provider(&program,"LORE_DERIVER_MODEL","haiku",job.prompt(),deadline)?;
+    let result=crate::review::process_result(cfg,&job,&response)?;
+    let deferred=std::env::var("LORE_DEFER_DREAM").is_ok_and(|value|!matches!(value.as_str(),""|"0"));
+    if result["beliefs"]["derived"].as_u64().unwrap_or(0)>0&&!deferred {
+        // Earlier review effects have landed. A reconciliation error must not
+        // advertise a safe retry of the complete review.
+        let reconcile=(|| {
+            let cwd=crate::gate::cwd(req)?;
+            if let Some(dream)=crate::dream::build(cfg,cwd,&authority)? {
+                let response=review_provider(&program,"LORE_DREAMER_MODEL","sonnet",dream.prompt(),deadline)?;
+                crate::dream::process(cfg,&dream,&response)?;
+            }
+            Ok::<(),Error>(())
+        })();
+        reconcile.map_err(|_|Error::MayHaveApplied)?;
+    }
+    Ok(())
+}
+
+fn review_provider(program:&str,model_env:&str,fallback:&str,prompt:&str,deadline:Instant)->Result<String> {
+    let model=std::env::var(model_env).ok().filter(|s|!s.is_empty())
+        .or_else(||std::env::var("LORE_REVIEW_MODEL").ok().filter(|s|!s.is_empty())).unwrap_or_else(||fallback.into());
+    if model.len()>128||model.starts_with('-')||model.chars().any(char::is_control){return Err(Error::InvalidRequest);}
+    let mut response=provider(program,&model,prompt,true,deadline)?;
+    // Retry only an explicit pre-model authentication refusal: --bare may
+    // skip stored OAuth. General failures must not duplicate model work.
     if !response.success&&format!("{}{}",response.out,response.err).to_lowercase().contains("not logged in") {
-        response=provider(&program,&model,job.prompt(),false,deadline)?;
+        response=provider(program,&model,prompt,false,deadline)?;
     }
     if !response.success{return Err(Error::Unavailable);}
-    crate::review::process_result(cfg,&job,&response.out)?;
-    Ok(())
+    Ok(response.out)
 }
 
 struct Response{success:bool,out:String,err:String}

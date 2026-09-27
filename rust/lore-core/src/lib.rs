@@ -18,6 +18,7 @@ pub mod sync;
 pub mod sync_apply;
 pub mod review;
 pub mod worker;
+pub mod dream;
 mod core;
 pub use core::Core;
 

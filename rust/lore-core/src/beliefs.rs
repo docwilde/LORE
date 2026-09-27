@@ -47,7 +47,7 @@ fn uid_subject(conn:&Connection,bid:i64)->Result<(String,String)>{
 }
 pub(crate) fn require_write(authority:&Authority)->Result<()>{if !authority.may_write()&&!authority.may_derive_beliefs(){return Err(Error::Untrusted)}Ok(())}
 fn require_operator(authority:&Authority)->Result<()>{if !authority.may_write(){return Err(Error::Untrusted)}Ok(())}
-fn attributed(req:&Value,authority:&Authority)->Result<Value>{if !req.is_object(){return Err(Error::InvalidRequest)}let mut req=req.clone();req["writer"]=json!(authority.writer());req["source_engine"]=json!(crate::gate::current_engine(authority.engine()));req["via"]=json!(if matches!(authority,Authority::HumanReview{..}){"approved"}else if authority.may_derive_beliefs(){"derived"}else{"direct"});Ok(req)}
+fn attributed(req:&Value,authority:&Authority)->Result<Value>{if !req.is_object(){return Err(Error::InvalidRequest)}let mut req=req.clone();req["writer"]=json!(authority.writer());req["source_engine"]=json!(crate::gate::current_engine(authority.engine()));req["via"]=json!(if matches!(authority,Authority::HumanReview{..}){"approved"}else if authority.may_derive_beliefs(){if authority.agent()=="doxa-dreamer"{"dream"}else{"derived"}}else{"direct"});Ok(req)}
 fn confidence(req:&Value)->Result<f64>{req["confidence"].as_f64().filter(|n|n.is_finite()).map(|n|n.clamp(0.,1.)).ok_or(Error::InvalidRequest)}
 fn evidence_fields(req:&Value)->Result<(Option<String>,Option<String>,Option<String>,Option<String>)>{
     Ok((optional(req,"session_id",128)?,optional(req,"project",4096)?,optional(req,"note",4096)?.map(|s|scrub::scrub(&s).map(|s|crop(&one_line(&s),300))).transpose()?,optional(req,"source_engine",32)?))
@@ -141,7 +141,9 @@ pub(crate) fn insert_in_transaction(cfg:&Config,conn:&Connection,req:&Value,auth
     let pk=key(conn,subject)?;store::append_op(cfg,conn,"belief","insert",pk.as_deref(),&json!({"uid":uid,"subject":subject,"claim":claim,"confidence":confidence,"via":via,"writer":writer,"created":now,"source_engine":engine,"evidence":{"session_id":sid,"project_key":pk,"note":note,"source_engine":engine}}))?;Ok((bid,true))
 }
 pub(crate) fn outcome_in_transaction(cfg:&Config,conn:&Connection,bid:i64,event:&str,source:&str,sid:Option<&str>,agent:Option<&str>,note:Option<&str>,uid:Option<&str>,authority:&Authority)->Result<()> {
-    require_operator(authority)?;
+    // Only the trusted reconciler records its own machine-derived outcomes.
+    // User confirmations still require an interactive human operator.
+    if !(source=="dream" && matches!(authority,Authority::Derived{agent,..} if agent=="doxa-dreamer")){require_operator(authority)?;}
     if !matches!(event,"confirmed"|"contradicted"|"stale"){return Err(Error::InvalidRequest)}let (belief_uid,subject)=uid_subject(conn,bid)?;let uid=uid.map(str::to_owned).unwrap_or_else(||uuid::Uuid::new_v4().to_string());let note=note.map(|s|scrub::scrub(s).map(|s|crop(&one_line(&s),300))).transpose()?;let pk=key(conn,&subject)?;
     conn.execute("INSERT INTO belief_outcomes(belief_id,event,source,session_id,agent,note,created,uid) VALUES(?,?,?,?,?,?,?,?)",params![bid,event,source,sid,agent,note,crate::utcnow(),uid])?;
     store::append_op(cfg,conn,"belief","outcome",pk.as_deref(),&json!({"uid":uid,"belief_uid":belief_uid,"event":event,"source":source,"session_id":sid,"agent":agent,"note":note}))?;
