@@ -25,8 +25,9 @@ const COLUMNS: &str = "substr(session_id,1,135),substr(project,1,1021),substr(cw
 fn hit(row: &Row<'_>, recent: bool) -> Result<Value> {
     let id: String = row.get(0)?;
     if !valid_session(&id) { return Err(Error::InvalidRequest); }
-    let project = bounded(row.get(1)?, 1020)?;
-    if !project.is_empty() && !config::valid_slug(&project) { return Err(Error::InvalidRequest); }
+    let project: Option<String> = row.get(1)?;
+    let project = project.map(|value| bounded(Some(value), 1020)).transpose()?;
+    if project.as_ref().is_some_and(|value| !value.is_empty() && !config::valid_slug(value)) { return Err(Error::InvalidRequest); }
     let cwd = bounded(row.get(2)?, 4096)?;
     let title = bounded(row.get(3)?, 4096)?;
     let ts = bounded(row.get(4)?, 128)?;
@@ -126,6 +127,11 @@ pub fn metadata(cfg: &Config, req: &Value) -> Result<Value> {
         assert!(prefix(&cfg,&json!({"prefix":"owned_","limit":10})).is_err());
         assert!(prefix(&cfg,&json!({"prefix":"owned_0%"})).is_err());
         assert_eq!(conn.query_row("SELECT count(*) FROM sessions",[],|r|r.get::<_,i64>(0)).unwrap(),30);
+    }
+    #[test] fn remote_nullable_project_remains_nullable_and_metadata_stays_readable() {
+        let (_temp,cfg,conn)=fixture();conn.execute("INSERT INTO sessions(session_id,project,messages,engine) VALUES('codex:remote',NULL,1,'codex')",[]).unwrap();
+        let rows=recent(&cfg,&json!({"cwd":"/owned"})).unwrap();assert!(rows[0]["project"].is_null());
+        assert_eq!(metadata(&cfg,&json!({"ids":["codex:remote"]})).unwrap()[0]["engine"],"codex");
     }
     #[test] fn metadata_deduplicates_scrubs_and_rejects_oversized_or_negative_columns() {
         let (_temp,cfg,conn)=fixture();conn.execute("INSERT INTO sessions(session_id,project,title,messages,engine) VALUES('codex:owned','project',?,1,'codex')",["sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012345"]).unwrap();
