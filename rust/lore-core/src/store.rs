@@ -62,7 +62,7 @@ pub fn project_key_for_slug(connection:&Connection,slug:&str)->Result<String> {
 }
 pub fn machine_id(connection:&Connection)->Result<String> {
     if let Some(id)=connection.query_row("SELECT machine_id FROM sync_machine LIMIT 1",[],|r|r.get(0)).optional()? {return Ok(id);}
-    let id=std::env::var("LORE_MACHINE_ID").ok().filter(|s|uuid::Uuid::parse_str(s).is_ok()).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
+    let id=std::env::var("LORE_MACHINE_ID").ok().map(|s|s.trim().to_owned()).filter(|s|!s.is_empty()&&s.len()<=128&&!s.chars().any(char::is_control)).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
     let mut hostname=vec![0u8;256];
     #[cfg(unix)] unsafe {libc::gethostname(hostname.as_mut_ptr().cast(),hostname.len());}
     let label=String::from_utf8_lossy(&hostname[..hostname.iter().position(|c|*c==0).unwrap_or(hostname.len())]).into_owned();
@@ -90,9 +90,43 @@ pub fn append_op(config:&Config,connection:&Connection,class:&str,op:&str,projec
 }
 pub fn canonical_mac(tuple:&serde_json::Value,key:&str)->Result<String> {
     use hmac::{Hmac,Mac};
-    let bytes=serde_json::to_vec(tuple).map_err(|_|Error::InvalidRequest)?;
+    let bytes=canonical_bytes(tuple)?;
     let mut mac=Hmac::<sha2::Sha256>::new_from_slice(key.as_bytes()).map_err(|_|Error::InvalidRequest)?;
     mac.update(&bytes);Ok(mac.finalize().into_bytes().iter().map(|b|format!("{b:02x}")).collect())
+}
+/// Protocol S2 uses Python shortest-round-trip float spelling, including
+/// signed/padded exponents. Ordinary serde JSON is not byte-identical here.
+pub fn canonical_bytes(value:&serde_json::Value)->Result<Vec<u8>> {
+    fn write(value:&serde_json::Value,out:&mut Vec<u8>,depth:usize)->Result<()> {
+        use serde_json::Value;
+        if depth>32{return Err(Error::TooLarge);}
+        match value {
+            Value::Number(n) if n.is_f64()=>{
+                let number=n.as_f64().ok_or(Error::InvalidRequest)?;
+                if !number.is_finite(){return Err(Error::InvalidRequest);}
+                let raw=format!("{number:?}");
+                let text=if let Some((mantissa,exponent))=raw.split_once('e') {
+                    let exp:i32=exponent.parse().map_err(|_|Error::InvalidRequest)?;
+                    format!("{mantissa}e{}{abs:02}",if exp<0{"-"}else{"+"},abs=exp.unsigned_abs())
+                } else {raw};
+                out.extend_from_slice(text.as_bytes());
+            }
+            Value::Array(rows)=>{
+                out.push(b'[');
+                for (index,row) in rows.iter().enumerate(){if index>0{out.push(b',');}write(row,out,depth+1)?;}
+                out.push(b']');
+            }
+            Value::Object(rows)=>{
+                out.push(b'{');let mut keys:Vec<_>=rows.keys().collect();keys.sort();
+                for (index,key) in keys.iter().enumerate(){if index>0{out.push(b',');}serde_json::to_writer(&mut *out,key).map_err(|_|Error::InvalidRequest)?;out.push(b':');write(&rows[*key],out,depth+1)?;}
+                out.push(b'}');
+            }
+            _=>serde_json::to_writer(&mut *out,value).map_err(|_|Error::InvalidRequest)?,
+        }
+        if out.len()>crate::MAX_FRAME_BYTES{return Err(Error::TooLarge);}
+        Ok(())
+    }
+    let mut output=Vec::new();write(value,&mut output,0)?;Ok(output)
 }
 #[cfg(test)]
 mod tests {

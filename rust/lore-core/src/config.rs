@@ -51,13 +51,13 @@ impl Config {
 }
 fn cap(name: &str, default: usize) -> Result<usize> {
     match env::var(name) {
-        Ok(raw) => raw.trim().parse::<usize>().ok().filter(|n| *n > 0 && *n <= 1024*1024).ok_or(Error::InvalidRequest),
+        Ok(raw) => raw.trim().parse::<usize>().ok().filter(|n| *n <= 1024*1024).ok_or(Error::InvalidRequest),
         Err(env::VarError::NotPresent) => Ok(default),
         Err(_) => Err(Error::InvalidRequest),
     }
 }
 pub fn valid_slug(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 4096 && !s.contains("..") && !s.chars().any(|c| matches!(c,'/'|'\\'|'\0'))
+    !s.is_empty() && s.chars().count() <= 255 && s != "." && !s.contains("..") && !s.chars().any(|c| matches!(c,'/'|'\\'|'\0'))
 }
 pub fn valid_skill_name(s: &str) -> bool {
     !s.is_empty() && s.len() <= 128 && s.split('-').all(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
