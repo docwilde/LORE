@@ -2,7 +2,8 @@
 use std::{fs, path::{Path,PathBuf}};
 use serde_json::{json,Value};
 use crate::{config::{Config,valid_slug,project_slug},files,gate::{self,Authority},Error,Result};
-const SOURCE_CAP:usize=1024*1024;
+// Config caps count Unicode characters; four UTF-8 bytes per character.
+const SOURCE_CAP:usize=4*1024*1024;
 #[derive(Clone,Copy,Debug,Eq,PartialEq)] pub enum Scope { User,Project,Machine }
 impl Scope {
     pub fn parse(value:&str)->Result<Self> {match value {"user"=>Ok(Self::User),"project"=>Ok(Self::Project),"machine"=>Ok(Self::Machine),_=>Err(Error::InvalidRequest)}}
