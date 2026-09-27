@@ -68,6 +68,7 @@ impl From<rusqlite::Error> for Error {
     fn from(e: rusqlite::Error) -> Self {
         match e.sqlite_error_code() {
             Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => Self::Timeout,
+            Some(rusqlite::ErrorCode::TooBig) => Self::TooLarge,
             _ => Self::Unavailable,
         }
     }
