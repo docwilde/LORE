@@ -8,19 +8,33 @@ use crate::{config::Config,files,Error,Result};
 
 pub fn connect(config:&Config)->Result<Connection> {
     files::private_dir(&config.root)?;
-    let path=config.root.join("state.db");
-    for candidate in [path.clone(),config.root.join("state.db-wal"),config.root.join("state.db-shm")] {
-        if let Ok(meta)=fs::symlink_metadata(&candidate) {
-            if !meta.is_file(){return Err(Error::UnsafePath);}
-            #[cfg(unix)] if meta.uid()!=unsafe{libc::geteuid()}||meta.nlink()!=1{return Err(Error::UnsafePath);}
-        }
-    }
+    let path=checked_path(config)?;
     let mut connection=Connection::open_with_flags(&path,OpenFlags::SQLITE_OPEN_READ_WRITE|OpenFlags::SQLITE_OPEN_CREATE|OpenFlags::SQLITE_OPEN_NOFOLLOW|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
     #[cfg(unix)] fs::set_permissions(path,fs::Permissions::from_mode(0o600))?;
     connection.busy_timeout(config.timeout)?;
     connection.pragma_update(None,"journal_mode","WAL")?;
     connection.pragma_update(None,"synchronous","FULL")?;
     migrate(&mut connection)?;
+    Ok(connection)
+}
+fn checked_path(config:&Config)->Result<std::path::PathBuf> {
+    let path=config.root.join("state.db");
+    for ancestor in config.root.ancestors() {
+        if fs::symlink_metadata(ancestor).is_ok_and(|meta|meta.file_type().is_symlink()) {return Err(Error::UnsafePath);}
+    }
+    for candidate in [path.clone(),config.root.join("state.db-wal"),config.root.join("state.db-shm")] {
+        if let Ok(meta)=fs::symlink_metadata(&candidate) {
+            if !meta.is_file(){return Err(Error::UnsafePath);}
+            #[cfg(unix)] if meta.uid()!=unsafe{libc::geteuid()}||meta.nlink()!=1{return Err(Error::UnsafePath);}
+        }
+    }
+    Ok(path)
+}
+/// A status probe never creates a store, migrates it or mints an identity.
+pub fn read_only(config:&Config)->Result<Connection> {
+    let path=checked_path(config)?;
+    let connection=Connection::open_with_flags(&path,OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NOFOLLOW|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    connection.busy_timeout(config.timeout)?;
     Ok(connection)
 }
 fn migrate(connection:&mut Connection)->Result<()> {

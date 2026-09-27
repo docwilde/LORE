@@ -32,7 +32,7 @@ impl Config {
     pub fn from_env(timeout: Duration) -> Result<Self> {
         let home = env::var_os("HOME").map(PathBuf::from).ok_or(Error::Unavailable)?;
         let default_root = home.join(".claude/lore");
-        let root = env::var_os("LORE_ROOT").map(PathBuf::from).unwrap_or_else(|| default_root.clone());
+        let root = env::var_os("LORE_ROOT").filter(|s|!s.to_string_lossy().trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| default_root.clone());
         if !root.is_absolute() || timeout.is_zero() { return Err(Error::InvalidRequest); }
         let skills = env::var_os("LORE_SKILLS_DIR").map(PathBuf::from)
             .unwrap_or_else(|| if root == default_root { home.join(".claude/skills") } else { root.join("skills") });

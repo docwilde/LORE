@@ -1,9 +1,23 @@
 //! Canonical native LORE core, sharing the Python carrier's store formats.
 //! Caller identity and human review are authority; stored text is only data.
 pub mod config;
+pub mod gate;
+pub mod beliefs;
+pub mod graph;
+pub mod index;
 pub mod files;
 pub mod scrub;
 pub mod store;
+pub mod memory;
+pub mod filemap;
+pub mod pending;
+pub mod context;
+pub mod skills;
+pub mod agents;
+pub mod sync;
+pub mod sync_apply;
+mod core;
+pub use core::Core;
 
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_REVIEW_BYTES: usize = (MAX_FRAME_BYTES - 512) / 6;
@@ -21,6 +35,7 @@ pub enum Error {
     OverCap,
     Untrusted,
     Unsupported,
+    MayHaveApplied,
 }
 impl Error {
     pub fn code(self) -> &'static str {
@@ -34,6 +49,7 @@ impl Error {
             Self::OverCap => "over_cap",
             Self::Untrusted => "untrusted_write",
             Self::Unsupported => "unavailable_operation",
+            Self::MayHaveApplied => "may_have_applied",
         }
     }
 }
