@@ -114,24 +114,16 @@ fn rounded(value: f64, digits: u32) -> f64 {
     (value * factor).round_ties_even() / factor
 }
 
-fn belief_search(cfg: &Config, args: &Value) -> Result<Value> {
-    let query = args["query"].as_str().ok_or(Error::InvalidRequest)?;
-    let limit = args["limit"].as_i64().unwrap_or(8);
-    let conn = store::connect(cfg)?;
-    for op in [" ", " OR "] {
-        let expr = crate::index::fts_expr(query, op);
-        if expr.is_empty() { return Err(Error::InvalidRequest); }
-        let mut stmt = conn.prepare("SELECT b.id,b.subject,b.claim,b.confidence,b.status,b.source_engine,(SELECT count(*) FROM belief_evidence e WHERE e.belief_id=b.id) FROM beliefs b JOIN belief_fts f ON b.id=f.belief_id WHERE belief_fts MATCH ? AND b.status='active' ORDER BY bm25(belief_fts) LIMIT ?")?;
-        let mut rows = Vec::new();
-        for row in stmt.query_map(params![expr, limit], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, f64>(3)?, r.get::<_, String>(4)?, r.get::<_, Option<String>>(5)?, beliefs::sql_count(r, 6)?)))? {
-            let (id, subject, claim, confidence, status, engine, count) = row?;
-            let mut row = json!({"id": id,"subject": subject,"claim": claim,"confidence": rounded(confidence,2),"status": status,"evidence_count": count});
-            if let Some(engine) = engine.filter(|s| !s.is_empty()) { row["source_engine"] = json!(engine); }
-            rows.push(row);
-        }
-        if !rows.is_empty() { return Ok(json!({"count": rows.len(), "beliefs": rows})); }
-    }
-    Ok(json!({"beliefs": [], "count": 0, "note": "no matching active beliefs"}))
+fn belief_search(cfg:&Config,args:&Value)->Result<Value>{
+    let query=args["query"].as_str().ok_or(Error::InvalidRequest)?;let limit=args["limit"].as_i64().unwrap_or(8);let conn=store::connect(cfg)?;
+    for op in [" "," OR "]{let expr=crate::index::fts_expr(query,op);if expr.is_empty(){return Err(Error::InvalidRequest);}
+        let mut stmt=conn.prepare("SELECT b.id,b.subject,b.claim,b.confidence,b.status,b.source_engine,(SELECT count(*) FROM belief_evidence e WHERE e.belief_id=b.id) FROM beliefs b JOIN belief_fts f ON b.id=f.belief_id WHERE belief_fts MATCH ? AND b.status='active' ORDER BY bm25(belief_fts) LIMIT ?")?;
+        let mut query=stmt.query(params![expr,limit])?;let mut rows=Vec::new();let mut budget=FRAME_CAP;
+        while let Some(row)=query.next()?{let id=row.get::<_,i64>(0)?;let subject=graph::db_text(row,1,4096,&mut budget)?;let claim=graph::db_text(row,2,FRAME_CAP,&mut budget)?;
+            let confidence=row.get::<_,f64>(3)?;let status=graph::db_text(row,4,32,&mut budget)?;let engine=graph::db_optional_text(row,5,32,&mut budget)?;let count=beliefs::sql_count(row,6)?;
+            let mut row=json!({"id":id,"subject":subject,"claim":claim,"confidence":rounded(confidence,2),"status":status,"evidence_count":count});if let Some(engine)=engine.filter(|s|!s.is_empty()){row["source_engine"]=json!(engine);}rows.push(row);
+        }if !rows.is_empty(){return Ok(json!({"count":rows.len(),"beliefs":rows}));}
+    }Ok(json!({"beliefs":[],"count":0,"note":"no matching active beliefs"}))
 }
 
 fn citation(conn: &Connection, id: i64, claim: &str) -> Result<Value> {
@@ -145,29 +137,22 @@ fn citation(conn: &Connection, id: i64, claim: &str) -> Result<Value> {
     })
 }
 
-fn belief_show(cfg: &Config, args: &Value) -> Result<Value> {
-    let id = beliefs::id(args, "belief_id")?;
-    let conn = store::connect(cfg)?;
-    let (subject,claim,prior,status,engine) = conn.query_row("SELECT subject,claim,confidence,status,source_engine FROM beliefs WHERE id=?", [id], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,f64>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?))).optional()?.ok_or(Error::Changed)?;
-    let mut evidence = Vec::new();
-    let mut stmt = conn.prepare("SELECT session_id,project,note,created,source_engine FROM belief_evidence WHERE belief_id=? ORDER BY created,rowid LIMIT 4097")?;
-    for row in stmt.query_map([id], |r| Ok((r.get::<_,Option<String>>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<String>>(4)?)))? {
-        let (sid,project,note,created,engine) = row?;
-        let mut row = json!({"session_id":sid,"project":project,"note":note,"created":created});
-        if let Some(engine)=engine { row["source_engine"]=json!(engine); }
-        evidence.push(row);
-        if evidence.len()>4096 { return Err(Error::TooLarge); }
+fn belief_show(cfg:&Config,args:&Value)->Result<Value>{
+    let id=beliefs::id(args,"belief_id")?;let conn=store::connect(cfg)?;let mut budget=FRAME_CAP;
+    let mut stmt=conn.prepare("SELECT subject,claim,confidence,status,source_engine FROM beliefs WHERE id=?")?;let mut rows=stmt.query([id])?;let row=rows.next()?.ok_or(Error::Changed)?;
+    let subject=graph::db_text(row,0,4096,&mut budget)?;let claim=graph::db_text(row,1,FRAME_CAP,&mut budget)?;let prior=row.get::<_,f64>(2)?;
+    let status=graph::db_text(row,3,32,&mut budget)?;let engine=graph::db_optional_text(row,4,32,&mut budget)?;drop(rows);drop(stmt);
+    let mut evidence=Vec::new();let mut stmt=conn.prepare("SELECT session_id,project,note,created,source_engine FROM belief_evidence WHERE belief_id=? ORDER BY created,rowid LIMIT 4097")?;let mut rows=stmt.query([id])?;
+    while let Some(row)=rows.next()?{if evidence.len()==4096{return Err(Error::TooLarge);}let sid=graph::db_optional_text(row,0,134,&mut budget)?;let project=graph::db_optional_text(row,1,2048,&mut budget)?;
+        let note=graph::db_optional_text(row,2,4096,&mut budget)?;let created=graph::db_optional_text(row,3,128,&mut budget)?;let engine=graph::db_optional_text(row,4,32,&mut budget)?;
+        let mut row=json!({"session_id":sid,"project":project,"note":note,"created":created});if let Some(engine)=engine{row["source_engine"]=json!(engine);}evidence.push(row);
+    }drop(rows);drop(stmt);
+    let mut edges=Vec::new();let mut stmt=conn.prepare("SELECT e.src,e.dst,e.rel,e.source,b.id,b.claim,b.status FROM belief_edges e JOIN beliefs b ON b.id=CASE WHEN e.src=? THEN e.dst ELSE e.src END WHERE e.src=? OR e.dst=? ORDER BY e.rel,b.id LIMIT 4097")?;let mut rows=stmt.query(params![id,id,id])?;
+    while let Some(row)=rows.next()?{if edges.len()==4096{return Err(Error::TooLarge);}let src=row.get::<_,i64>(0)?;let dst=row.get::<_,i64>(1)?;let rel=graph::db_text(row,2,32,&mut budget)?;let source=graph::db_text(row,3,32,&mut budget)?;
+        let other=row.get::<_,i64>(4)?;let claim=graph::db_text(row,5,FRAME_CAP,&mut budget)?;let status=graph::db_text(row,6,32,&mut budget)?;
+        edges.push(json!({"direction":if src==id{"out"}else{"in"},"verb":rel,"belief_id":other,"claim":claim,"status":status,"source":source,"support":graph::edge_support(&conn,src,dst,&rel)?}));
     }
-    let mut edges=Vec::new();
-    let mut stmt=conn.prepare("SELECT e.src,e.dst,e.rel,e.source,b.id,b.claim,b.status FROM belief_edges e JOIN beliefs b ON b.id=CASE WHEN e.src=? THEN e.dst ELSE e.src END WHERE e.src=? OR e.dst=? ORDER BY e.rel,b.id LIMIT 4097")?;
-    for row in stmt.query_map(params![id,id,id],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,i64>(4)?,r.get::<_,String>(5)?,r.get::<_,String>(6)?)))? {
-        let(src,dst,rel,source,other,claim,status)=row?;
-        edges.push(json!({"direction":if src==id {"out"}else{"in"},"verb":rel,"belief_id":other,"claim":claim,"status":status,"source":source,"support":graph::edge_support(&conn,src,dst,&rel)?}));
-        if edges.len()>4096 { return Err(Error::TooLarge); }
-    }
-    let(c,d,s)=beliefs::outcome_counts(&conn,id)?;
-    let mut belief=json!({"id":id,"subject":subject,"claim":claim,"confidence":rounded(prior,2),"calibrated_confidence":rounded(beliefs::calibrated_confidence(prior,c,d),2),"status":status});
-    if let Some(engine)=engine {belief["source_engine"]=json!(engine);}
+    let(c,d,s)=beliefs::outcome_counts(&conn,id)?;let mut belief=json!({"id":id,"subject":subject,"claim":claim,"confidence":rounded(prior,2),"calibrated_confidence":rounded(beliefs::calibrated_confidence(prior,c,d),2),"status":status});if let Some(engine)=engine{belief["source_engine"]=json!(engine);}
     Ok(json!({"belief":belief,"evidence":evidence,"outcomes":{"confirmed":c,"contradicted":d,"stale":s},"edges":edges}))
 }
 
@@ -213,21 +198,17 @@ fn memory_list(cfg:&Config,identity:&Value,args:&Value)->Result<Value> {
     Ok(out)
 }
 
-fn session_search(cfg:&Config,identity:&Value,args:&Value)->Result<Value> {
-    let query=args["query"].as_str().ok_or(Error::InvalidRequest)?;
-    let limit=args["limit"].as_i64().unwrap_or(6);
-    let slug=config::project_slug(gate::cwd(identity)?);
-    let conn=store::connect(cfg)?;
-    for scope in [Some(slug.as_str()),None] {for op in [" "," OR "] {
-        let expr=crate::index::fts_expr(query,op);if expr.is_empty(){return Err(Error::InvalidRequest);}
-        let mut stmt=conn.prepare("SELECT m.session_id,m.project,m.ts,m.role,snippet(msg,4,'[',']','…',16),(SELECT engine FROM sessions s WHERE s.session_id=m.session_id) FROM msg m WHERE msg MATCH ? AND (? IS NULL OR m.project=?) ORDER BY bm25(msg) LIMIT ?")?;
-        let mut hits=Vec::new();
-        for row in stmt.query_map(params![expr,scope,scope,limit],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?)))? {
-            let(sid,project,ts,role,snippet,engine)=row?;let mut hit=json!({"session_id":sid,"project":project,"ts":ts,"role":role,"snippet":beliefs::crop(&gate::one_line(&snippet),280)});if let Some(engine)=engine{hit["engine"]=json!(engine);}hits.push(hit);
-        }
-        if !hits.is_empty(){return Ok(json!({"scope":if scope.is_some(){"project"}else{"all"},"count":hits.len(),"hits":hits}));}
-    }}
-    Ok(json!({"scope":"all","hits":[],"count":0,"note":"no hits in the session index"}))
+fn session_search(cfg:&Config,identity:&Value,args:&Value)->Result<Value>{
+    let query=args["query"].as_str().ok_or(Error::InvalidRequest)?;let limit=args["limit"].as_i64().unwrap_or(6);let slug=config::project_slug(gate::cwd(identity)?);let conn=store::connect(cfg)?;
+    for scope in [Some(slug.as_str()),None]{for op in [" "," OR "]{let expr=crate::index::fts_expr(query,op);if expr.is_empty(){return Err(Error::InvalidRequest);}
+        let mut stmt=conn.prepare("SELECT m.session_id,m.project,m.ts,m.role,snippet(msg,4,'[',']','…',16),(SELECT engine FROM sessions s WHERE s.session_id=m.session_id) FROM msg m WHERE msg MATCH ? AND m.project IS NOT NULL AND (? IS NULL OR m.project=?) ORDER BY bm25(msg) LIMIT ?")?;
+        let mut query=stmt.query(params![expr,scope,scope,limit])?;let mut hits=Vec::new();let mut budget=FRAME_CAP;
+        while let Some(row)=query.next()?{let Some(project)=graph::db_optional_text(row,1,2048,&mut budget)?else{continue};
+            let sid=graph::db_text(row,0,134,&mut budget)?;let ts=graph::db_text(row,2,128,&mut budget)?;let role=graph::db_text(row,3,32,&mut budget)?;
+            let snippet=graph::db_text(row,4,16384,&mut budget)?;let engine=graph::db_optional_text(row,5,32,&mut budget)?;
+            let mut hit=json!({"session_id":sid,"project":project,"ts":ts,"role":role,"snippet":beliefs::crop(&gate::one_line(&snippet),280)});if let Some(engine)=engine{hit["engine"]=json!(engine);}hits.push(hit);
+        }if !hits.is_empty(){return Ok(json!({"scope":if scope.is_some(){"project"}else{"all"},"count":hits.len(),"hits":hits}));}
+    }}Ok(json!({"scope":"all","hits":[],"count":0,"note":"no hits in the session index"}))
 }
 
 fn remember(cfg:&Config,identity:&Value,args:&Value)->Result<Value> {
@@ -248,6 +229,21 @@ fn remember(cfg:&Config,identity:&Value,args:&Value)->Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test] fn oversized_database_claim_and_evidence_refuse_while_normal_show_remains() {
+        let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));let conn=store::connect(&cfg).unwrap();
+        conn.execute("INSERT INTO beliefs(subject,claim,confidence,status,created,updated,uid) VALUES('user',?,0.8,'active','2026-01-01','2026-01-01','fixture')",["x".repeat(FRAME_CAP+1)]).unwrap();
+        assert!(matches!(belief_show(&cfg,&json!({"belief_id":1})),Err(Error::TooLarge)));
+        conn.execute("UPDATE beliefs SET claim='ordinary café'",[]).unwrap();conn.execute("INSERT INTO belief_evidence(belief_id,note,created) VALUES(1,?,'2026-01-01')",["x".repeat(4097)]).unwrap();
+        assert!(matches!(belief_show(&cfg,&json!({"belief_id":1})),Err(Error::TooLarge)));
+        conn.execute("UPDATE belief_evidence SET note='owned evidence'",[]).unwrap();assert_eq!(belief_show(&cfg,&json!({"belief_id":1})).unwrap()["belief"]["claim"],"ordinary café");
+    }
+    #[test] fn null_remote_project_does_not_poison_global_agent_search_or_displace_known_hit() {
+        let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));let conn=store::connect(&cfg).unwrap();
+        conn.execute("INSERT INTO sessions(session_id,project,engine) VALUES('remote',NULL,'codex')",[]).unwrap();conn.execute("INSERT INTO msg(session_id,project,ts,role,content) VALUES('remote',NULL,'','user','fixture unicorn')",[]).unwrap();
+        conn.execute("INSERT INTO sessions(session_id,project,engine) VALUES('known','known-project','claude')",[]).unwrap();conn.execute("INSERT INTO msg(session_id,project,ts,role,content) VALUES('known','known-project','','user','fixture unicorn')",[]).unwrap();
+        let result=session_search(&cfg,&json!({"cwd":temp.path()}),&json!({"query":"unicorn","limit":1})).unwrap();assert_eq!(result["hits"][0]["session_id"],"known");assert_eq!(result["count"],1);
+    }
+
     use super::*;
     fn fixture()->(tempfile::TempDir,Config,Value) {
         let dir=tempfile::tempdir().unwrap();let cfg=Config::for_root(dir.path().join("lore"));

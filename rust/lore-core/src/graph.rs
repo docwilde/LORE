@@ -4,6 +4,17 @@ use std::{cmp::Ordering,collections::{BTreeMap,BTreeSet,BinaryHeap,VecDeque}};
 use rusqlite::{params,Connection,OptionalExtension,TransactionBehavior};
 use serde_json::{json,Value};
 use crate::{beliefs,config::Config,gate::Authority,scrub,store,Error,Result};
+/// Inspect SQLite's borrowed bytes before any owned String allocation. Each
+/// loader shares one aggregate budget across its rows and related queries.
+pub(crate) fn db_text(row:&rusqlite::Row<'_>,index:usize,cap:usize,budget:&mut usize)->Result<String>{
+    let bytes=match row.get_ref(index)?{rusqlite::types::ValueRef::Text(bytes)=>bytes,_=>return Err(Error::Unavailable)};
+    if bytes.len()>cap||bytes.len()>*budget{return Err(Error::TooLarge);}
+    let text=std::str::from_utf8(bytes).map_err(|_|Error::Unavailable)?;*budget-=bytes.len();Ok(text.to_owned())
+}
+pub(crate) fn db_optional_text(row:&rusqlite::Row<'_>,index:usize,cap:usize,budget:&mut usize)->Result<Option<String>>{
+    if matches!(row.get_ref(index)?,rusqlite::types::ValueRef::Null){Ok(None)}else{db_text(row,index,cap,budget).map(Some)}
+}
+const DATABASE_BUDGET:usize=8*1024*1024;
 pub const ASSERTED:&[&str]=&["depends_on","specializes","explains","contradicts","applies_when"];
 pub fn symmetric(rel:&str)->bool{matches!(rel,"contradicts"|"co_derived")}
 pub fn support_factor(n:u64)->f64{(1.-(-(n as f64)/2.).exp()).min(0.99)}
@@ -13,7 +24,7 @@ pub fn edge_support(conn:&Connection,mut src:i64,mut dst:i64,rel:&str)->Result<u
 pub(crate) fn edge_insert_in_transaction(cfg:&Config,conn:&Connection,mut src:i64,mut dst:i64,rel:&str,source:&str,sid:Option<&str>,note:Option<&str>,authority:&Authority)->Result<bool>{
     beliefs::require_write(authority)?;
     if src==dst||!(ASSERTED.contains(&rel)||rel=="supersedes"){return Ok(false)}if symmetric(rel)&&src>dst{std::mem::swap(&mut src,&mut dst)}
-    let mut stmt=conn.prepare("SELECT id,subject,uid FROM beliefs WHERE id IN (?,?)")?;let rows=stmt.query_map(params![src,dst],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;if rows.len()!=2{return Ok(false)}let by_id:BTreeMap<_,_>=rows.into_iter().map(|(id,s,u)|(id,(s,u))).collect();let now=crate::utcnow();let note=note.map(|s|beliefs::crop(&beliefs::one_line(s),300));
+    let mut stmt=conn.prepare("SELECT id,subject,uid FROM beliefs WHERE id IN (?,?)")?;let mut budget=16384;let mut query=stmt.query(params![src,dst])?;let mut rows=Vec::new();while let Some(row)=query.next()?{rows.push((row.get::<_,i64>(0)?,db_text(row,1,4096,&mut budget)?,db_text(row,2,128,&mut budget)?));}if rows.len()!=2{return Ok(false)}let by_id:BTreeMap<_,_>=rows.into_iter().map(|(id,s,u)|(id,(s,u))).collect();let now=crate::utcnow();let note=note.map(|s|beliefs::crop(&beliefs::one_line(s),300));
     let created=conn.execute("INSERT OR IGNORE INTO belief_edges(src,dst,rel,source,session_id,note,created) VALUES(?,?,?,?,?,?,?)",params![src,dst,rel,source,sid,note,now])?>0;
     let asserted=if let Some(sid)=sid{conn.execute("INSERT OR IGNORE INTO belief_edge_assertions(src,dst,rel,session_id,created) VALUES(?,?,?,?,?)",params![src,dst,rel,sid,now])?>0}else{false};
     if created||asserted{let pk=beliefs::key(conn,&by_id[&src].0)?;store::append_op(cfg,conn,"belief","edge",pk.as_deref(),&json!({"src_uid":by_id[&src].1,"dst_uid":by_id[&dst].1,"rel":rel,"source":source,"session_id":sid,"note":note}))?}Ok(created)
@@ -21,10 +32,10 @@ pub(crate) fn edge_insert_in_transaction(cfg:&Config,conn:&Connection,mut src:i6
 pub(crate) fn repoint(conn:&Connection,old:i64,new:i64)->Result<()>{
     // Normalize symmetric endpoints after replacing either endpoint. Otherwise
     // replacing the lower endpoint with a higher ID silently loses support.
-    let mut stmt=conn.prepare("SELECT src,dst,rel,source,session_id,note,created FROM belief_edges WHERE src=? OR dst=?")?;
-    let edges=stmt.query_map(params![old,old],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<String>>(6)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;drop(stmt);
-    let mut stmt=conn.prepare("SELECT src,dst,rel,session_id,created FROM belief_edge_assertions WHERE src=? OR dst=?")?;
-    let assertions=stmt.query_map(params![old,old],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;drop(stmt);
+    let mut stmt=conn.prepare("SELECT src,dst,rel,source,session_id,note,created FROM belief_edges WHERE src=? OR dst=? LIMIT 100001")?;
+    let mut budget=DATABASE_BUDGET;let mut query=stmt.query(params![old,old])?;let mut edges=Vec::new();while let Some(row)=query.next()?{if edges.len()==100000{return Err(Error::TooLarge);}edges.push((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,db_text(row,2,32,&mut budget)?,db_text(row,3,32,&mut budget)?,db_optional_text(row,4,134,&mut budget)?,db_optional_text(row,5,4096,&mut budget)?,db_optional_text(row,6,128,&mut budget)?));}drop(query);drop(stmt);
+    let mut stmt=conn.prepare("SELECT src,dst,rel,session_id,created FROM belief_edge_assertions WHERE src=? OR dst=? LIMIT 100001")?;
+    let mut query=stmt.query(params![old,old])?;let mut assertions=Vec::new();while let Some(row)=query.next()?{if assertions.len()==100000{return Err(Error::TooLarge);}assertions.push((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,db_text(row,2,32,&mut budget)?,db_text(row,3,134,&mut budget)?,db_optional_text(row,4,128,&mut budget)?));}drop(query);drop(stmt);
     conn.execute("DELETE FROM belief_edges WHERE src=? OR dst=?",params![old,old])?;conn.execute("DELETE FROM belief_edge_assertions WHERE src=? OR dst=?",params![old,old])?;
     let endpoints=|src,dst,rel:&str|{let mut a=if src==old{new}else{src};let mut b=if dst==old{new}else{dst};if symmetric(rel)&&a>b{std::mem::swap(&mut a,&mut b)}(a,b)};
     for (src,dst,rel,source,sid,note,created) in edges{let(a,b)=endpoints(src,dst,&rel);if a!=b{conn.execute("INSERT OR IGNORE INTO belief_edges(src,dst,rel,source,session_id,note,created) VALUES(?,?,?,?,?,?,?)",params![a,b,rel,source,sid,note,created])?;}}
@@ -32,14 +43,24 @@ pub(crate) fn repoint(conn:&Connection,old:i64,new:i64)->Result<()>{
 }
 
 pub fn adjacency(conn:&Connection,subjects:Option<&[String]>,statuses:&[&str],rels:Option<&BTreeSet<String>>,co_derived:bool)->Result<(Adjacency,BTreeMap<i64,String>)>{
+    let mut budget=DATABASE_BUDGET;let mut count=0;
     let mut stmt=conn.prepare("SELECT id,subject,claim,status FROM beliefs ORDER BY id LIMIT 10001")?;
-    let rows=stmt.query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;if rows.len()>10000{return Err(Error::TooLarge)}
-    let mut claims=BTreeMap::new();for (id,subject,claim,status) in rows{if statuses.contains(&status.as_str())&&subjects.is_none_or(|s|s.contains(&subject)){claims.insert(id,scrub::scrub(&claim)?);}}
+    let mut rows=stmt.query([])?;let mut claims=BTreeMap::new();
+    while let Some(row)=rows.next()?{count+=1;if count>10000{return Err(Error::TooLarge);}let id=row.get::<_,i64>(0)?;
+        let subject=db_text(row,1,4096,&mut budget)?;let status=db_text(row,3,32,&mut budget)?;
+        if statuses.contains(&status.as_str())&&subjects.is_none_or(|s|s.contains(&subject)){let claim=db_text(row,2,65536,&mut budget)?;claims.insert(id,scrub::scrub(&claim)?);}
+    }
     let mut adj=Adjacency::new();let mut put=|a:i64,b:i64,rel:&str,w:f64|{adj.entry(a).or_default().push(Edge{dst:b,rel:rel.into(),weight:w});if symmetric(rel){adj.entry(b).or_default().push(Edge{dst:a,rel:rel.into(),weight:w});}};
-    let mut stmt=conn.prepare("SELECT src,dst,rel,source FROM belief_edges ORDER BY src,dst,rel LIMIT 100001")?;let rows=stmt.query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;if rows.len()>100000{return Err(Error::TooLarge)}
-    for (src,dst,rel,source) in rows{if !claims.contains_key(&src)||!claims.contains_key(&dst)||!(ASSERTED.contains(&rel.as_str())||rel=="supersedes")||rels.is_some_and(|rels|!rels.contains(&rel)){continue}let weight=if source=="structural"||rel=="supersedes"{1.}else{support_factor(edge_support(conn,src,dst,&rel)?)};put(src,dst,&rel,weight);}
+    let mut stmt=conn.prepare("SELECT src,dst,rel,source FROM belief_edges ORDER BY src,dst,rel LIMIT 100001")?;let mut rows=stmt.query([])?;count=0;
+    while let Some(row)=rows.next()?{count+=1;if count>100000{return Err(Error::TooLarge);}let src=row.get::<_,i64>(0)?;let dst=row.get::<_,i64>(1)?;
+        let rel=db_text(row,2,32,&mut budget)?;let source=db_text(row,3,32,&mut budget)?;
+        if !claims.contains_key(&src)||!claims.contains_key(&dst)||!(ASSERTED.contains(&rel.as_str())||rel=="supersedes")||rels.is_some_and(|rels|!rels.contains(&rel)){continue}
+        let weight=if source=="structural"||rel=="supersedes"{1.}else{support_factor(edge_support(conn,src,dst,&rel)?)};put(src,dst,&rel,weight);
+    }
     if co_derived&&rels.is_none_or(|s|s.contains("co_derived")){
-        let mut stmt=conn.prepare("SELECT belief_id,session_id FROM belief_evidence WHERE session_id IS NOT NULL LIMIT 100001")?;let rows=stmt.query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;if rows.len()>100000{return Err(Error::TooLarge)}let mut sessions:BTreeMap<String,BTreeSet<i64>>=BTreeMap::new();for (id,sid) in rows{if claims.contains_key(&id){sessions.entry(sid).or_default().insert(id);}}
+        let mut stmt=conn.prepare("SELECT belief_id,session_id FROM belief_evidence WHERE session_id IS NOT NULL LIMIT 100001")?;let mut rows=stmt.query([])?;count=0;let mut sessions:BTreeMap<String,BTreeSet<i64>>=BTreeMap::new();
+        while let Some(row)=rows.next()?{count+=1;if count>100000{return Err(Error::TooLarge);}let id=row.get::<_,i64>(0)?;let sid=db_text(row,1,134,&mut budget)?;
+            if claims.contains_key(&id){sessions.entry(sid).or_default().insert(id);}}
         for ids in sessions.values().filter(|s|(2..=8).contains(&s.len())){let ids:Vec<_>=ids.iter().copied().collect();for (i,a) in ids.iter().enumerate(){for b in &ids[i+1..]{put(*a,*b,"co_derived",1./ids.len() as f64);}}}
     }Ok((adj,claims))
 }
@@ -85,8 +106,18 @@ pub fn mermaid_source(adj:&Adjacency,claims:&BTreeMap<i64,String>,nodes:&BTreeSe
 }
 pub fn read(cfg:&Config,req:&Value)->Result<Value>{
     let scope=beliefs::subjects(req)?;let bid=beliefs::id(req,"belief_id")?;let browser=req["browser"].as_bool().ok_or(Error::InvalidRequest)?;let mut conn=store::connect(cfg)?;let tx=conn.transaction()?;
-    let row=tx.query_row("SELECT subject,status FROM beliefs WHERE id=?",[bid],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?.ok_or(Error::Changed)?;if !scope.contains(&row.0)||row.1!="active"{return Err(Error::Changed)}
-    let mut lines=Vec::new();for (direction,sql) in [("out","SELECT e.dst,e.rel,e.source,b.claim,b.status,b.subject FROM belief_edges e JOIN beliefs b ON b.id=e.dst WHERE src=? ORDER BY rel,dst"),("in","SELECT e.src,e.rel,e.source,b.claim,b.status,b.subject FROM belief_edges e JOIN beliefs b ON b.id=e.src WHERE dst=? ORDER BY rel,src")]{let mut stmt=tx.prepare(sql)?;for row in stmt.query_map([bid],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?)))?{let (other,rel,source,claim,status,subject)=row?;if !scope.contains(&subject){continue}let (a,b)=if direction=="out"{(bid,other)}else{(other,bid)};let basis=if source=="structural"{"observed".into()}else{format!("n={}",edge_support(&tx,a,b,&rel)?)};let status=if status=="active"{String::new()}else{format!(", {status}")};let arrow=if direction=="out"{format!("--{rel}-->")}else{format!("<--{rel}--")};let line=scrub::scrub(&format!("    {arrow} [{other}] ({source}, {basis}{status}) {}",beliefs::crop(&beliefs::one_line(&scrub::scrub(&claim)?),120)))?;if line.len()>4096||line.chars().any(char::is_control)||lines.len()==200{return Err(Error::TooLarge)}lines.push(line)}}
+    let mut budget=DATABASE_BUDGET;let mut stmt=tx.prepare("SELECT subject,status FROM beliefs WHERE id=?")?;let mut rows=stmt.query([bid])?;let row=rows.next()?.ok_or(Error::Changed)?;
+    let subject=db_text(row,0,4096,&mut budget)?;let status=db_text(row,1,32,&mut budget)?;if !scope.contains(&subject)||status!="active"{return Err(Error::Changed);}drop(rows);drop(stmt);
+    let mut lines=Vec::new();for (direction,sql) in [("out","SELECT e.dst,e.rel,e.source,b.claim,b.status,b.subject FROM belief_edges e JOIN beliefs b ON b.id=e.dst WHERE src=? ORDER BY rel,dst LIMIT 10001"),("in","SELECT e.src,e.rel,e.source,b.claim,b.status,b.subject FROM belief_edges e JOIN beliefs b ON b.id=e.src WHERE dst=? ORDER BY rel,src LIMIT 10001")]{
+        let mut stmt=tx.prepare(sql)?;let mut rows=stmt.query([bid])?;let mut count=0;
+        while let Some(row)=rows.next()?{count+=1;if count>10000{return Err(Error::TooLarge);}let other=row.get::<_,i64>(0)?;let subject=db_text(row,5,4096,&mut budget)?;if !scope.contains(&subject){continue;}
+            let rel=db_text(row,1,32,&mut budget)?;let source=db_text(row,2,32,&mut budget)?;let claim=db_text(row,3,65536,&mut budget)?;let status=db_text(row,4,32,&mut budget)?;
+            let(a,b)=if direction=="out"{(bid,other)}else{(other,bid)};let basis=if source=="structural"{"observed".into()}else{format!("n={}",edge_support(&tx,a,b,&rel)?)};
+            let status=if status=="active"{String::new()}else{format!(", {status}")};let arrow=if direction=="out"{format!("--{rel}-->")}else{format!("<--{rel}--")};
+            let line=scrub::scrub(&format!("    {arrow} [{other}] ({source}, {basis}{status}) {}",beliefs::crop(&beliefs::one_line(&scrub::scrub(&claim)?),120)))?;
+            if line.len()>4096||line.chars().any(char::is_control)||lines.len()==200{return Err(Error::TooLarge);}lines.push(line);
+        }
+    }
     if lines.is_empty(){return Ok(json!({"id":bid,"lines":["No relations recorded in this scope"],"html":null,"note":"No scoped relations"}))}let mut value=json!({"id":bid,"lines":lines,"html":null,"note":"LORE relations · project/user scope"});
     if browser{let (adj,claims)=adjacency(&tx,Some(&scope),&["active"],None,true)?;let nodes:BTreeSet<_>=khop(&adj,bid,2,None).into_keys().collect();if nodes.len()>200{return Err(Error::TooLarge)}let note=format!("belief {bid}, 2 hops · {} beliefs · project/user scope",nodes.len());let html=include_str!("graph_html.html").replace("@TITLE@",&format!("belief {bid}")).replace("@NOTE@",&html_escape(&note)).replace("@GRAPH@",&mermaid_source(&adj,&claims,&nodes));if html.len()>crate::MAX_FRAME_BYTES-512{return Err(Error::TooLarge)}value["html"]=json!(html);value["note"]=json!(note);}Ok(value)
 }
@@ -95,11 +126,23 @@ pub fn query(cfg:&Config,req:&Value)->Result<Value>{
     match mode{"components"=>Ok(json!(components(&adj,&nodes))),"communities"=>Ok(json!(communities(&adj,&nodes,12))),"degree"=>Ok(json!(degree(&adj))),"khop"=>Ok(json!(khop(&adj,beliefs::id(req,"belief_id")?,req["hops"].as_u64().filter(|n|*n<=8).ok_or(Error::InvalidRequest)? as usize,None))),"path"=>{let (hops,confidence)=best_path(&adj,beliefs::id(req,"src")?,beliefs::id(req,"dst")?,None);Ok(json!({"hops":hops,"confidence":confidence}))},"paths"=>Ok(json!(simple_paths(&adj,beliefs::id(req,"src")?,beliefs::id(req,"dst")?,3,None,64)?)),_=>Err(Error::InvalidRequest)}
 }
 pub fn edge_insert(cfg:&Config,req:&Value,authority:&Authority)->Result<Value>{beliefs::require_write(authority)?;let mut conn=store::connect(cfg)?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;let sid=req["session_id"].as_str();let note=req["note"].as_str();let created=edge_insert_in_transaction(cfg,&tx,beliefs::id(req,"src")?,beliefs::id(req,"dst")?,beliefs::text(req,"rel",32)?,beliefs::text(req,"source",32)?,sid,note,authority)?;tx.commit()?;Ok(json!({"created":created}))}
-pub fn backfill(cfg:&Config,_req:&Value,authority:&Authority)->Result<Value>{beliefs::require_write(authority)?;let mut conn=store::connect(cfg)?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;let mut stmt=tx.prepare("SELECT id,superseded_by FROM beliefs WHERE superseded_by IS NOT NULL")?;let rows=stmt.query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;drop(stmt);let mut changed=0;for (src,dst) in &rows{if edge_insert_in_transaction(cfg,&tx,*src,*dst,"supersedes","structural",None,Some("from beliefs.superseded_by"),authority)?{changed+=1}}tx.commit()?;Ok(json!({"supersedes":changed,"skipped":rows.len()-changed}))}
+pub fn backfill(cfg:&Config,_req:&Value,authority:&Authority)->Result<Value>{beliefs::require_write(authority)?;let mut conn=store::connect(cfg)?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;let mut stmt=tx.prepare("SELECT id,superseded_by FROM beliefs WHERE superseded_by IS NOT NULL LIMIT 100001")?;let rows=stmt.query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;drop(stmt);if rows.len()>100000{return Err(Error::TooLarge);}let mut changed=0;for (src,dst) in &rows{if edge_insert_in_transaction(cfg,&tx,*src,*dst,"supersedes","structural",None,Some("from beliefs.superseded_by"),authority)?{changed+=1}}tx.commit()?;Ok(json!({"supersedes":changed,"skipped":rows.len()-changed}))}
 
 #[cfg(test)]mod tests{
     use super::*;
     #[test]fn best_path_uses_product_and_scope_is_not_a_relation_guess(){let adj=BTreeMap::from([(1,vec![Edge{dst:3,rel:"explains".into(),weight:0.1},Edge{dst:2,rel:"depends_on".into(),weight:0.8}]),(2,vec![Edge{dst:3,rel:"explains".into(),weight:0.8}])]);let (path,confidence)=best_path(&adj,1,3,None);assert_eq!(path.len(),2);assert!((confidence-0.64).abs()<1e-12);assert_eq!(khop(&adj,1,2,None)[&3],1);assert!(support_factor(500)<1.);assert_eq!(components(&adj,&BTreeSet::from([1,2,3,4])).len(),2)}
+    #[test] fn database_byte_caps_and_aggregate_budget_precede_owned_conversion() {
+        let conn=Connection::open_in_memory().unwrap();let mut stmt=conn.prepare("SELECT 'ordinary','unicode café',?1") .unwrap();let large="x".repeat(65537);let mut rows=stmt.query([&large]).unwrap();let row=rows.next().unwrap().unwrap();let mut budget=100;
+        assert_eq!(db_text(row,0,32,&mut budget).unwrap(),"ordinary");let before=budget;
+        assert_eq!(db_text(row,2,65536,&mut budget),Err(Error::TooLarge));assert_eq!(budget,before);
+        assert!(db_text(row,1,32,&mut budget).is_ok());let mut tiny=3;assert_eq!(db_text(row,0,32,&mut tiny),Err(Error::TooLarge));assert_eq!(tiny,3);
+    }
+    #[test] fn oversized_owned_graph_claim_refuses_before_loading_and_ordinary_rows_remain() {
+        let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));let conn=store::connect(&cfg).unwrap();
+        conn.execute("INSERT INTO beliefs(subject,claim,confidence,status,created,updated,uid) VALUES('user',?,0.8,'active','2026-01-01','2026-01-01','fixture')",["x".repeat(65537)]).unwrap();
+        assert!(matches!(adjacency(&conn,None,&["active"],None,false),Err(Error::TooLarge)));
+        conn.execute("UPDATE beliefs SET claim='ordinary café'",[]).unwrap();assert_eq!(adjacency(&conn,None,&["active"],None,false).unwrap().1[&1],"ordinary café");
+    }
     #[test]fn assertion_support_is_distinct_session_and_projection_is_not_stored(){let authority=Authority::HumanReview{agent:"fixture".into(),engine:"unknown".into()};let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));let a=beliefs::insert(&cfg,&json!({"subject":"user","claim":"a","confidence":0.8}),&authority).unwrap()["id"].as_i64().unwrap();let b=beliefs::insert(&cfg,&json!({"subject":"user","claim":"b","confidence":0.8}),&authority).unwrap()["id"].as_i64().unwrap();let req=json!({"src":a,"dst":b,"rel":"contradicts","source":"derived","session_id":"one"});assert_eq!(edge_insert(&cfg,&req,&authority).unwrap()["created"],true);assert_eq!(edge_insert(&cfg,&req,&authority).unwrap()["created"],false);let conn=store::connect(&cfg).unwrap();assert_eq!(edge_support(&conn,b,a,"contradicts").unwrap(),1);let (adj,_)=adjacency(&conn,None,&["active"],None,true).unwrap();assert_eq!(adj[&a][0].dst,b);assert!((adj[&a][0].weight-support_factor(1)).abs()<1e-12);}
     #[test]fn superseding_lower_endpoint_preserves_symmetric_assertion_support(){
         let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));let authority=Authority::HumanReview{agent:"fixture".into(),engine:"unknown".into()};let mut ids=Vec::new();for claim in ["old","neighbor","survivor"]{ids.push(beliefs::insert(&cfg,&json!({"subject":"user","claim":claim,"confidence":0.8}),&authority).unwrap()["id"].as_i64().unwrap());}edge_insert(&cfg,&json!({"src":ids[0],"dst":ids[1],"rel":"contradicts","source":"derived","session_id":"one"}),&authority).unwrap();beliefs::supersede(&cfg,&json!({"belief_id":ids[0],"by":ids[2],"reason":"merge"}),&authority).unwrap();let conn=store::connect(&cfg).unwrap();assert_eq!(edge_support(&conn,ids[2],ids[1],"contradicts").unwrap(),1);assert_eq!(edge_support(&conn,ids[0],ids[1],"contradicts").unwrap(),0);let(adj,_)=adjacency(&conn,None,&["active"],None,false).unwrap();assert!(adj[&ids[2]].iter().any(|e|e.dst==ids[1]&&(e.weight-support_factor(1)).abs()<1e-12));
