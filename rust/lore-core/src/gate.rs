@@ -86,6 +86,7 @@ pub fn provenance_tag(cfg: &Config, kind: &str, bucket: &str, entries: &[String]
     parts.extend(counts.into_iter().map(|(label,count)|format!("{count} {label}")));format!(" — provenance: {}",parts.join(", "))
 }
 pub fn append_file_op(cfg: &Config, class: &str, op: &str, slug: Option<&str>, payload: &Value) -> Result<()> {
+    if !cfg.sync.enabled { return Ok(()); }
     let mut conn = crate::store::connect(cfg)?;
     let key = slug.map(|slug| crate::store::project_key_for_slug(&conn,slug)).transpose()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
