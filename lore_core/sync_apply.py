@@ -519,7 +519,8 @@ def _apply_memory(conn: sqlite3.Connection, op: dict) -> bool:
         if not text:
             return True
         err = memory_add(scope, slug, text, via=payload.get("via", "direct"),
-                         source_engine=payload.get("source_engine", "unknown"))
+                         source_engine=current_engine(payload.get("source_engine") or "unknown"),
+                         writer=payload.get("writer") or "unknown")
         if _over_cap(err):
             _stage_overflow(op, "memory", scope, slug, text)
         return True
@@ -538,7 +539,8 @@ def _apply_memory(conn: sqlite3.Connection, op: dict) -> bool:
             return _replace_in_place(conn, op, "memory", scope, slug, old, text)
         _record_replace_conflict(conn, op, "memory", bucket, old_key, text)
         err = memory_add(scope, slug, text, via=payload.get("via", "direct"),
-                         source_engine=payload.get("source_engine", "unknown"))
+                         source_engine=current_engine(payload.get("source_engine") or "unknown"),
+                         writer=payload.get("writer") or "unknown")
         if _over_cap(err):
             _stage_overflow(op, "memory", scope, slug, text)
         return True
@@ -559,12 +561,14 @@ def _replace_in_place(conn: sqlite3.Connection, op: dict, kind: str, scope: str,
     via = op["payload"].get("via", "direct")
     if kind == "memory":
         err = memory_replace(scope, slug, old, text, via=via,
-                             source_engine=op["payload"].get("source_engine", "unknown"))
+                             source_engine=current_engine(op["payload"].get("source_engine") or "unknown"),
+                             writer=op["payload"].get("writer") or "unknown")
         if _over_cap(err):
             _stage_overflow(op, "memory", scope, slug, text)
         return True
     path, _, purpose = text.partition(SEP)
-    err = filemap_replace(slug, old, path.strip(), purpose.strip(), via=via)
+    err = filemap_replace(slug, old, path.strip(), purpose.strip(), via=via,
+                          writer=op["payload"].get("writer") or "unknown")
     if _over_cap(err):
         _stage_overflow(op, "filemap", scope, slug, text)
     return True
@@ -583,7 +587,8 @@ def _apply_filemap(conn: sqlite3.Connection, op: dict) -> bool:
         if not path.strip():
             return True
         err = filemap_add(slug, path.strip(), purpose.strip(),
-                          via=payload.get("via", "direct"))
+                          via=payload.get("via", "direct"),
+                          writer=payload.get("writer") or "unknown")
         if _over_cap(err):
             _stage_overflow(op, "filemap", "project", slug, text)
         return True
@@ -604,7 +609,8 @@ def _apply_filemap(conn: sqlite3.Connection, op: dict) -> bool:
         _record_replace_conflict(conn, op, "filemap", slug, old_key, text)
         path, _, purpose = text.partition(SEP)
         err = filemap_add(slug, path.strip(), purpose.strip(),
-                          via=payload.get("via", "direct"))
+                          via=payload.get("via", "direct"),
+                          writer=payload.get("writer") or "unknown")
         if _over_cap(err):
             _stage_overflow(op, "filemap", "project", slug, text)
         return True
@@ -640,7 +646,7 @@ def _apply_belief(conn: sqlite3.Connection, op: dict) -> bool:
             float(payload.get("confidence") or 0.0),
             evidence.get("session_id"), slug, evidence.get("note"),
             via=payload.get("via", "direct"), uid=uid,
-            source_engine=payload.get("source_engine", "unknown"),
+            source_engine=current_engine(payload.get("source_engine") or "unknown"),
         )
         if created:
             # Replay carries original informational provenance. The receiver's
@@ -648,8 +654,8 @@ def _apply_belief(conn: sqlite3.Connection, op: dict) -> bool:
             # already happened above, and these labels grant no authority.
             conn.execute(
                 "UPDATE beliefs SET writer = ?, via = ?, source_engine = ? WHERE id = ?",
-                (payload.get("writer", "unknown"), payload.get("via", "direct"),
-                 current_engine(payload.get("source_engine", "unknown")), bid),
+                (payload.get("writer") or "unknown", payload.get("via") or "direct",
+                 current_engine(payload.get("source_engine") or "unknown"), bid),
             )
         if not created:
             # FOLDED onto an existing active row with the same (subject,

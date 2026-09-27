@@ -164,7 +164,8 @@ def _serialized_filemap(fn):
 
 @_serialized_filemap
 def filemap_add(slug: str, path: str, purpose: str,
-                root: "str | None" = None, *, via: str = "direct") -> str | None:
+                root: "str | None" = None, *, via: str = "direct",
+                writer: "str | None" = None) -> str | None:
     path = one_line(scrub_secrets(str(path)))
     purpose = one_line(scrub_secrets(str(purpose)))
     if not path:
@@ -184,23 +185,24 @@ def filemap_add(slug: str, path: str, purpose: str,
             err = write_filemap(slug, entries)
             if err is None:
                 forget_entry("filemap", slug, old)
-                record_entry("filemap", slug, entry, via=via)
+                record_entry("filemap", slug, entry, via=via, writer=writer)
                 old_key = entry_key("filemap", slug, old)
                 _append_filemap_op(slug, "replace",
                                    {"old_key": old_key, "text": entry, "via": via,
-                                    "writer": writer_class()})
+                                    "writer": writer or writer_class()})
             return err
     entries.append(entry)
     err = write_filemap(slug, entries)
     if err is None:
-        record_entry("filemap", slug, entry, via=via)
-        _append_filemap_op(slug, "add", {"text": entry, "via": via, "writer": writer_class()})
+        record_entry("filemap", slug, entry, via=via, writer=writer)
+        _append_filemap_op(slug, "add", {"text": entry, "via": via, "writer": writer or writer_class()})
     return err
 
 
 @_serialized_filemap
 def filemap_replace(slug: str, needle: str, path: str, purpose: str,
-                    root: "str | None" = None, *, via: str = "direct") -> str | None:
+                    root: "str | None" = None, *, via: str = "direct",
+                    writer: "str | None" = None) -> str | None:
     entries = read_entries(filemap_path(slug))
     hits = match_entries(entries, needle)
     if not hits:
@@ -216,11 +218,11 @@ def filemap_replace(slug: str, needle: str, path: str, purpose: str,
     err = write_filemap(slug, entries)
     if err is None:
         forget_entry("filemap", slug, old)
-        record_entry("filemap", slug, entries[hits[0]], via=via)
+        record_entry("filemap", slug, entries[hits[0]], via=via, writer=writer)
         old_key = entry_key("filemap", slug, old)
         _append_filemap_op(slug, "replace",
                            {"old_key": old_key, "text": entries[hits[0]], "via": via,
-                            "writer": writer_class()})
+                            "writer": writer or writer_class()})
     return err
 
 

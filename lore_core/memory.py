@@ -217,7 +217,8 @@ def _serialized_memory(fn):
 @_serialized_memory
 def memory_add(scope: str, slug: str, text: str, *, via: str = "direct",
                origin: "str | None" = None,
-               source_engine: "str | None" = None) -> str | None:
+               source_engine: "str | None" = None,
+               writer: "str | None" = None) -> str | None:
     """`via` (ISSUE #43) records HOW this entry got in — "direct" for a write
     by the interactive agent or the user's own shell, "approved" when
     apply_item lands a staged proposal. It never changes what is written;
@@ -234,9 +235,9 @@ def memory_add(scope: str, slug: str, text: str, *, via: str = "direct",
     if err is None:
         engine = current_engine(source_engine)
         record_entry("memory", memory_bucket(scope, slug), text, via=via,
-                     origin=origin, source_engine=engine)
+                     origin=origin, source_engine=engine, writer=writer)
         _append_memory_op(scope, slug, "add", {"text": text, "via": via,
-                                                "writer": writer_class(),
+                                                "writer": writer or writer_class(),
                                                 "source_engine": engine})
     return err
 
@@ -244,7 +245,8 @@ def memory_add(scope: str, slug: str, text: str, *, via: str = "direct",
 @_serialized_memory
 def memory_replace(scope: str, slug: str, needle: str, text: str, *,
                    via: str = "direct", origin: "str | None" = None,
-                   source_engine: "str | None" = None) -> str | None:
+                   source_engine: "str | None" = None,
+                   writer: "str | None" = None) -> str | None:
     path = memory_path(scope, slug)
     entries = read_entries(path)
     hits = match_entries(entries, needle)
@@ -262,11 +264,11 @@ def memory_replace(scope: str, slug: str, needle: str, text: str, *,
         bucket = memory_bucket(scope, slug)
         forget_entry("memory", bucket, old)
         record_entry("memory", bucket, new, via=via, origin=origin,
-                     source_engine=engine)
+                     source_engine=engine, writer=writer)
         old_key = entry_key("memory", bucket, old)
         _append_memory_op(scope, slug, "replace",
                           {"old_key": old_key, "text": new, "via": via,
-                           "writer": writer_class(), "source_engine": engine})
+                           "writer": writer or writer_class(), "source_engine": engine})
     return err
 
 

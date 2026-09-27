@@ -54,7 +54,9 @@ def snapshot(root):
     with sqlite3.connect(f"file:{root / 'state.db'}?mode=ro", uri=True) as conn:
         beliefs = conn.execute("SELECT uid,subject,claim,confidence,status,writer,via,source_engine FROM beliefs ORDER BY uid").fetchall()
         outcomes = conn.execute("SELECT uid,event,source,session_id,agent,note FROM belief_outcomes ORDER BY uid").fetchall()
-    return {"beliefs": beliefs, "outcomes": outcomes,
+    ledger=json.loads((root / "provenance.json").read_text())["entries"] if (root / "provenance.json").exists() else {}
+    ledger={key:{field:row.get(field) for field in ("writer","via","source_engine")} for key,row in ledger.items()}
+    return {"beliefs": beliefs, "outcomes": outcomes, "ledger":ledger,
             "user": (root / "USER.md").read_text() if (root / "USER.md").exists() else ""}
 
 
@@ -82,6 +84,37 @@ conn.close();print(json.dumps([result,rows,alias]))
             self.assertEqual(result["applied"],2,result)
             self.assertEqual(rows,[["fixture-first","terminal","approved","codex"]])
             self.assertEqual(aliases,[["fixture-folded"]])
+
+
+    def test_verified_curated_add_replace_and_duplicate_keep_sender_provenance(self):
+        with tempfile.TemporaryDirectory(prefix="lore-python-curated-replay-") as directory:
+            base=Path(directory);root=base/"lore";env=environment(base,root,"fixture-receiver");env["LORE_ENGINE"]="receiver-must-not-be-attributed"
+            code="""
+import json
+from lore_core.store import db_connect
+from lore_core.sync_apply import apply_ops
+from lore_core.sync_oplog import compute_mac
+from lore_core.gate import entry_key,entry_provenance
+conn=db_connect();conn.execute("INSERT INTO sync_projects(project_key,slug,created) VALUES('fixture-portable','fixture-local','2026-01-01')");conn.commit()
+def operation(seq,cls,verb,payload,project_key=None):
+ op={'op_id':f'fixture-op-{seq}','machine_id':'fixture-author','machine_seq':seq,'lamport':seq,'class':cls,'op':verb,'project_key':project_key,'payload':payload,'created':'2026-01-01T00:00:00Z'};op['mac']=compute_mac(op,'native-interop-owned-fixture-key');return op
+first={'writer':'terminal','via':'approved','source_engine':'codex'};other={'writer':'derived','via':'dream','source_engine':'claude'}
+ops=[operation(1,'memory','add',dict(first,text='original café')),operation(2,'memory','add',dict(other,text='original café')),operation(3,'filemap','add',dict(first,text='src.rs — original purpose'),'fixture-portable'),operation(4,'filemap','add',dict(other,text='src.rs — original purpose'),'fixture-portable')]
+result=apply_ops(conn,ops);conn.commit();before=[entry_provenance('memory','user','original café'),entry_provenance('filemap','fixture-local','src.rs — original purpose')]
+replacement={'writer':'interactive','via':'direct','source_engine':'glm'}
+ops=[operation(5,'memory','replace',dict(replacement,old_key=entry_key('memory','user','original café'),text='replaced café')),operation(6,'filemap','replace',dict(replacement,old_key=entry_key('filemap','fixture-local','src.rs — original purpose'),text='src.rs — replaced purpose'),'fixture-portable')]
+result2=apply_ops(conn,ops);conn.commit();after=[entry_provenance('memory','user','replaced café'),entry_provenance('filemap','fixture-local','src.rs — replaced purpose')]
+# A missing sender engine is unknown even when receiver metadata is configured.
+result3=apply_ops(conn,[operation(7,'memory','add',{'writer':'terminal','via':'direct','source_engine':None,'text':'unknown origin fixture'})]);conn.commit();unknown=entry_provenance('memory','user','unknown origin fixture');conn.close()
+print(json.dumps([result,result2,before,after,unknown]))
+"""
+            child=subprocess.run([sys.executable,"-c",code],text=True,capture_output=True,cwd=REPO,env=env,timeout=10)
+            self.assertEqual(child.returncode,0,child.stderr);first,second,before,after,unknown=json.loads(child.stdout)
+            self.assertEqual(first["applied"],4,first);self.assertEqual(second["applied"],2,second)
+            for row in before:self.assertEqual((row["writer"],row["via"]),("terminal","approved"))
+            self.assertEqual(before[0]["source_engine"],"codex")
+            for row in after:self.assertEqual((row["writer"],row["via"]),("interactive","direct"))
+            self.assertEqual(after[0]["source_engine"],"glm");self.assertEqual(unknown["source_engine"],"unknown")
 
 
 @unittest.skipUnless(BINARY.is_file(), "set LORE_TEST_NATIVE_BINARY to a built native fixture executable")
