@@ -132,7 +132,7 @@ pub fn session(cfg:&Config,req:&Value)->Result<Value>{let sid=crate::beliefs::te
 
 #[cfg(test)]mod tests{
     use super::*;use std::{fs::OpenOptions,io::{Seek,SeekFrom,Write}};
-    fn fixture()->(tempfile::TempDir,Config){let temp=tempfile::tempdir_in("/home/docwilde/.cache/t").unwrap();let mut cfg=Config::for_root(temp.path().join("lore"));cfg.sync.enabled=true;cfg.sync.classes=["sessions".into(),"beliefs".into()].into_iter().collect();(temp,cfg)}
+    fn fixture()->(tempfile::TempDir,Config){let temp=tempfile::tempdir().unwrap();let mut cfg=Config::for_root(temp.path().join("lore"));cfg.sync.enabled=true;cfg.sync.classes=["sessions".into(),"beliefs".into()].into_iter().collect();(temp,cfg)}
     fn user(content:&str)->String{format!("{}\n",json!({"type":"user","cwd":"/owned/fixture","timestamp":"2026-09-27T00:00:00Z","message":{"content":content}}))}
     fn count(conn:&Connection)->u64{conn.query_row("SELECT count(*) FROM msg",[],|r|crate::beliefs::sql_count(r,0)).unwrap()}
     #[test]fn live_fd_keeps_offset_retries_partial_tail_and_full_live_interleaving(){
