@@ -41,9 +41,42 @@ pub fn parse_review_fd(file:&File,size:u64,codex:bool)->Result<Vec<Message>>{
     #[cfg(not(unix))]{let _=(file,size,codex);return Err(Error::Unsupported);}
     #[cfg(unix)]{
         if size>SOURCE_CAP as u64{return Err(Error::TooLarge);}let mut rows=Vec::new();let mut offset=0;let mut line=Vec::new();let mut buffer=[0u8;65536];
-        let mut record=|bytes:&[u8]|->Result<()>{let text=std::str::from_utf8(bytes).map_err(|_|Error::InvalidRequest)?;let Ok(value)=serde_json::from_str::<Value>(text)else{return Ok(());};
+        let mut record=|bytes:&[u8]|->Result<()>{let text=std::str::from_utf8(bytes).map_err(|_|Error::InvalidRequest)?;let Ok(value)=serde_json::from_str::<Value>(text)else{return if codex&&!text.trim().is_empty(){Err(Error::InvalidRequest)}else{Ok(())};};
+            if codex&&!value.is_object(){return Err(Error::InvalidRequest);}
             let timestamp=value["timestamp"].as_str().unwrap_or("");let ts=crate::scrub::scrub(timestamp)?;
-            if codex{let payload=&value["payload"];if value["type"]!="response_item"||payload["type"]!="message"{return Ok(());}let Some(role)=payload["role"].as_str().filter(|role|matches!(*role,"user"|"assistant"))else{return Ok(());};let text=payload["content"].as_array().into_iter().flatten().filter(|block|matches!(block["type"].as_str(),Some("input_text"|"output_text"))).filter_map(|block|block["text"].as_str()).collect::<Vec<_>>().join(" ");if !text.trim().is_empty(){rows.push(Message{ts,role:role.into(),content:crop(&crate::scrub::scrub(text.trim())?,4000)});}}
+            if codex {
+                let payload=&value["payload"];
+                if value["type"]!="response_item" {return Ok(());}
+                match payload["type"].as_str() {
+                    Some("message")=>{
+                        let Some(role)=payload["role"].as_str().filter(|role|matches!(*role,"user"|"assistant"))else{return Ok(());};
+                        let content=payload["content"].as_array().ok_or(Error::InvalidRequest)?;
+                        let text=content.iter().filter(|block|matches!(block["type"].as_str(),Some("input_text"|"output_text"))).map(|block|block["text"].as_str().ok_or(Error::InvalidRequest)).collect::<Result<Vec<_>>>()?.join(" ");
+                        if !text.trim().is_empty(){rows.push(Message{ts,role:role.into(),content:crop(&crate::scrub::scrub(text.trim())?,4000)});}
+                    },
+                    Some(kind @ ("function_call"|"custom_tool_call"|"local_shell_call"|"tool_search_call"|"web_search_call"))=>{
+                        let name=payload.get("name").filter(|name|!name.is_null()).map_or(Ok(kind),|name|name.as_str().ok_or(Error::InvalidRequest))?;
+                        let raw=payload.get("arguments").or_else(||payload.get("input")).or_else(||payload.get("action")).unwrap_or(&Value::Null);
+                        let input=if kind=="function_call" {let text=raw.as_str().ok_or(Error::InvalidRequest)?;serde_json::from_str::<Value>(text).unwrap_or_else(|_|json!({"raw":text}))}else{raw.clone()};
+                        let detail=match name {"Bash"=>scalar(&input["command"]),"Edit"|"Write"|"Read"|"NotebookEdit"=>scalar(&input["file_path"]),"Skill"=>scalar(input.get("skill").filter(|value|!value.is_null()&&value.as_str()!=Some("")).unwrap_or(&input["name"])),_=>serde_json::to_string(&input).map_err(|_|Error::InvalidRequest)?};
+                        // Scrub complete arguments before canonical generic 160
+                        // and tool-line 280 character cuts.
+                        let detail=crate::scrub::scrub(&detail)?;
+                        let detail=if matches!(name,"Bash"|"Edit"|"Write"|"Read"|"NotebookEdit"|"Skill"){detail}else{crop(&detail,160)};
+                        let name=gate::one_line(&crate::scrub::scrub(name)?);
+                        rows.push(Message{ts,role:"tool".into(),content:format!("{name}: {}",crop(&gate::one_line(&detail),280))});
+                    },
+                    Some("function_call_output"|"custom_tool_call_output"|"tool_search_output")=>{
+                        // Only provider-declared errors become canonical E
+                        // rows. Ordinary outputs do not inflate user turns.
+                        if payload["is_error"]==true {
+                            let raw=payload.get("output").or_else(||payload.get("tools")).unwrap_or(&Value::Null);
+                            let text=if let Some(text)=raw.as_str(){text.to_owned()}else if let Some(blocks)=raw.as_array(){blocks.iter().filter(|part|matches!(part["type"].as_str(),Some("text"|"input_text"|"output_text"))).map(|part|part["text"].as_str().ok_or(Error::InvalidRequest)).collect::<Result<Vec<_>>>()?.join(" ")}else{return Err(Error::InvalidRequest);};
+                            if !text.trim().is_empty(){rows.push(Message{ts,role:"toolerr".into(),content:crop(&gate::one_line(&crate::scrub::scrub(&text)?),280)});}
+                        }
+                    },_=>{}
+                }
+            }
             else{let Some(role)=value["type"].as_str().filter(|role|matches!(*role,"user"|"assistant"))else{return Ok(());};if value["isMeta"]==true{return Ok(());}let content=&value["message"]["content"];let text=index::extract_text(content);if !text.is_empty(){rows.push(Message{ts:ts.clone(),role:role.into(),content:crop(&crate::scrub::scrub(&text)?,4000)});}
                 for block in content.as_array().into_iter().flatten(){if role=="assistant"&&block["type"]=="tool_use"{let name=block["name"].as_str().unwrap_or("?");let input=&block["input"];let detail=match name{"Bash"=>scalar(&input["command"]),"Edit"|"Write"|"Read"|"NotebookEdit"=>scalar(&input["file_path"]),"Skill"=>scalar(input.get("skill").filter(|value|!value.is_null()&&value.as_str()!=Some("")).unwrap_or(&input["name"])),_=>crop(&serde_json::to_string(input).map_err(|_|Error::InvalidRequest)?,160)};let detail=crop(&gate::one_line(&crate::scrub::scrub(&detail)?),280);let name=gate::one_line(&crate::scrub::scrub(name)?);rows.push(Message{ts:ts.clone(),role:"tool".into(),content:format!("{name}: {detail}")});}
                     if role=="user"&&block["type"]=="tool_result"&&block["is_error"]==true{let inner=&block["content"];let text=if let Some(text)=inner.as_str(){text.to_owned()}else{inner.as_array().into_iter().flatten().filter(|part|part["type"]=="text").filter_map(|part|part["text"].as_str()).collect::<Vec<_>>().join(" ")};if !text.trim().is_empty(){rows.push(Message{ts:ts.clone(),role:"toolerr".into(),content:crop(&gate::one_line(&crate::scrub::scrub(&text)?),280)});}}
@@ -71,8 +104,29 @@ fn neighbourhood(cfg:&Config,slug:&str,messages:&[Message])->Result<String>{
 }
 pub fn build_review_job(cfg:&Config,req:&Value,authority:&Authority)->Result<Option<ReviewJob>>{
     require_derived(authority)?;if disabled("LORE_DISABLE_REVIEW")||std::env::var("LORE_SKIP").is_ok_and(|value|!value.is_empty()){return Ok(None);}let cwd=gate::cwd(req)?;let slug=config::project_slug(cwd);let sid=req["session_id"].as_str().filter(|id|config::valid_id(id)).ok_or(Error::InvalidRequest)?;
-    let path=Path::new(req["transcript"].as_str().filter(|path|path.len()<=4096).ok_or(Error::InvalidRequest)?);let codex=path.starts_with(&cfg.codex_sessions);let is_doxa=path==cfg.projects.join(&slug).join(format!("{sid}.jsonl"));if !is_doxa&&!codex{return Err(Error::UnsafePath);}if codex&&!path.components().all(|component|!matches!(component,std::path::Component::ParentDir)){return Err(Error::UnsafePath);}
-    let(file,source)=open_source(path)?;if source.size==0{return Err(Error::Changed);}let messages=parse_review_fd(&file,source.size,codex)?;let(meta,_)=index::parse_transcript_fd(&file,codex)?;if meta.internal{return Ok(None);}if codex&&(meta.session_id.as_deref()!=Some(sid)||!meta.cwd.as_deref().is_some_and(|actual|config::project_slug(Path::new(actual))==slug)){return Err(Error::Untrusted);}
+    let path=Path::new(req["transcript"].as_str().filter(|path|path.len()<=4096).ok_or(Error::InvalidRequest)?);
+    // Only a configured sessions root may admit its canonical archive sibling.
+    let archive=cfg.codex_sessions.file_name().filter(|name|*name=="sessions").and_then(|_|cfg.codex_sessions.parent()).map(|root|root.join("archived_sessions"));
+    let codex=path.starts_with(&cfg.codex_sessions)||archive.as_ref().is_some_and(|root|path.starts_with(root));
+    let is_doxa=path==cfg.projects.join(&slug).join(format!("{sid}.jsonl"));
+    if !is_doxa&&!codex{return Err(Error::UnsafePath);}
+    if codex&&!path.components().all(|component|!matches!(component,std::path::Component::ParentDir)){return Err(Error::UnsafePath);}
+    let provider_thread=req.get("provider_thread").map(|value|value.as_str().filter(|id|config::valid_id(id)).ok_or(Error::InvalidRequest)).transpose()?;
+    if provider_thread.is_some()&&(!codex||authority.engine()!= "codex"){return Err(Error::Untrusted);}
+    let(file,source)=open_source(path)?;
+    if source.size==0{return Err(Error::Changed);}
+    // PreCompact carries a previously verified source proof. It may not cause
+    // provider work for bytes which changed between the hook and this process.
+    match req.get("expected_source") {
+        Some(proof) if proof.is_object()=>{
+            if proof["sha256"].as_str()!=Some(source.hash.as_str())||proof["inode"].as_u64()!=Some(source.inode)||proof["device"].as_u64()!=Some(source.device)||proof["size"].as_u64()!=Some(source.size)||proof["ctime"].as_i64()!=Some(source.ctime)||proof["ctime_nsec"].as_i64()!=Some(source.ctime_nsec){return Err(Error::Changed);}
+        },None if provider_thread.is_none()=>{},_=>return Err(Error::InvalidRequest)
+    }
+    let messages=parse_review_fd(&file,source.size,codex)?;
+    let(meta,_)=index::parse_transcript_fd(&file,codex)?;
+    if meta.internal{return Ok(None);}
+    if codex&&(meta.session_id.as_deref()!=Some(provider_thread.unwrap_or(sid))||!meta.cwd.as_deref().is_some_and(|actual|config::project_slug(Path::new(actual))==slug)){return Err(Error::Untrusted);}
+
     if messages.iter().take(50).any(|message|["You are the background memory reviewer","You are the belief reconciler"].iter().any(|marker|message.content.contains(marker))){return Ok(None);}
     if messages.iter().filter(|message|message.role=="user").count()<bound_env("LORE_REVIEW_MIN_MESSAGES",3,20000)?{return Ok(None);}
     let span=match req.get("span"){None|Some(Value::Null)=>None,Some(Value::Array(bounds))if bounds.len()==2=>{let lo=bounds[0].as_u64().ok_or(Error::InvalidRequest)? as usize;let hi=bounds[1].as_u64().ok_or(Error::InvalidRequest)? as usize;if lo>hi||hi>messages.len(){return Err(Error::InvalidRequest);}Some(lo..hi)},_=>return Err(Error::InvalidRequest)};
@@ -142,6 +196,26 @@ pub fn process_result(cfg:&Config,job:&ReviewJob,output:&str)->Result<Value>{req
     #[test]fn changed_transcript_cannot_stage_and_model_cannot_build_reviewer_job(){
         let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));let cwd=temp.path().join("repo");let slug=config::project_slug(&cwd);let path=cfg.projects.join(slug).join("fixture.jsonl");let rows=(0..3).map(|i|format!("{}\n",json!({"type":"user","message":{"content":format!("fixture {i}")}}))).collect::<String>();files::atomic_write(&path,rows.as_bytes()).unwrap();let req=json!({"cwd":cwd,"session_id":"fixture","transcript":path});
         let model=Authority::Model{agent:"m".into(),engine:"claude".into(),session_id:"s".into()};assert!(matches!(build_review_job(&cfg,&req,&model),Err(Error::Untrusted)));let job=build_review_job(&cfg,&req,&auth()).unwrap().unwrap();assert_eq!(job.to_value()["source_engine"],"codex");assert!(job.prompt().contains("U: fixture 2"));files::atomic_write(&path,b"changed source").unwrap();assert_eq!(process_result(&cfg,&job,"{\"memory\":[{\"scope\":\"user\",\"text\":\"new fact\"}]}"),Err(Error::Changed));assert!(pending::ids(&cfg).unwrap().is_empty());
+    }
+    #[test]fn codex_review_keeps_calls_errors_and_excludes_reasoning_and_binary_content(){
+        let temp=tempfile::tempdir().unwrap();let path=temp.path().join("rollout.jsonl");
+        let items=[json!({"type":"message","role":"user","content":[{"type":"input_text","text":"request"},{"type":"input_image","image_url":"BINARY"}]}),json!({"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"echo working\"}"}),json!({"type":"custom_tool_call","name":"apply_patch","input":"patch detail"}),json!({"type":"function_call_output","is_error":true,"output":[{"type":"output_text","text":"exit code 1"},{"type":"input_image","image_url":"BINARY"}]}),json!({"type":"function_call_output","output":"ordinary result"}),json!({"type":"reasoning","encrypted_content":"ENCRYPTED"})];
+        let bytes=items.iter().map(|item|format!("{}\n",json!({"type":"response_item","payload":item}))).collect::<String>();files::atomic_write(&path,bytes.as_bytes()).unwrap();let(file,proof)=open_source(&path).unwrap();let rows=parse_review_fd(&file,proof.size,true).unwrap();
+        assert_eq!(rows.iter().map(|row|row.role.as_str()).collect::<Vec<_>>(),["user","tool","tool","toolerr"]);let digest=build_digest(&rows).unwrap();assert!(digest.contains("exec_command:")&&digest.contains("echo working")&&digest.contains("apply_patch:")&&digest.contains("patch detail")&&digest.contains("E: exit code 1"));for hidden in ["BINARY","ENCRYPTED","ordinary result"]{assert!(!digest.contains(hidden));}
+    }
+    #[test]fn codex_review_refuses_malformed_records_and_scrubs_before_generic_argument_cut(){
+        let temp=tempfile::tempdir().unwrap();let path=temp.path().join("rollout.jsonl");let secret="ghp_abcdefghijklmnopqrstuvwxyz0123456789";let prefix="x".repeat(140);let row=json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":format!("{prefix} {secret}")}});files::atomic_write(&path,format!("{row}\n").as_bytes()).unwrap();let(file,proof)=open_source(&path).unwrap();let rows=parse_review_fd(&file,proof.size,true).unwrap();assert!(!rows[0].content.contains("ghp_"));
+        for invalid in ["{broken JSON\n","[]\n"]{files::atomic_write(&path,invalid.as_bytes()).unwrap();let(file,proof)=open_source(&path).unwrap();assert!(matches!(parse_review_fd(&file,proof.size,true),Err(Error::InvalidRequest)));}
+    }
+    #[test]fn codex_compact_requires_exact_original_proof_and_provider_identity_before_job(){
+        let temp=tempfile::tempdir().unwrap();let mut cfg=Config::for_root(temp.path().join("lore"));cfg.codex_sessions=temp.path().join("codex/sessions");let cwd=temp.path().join("repo");
+        for folder in ["sessions","archived_sessions"]{
+            let path=temp.path().join("codex").join(folder).join("rollout.jsonl");let mut bytes=format!("{}\n",json!({"type":"session_meta","payload":{"id":"provider-thread","cwd":cwd}}));for i in 0..3{bytes.push_str(&format!("{}\n",json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":format!("fixture {i}")}]}})));}files::atomic_write(&path,bytes.as_bytes()).unwrap();let(_,proof)=open_source(&path).unwrap();
+            let mut req=json!({"cwd":cwd,"session_id":"doxa-session","provider_thread":"provider-thread","transcript":path,"older":true,"expected_source":{"sha256":proof.hash,"inode":proof.inode,"device":proof.device,"size":proof.size,"ctime":proof.ctime,"ctime_nsec":proof.ctime_nsec}});
+            let mut bad=req.clone();bad["expected_source"]["sha256"]=json!("0".repeat(64));assert!(matches!(build_review_job(&cfg,&bad,&auth()),Err(Error::Changed)));bad=req.clone();bad.as_object_mut().unwrap().remove("expected_source");assert!(matches!(build_review_job(&cfg,&bad,&auth()),Err(Error::InvalidRequest)));bad=req.clone();bad["provider_thread"]=json!("different");assert!(matches!(build_review_job(&cfg,&bad,&auth()),Err(Error::Untrusted)));bad=req.clone();bad["cwd"]=json!(temp.path().join("other"));assert!(matches!(build_review_job(&cfg,&bad,&auth()),Err(Error::Untrusted)));
+            let job=build_review_job(&cfg,&req,&auth()).unwrap().unwrap();assert_eq!(job.session_id(),"doxa-session");assert!(job.prompt().contains(RECENCY_NOTE));files::atomic_write(&path,b"changed transcript").unwrap();assert_eq!(process_result(&cfg,&job,"{\"memory\":[]}"),Err(Error::Changed));assert!(matches!(build_review_job(&cfg,&req,&auth()),Err(Error::Changed)));req["transcript"]=json!(temp.path().join("arbitrary.jsonl"));assert!(matches!(build_review_job(&cfg,&req,&auth()),Err(Error::UnsafePath)));
+        }
+        assert!(pending::ids(&cfg).unwrap().is_empty());
     }
     #[test]fn staging_keeps_superseding_proposals_and_rejects_skill_traversal(){
         let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));memory::write_entries(&cfg.root.join("USER.md"),&["reviewer requires complete verified evidence".into()],1000).unwrap();let data=json!({"memory":[{"scope":"user","action":"replace","match":"verified evidence","text":"reviewer requires complete verified evidence and code"},{"scope":"user","text":"requires complete verified evidence"}],"skills":[{"name":"../escape","body":"unsafe"}]});let result=stage_proposals(&cfg,&data,"fixture","session",&auth()).unwrap();assert_eq!(result["staged"],1);assert_eq!(result["memory"]["already_covered"],1);assert_eq!(pending::ids(&cfg).unwrap().len(),1);assert_eq!(memory::read_entries(&cfg.root.join("USER.md")).unwrap(),["reviewer requires complete verified evidence"]);
