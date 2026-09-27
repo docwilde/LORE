@@ -1,0 +1,107 @@
+[
+  {
+    "kind": "pem",
+    "pattern": "-----BEGIN [^-]+-----.*?-----END [^-]+-----",
+    "flags": 48
+  },
+  {
+    "kind": "jwt",
+    "pattern": "eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}",
+    "flags": 32
+  },
+  {
+    "kind": "conn-string",
+    "pattern": "[a-z][a-z0-9+.\\-]*://[^\\s:/@]+:[^\\s]+@(?=(?:\\[[^\\]\\s]+\\]|[^\\s/?#:@]+)(?::\\d+)?(?:[/?#\\s),;]|$))",
+    "flags": 34
+  },
+  {
+    "kind": "openrouter",
+    "pattern": "sk-or-v1-[a-f0-9]+",
+    "flags": 32
+  },
+  {
+    "kind": "provider-secret",
+    "pattern": "\\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}",
+    "flags": 32
+  },
+  {
+    "kind": "api-key",
+    "pattern": "sk-[A-Za-z0-9_-]{16,}",
+    "flags": 32
+  },
+  {
+    "kind": "aws",
+    "pattern": "AKIA[A-Z0-9]{16}",
+    "flags": 32
+  },
+  {
+    "kind": "github-pat",
+    "pattern": "\\bgithub_pat_[A-Za-z0-9_]{40,}",
+    "flags": 32
+  },
+  {
+    "kind": "github",
+    "pattern": "gh[posru]_[A-Za-z0-9]{36,}",
+    "flags": 32
+  },
+  {
+    "kind": "gcp",
+    "pattern": "AIza[A-Za-z0-9_-]{35}",
+    "flags": 32
+  },
+  {
+    "kind": "slack",
+    "pattern": "xox[baprs]-[A-Za-z0-9-]{10,}",
+    "flags": 32
+  },
+  {
+    "kind": "slack-app",
+    "pattern": "xapp-[0-9]-[A-Za-z0-9-]{20,}",
+    "flags": 32
+  },
+  {
+    "kind": "npm",
+    "pattern": "npm_[A-Za-z0-9]{36}",
+    "flags": 32
+  },
+  {
+    "kind": "pypi",
+    "pattern": "pypi-AgEIcHlwaS[A-Za-z0-9_-]{16,}",
+    "flags": 32
+  },
+  {
+    "kind": "cloudflare",
+    "pattern": "cfat_[A-Za-z0-9]{20,}",
+    "flags": 32
+  },
+  {
+    "kind": "bearer",
+    "pattern": "Bearer\\s+[A-Za-z0-9._~+/-]{20,}",
+    "flags": 32
+  },
+  {
+    "kind": "basic-auth",
+    "pattern": "Basic\\s+[A-Za-z0-9+/]{16,}={0,2}",
+    "flags": 32
+  },
+  {
+    "kind": "KV_SECRET_QUOTED",
+    "pattern": "\\b(\\w*(?:password|passwd|secret|token|credential|api_key|apikey|_key)\\w*)([\\\"']?\\s*[=:]\\s*)([\\\"'])((?:\\\\.|(?!\\3)[^\\\\])*)\\3",
+    "flags": 50
+  },
+  {
+    "kind": "KV_SECRET",
+    "pattern": "\\b(\\w*(?:password|passwd|secret|token|credential|api_key|apikey|_key)\\w*)([\\\"']?\\s*[=:]\\s*)(?![\\\"'])(\\S{8,})",
+    "flags": 34
+  },
+  {
+    "kind": "HEX_RUN",
+    "pattern": "\\b[a-fA-F0-9]{40,}\\b",
+    "flags": 32
+  },
+  {
+    "kind": "BASE64_RUN",
+    "pattern": "(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])",
+    "flags": 32
+  }
+]

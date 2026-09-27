@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.61.0 — 2026-09-27
+
+- Add the canonical Rust core and native carrier for DOXA: shared memory and file maps, beliefs and graph evidence, bounded session indexing/history, context refresh, learned skills, pending review and signed sync replay. Existing Python stores and plugins remain compatible.
+- Run native detached review and reconciliation with proven transcript bytes, frozen caller identity, bounded pipes and owned process groups; memory promotions remain proposals.
+- Confine filesystem reads and atomic writes through pinned directories, bound database loading, and report landed partial effects instead of silently losing sync failures.
+- Preserve original verified belief, memory and file-map provenance across Python/native replay; typed public sync metadata no longer falsely triggers secret refusal.
+- Add read-only `lore-rs memory show` / `filemap show`, Python/native interoperability fixtures and a native CI gate.
+
 ## 0.60.2 — 2026-09-27
 
 **Fix: an SSH key fingerprint was redacted, so `lore sync seed` re-seeded its memory entry forever.**

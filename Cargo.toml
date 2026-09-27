@@ -1,0 +1,3 @@
+[workspace]
+members = ["rust/lore-core"]
+resolver = "2"
