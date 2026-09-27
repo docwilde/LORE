@@ -1,7 +1,7 @@
 //! Trusted caller policy and Python-compatible informational provenance.
 //! Authority is supplied by the carrier; proposal JSON never grants it.
-use std::{fs::{self, OpenOptions}, io::Write, path::Path};
-#[cfg(unix)] use std::os::unix::fs::OpenOptionsExt;
+use std::{io::Write, path::Path};
+#[cfg(test)] use std::fs;
 use serde_json::{json, Value};
 use crate::{config::{Config, valid_skill_name}, files, Error, Result};
 
@@ -104,17 +104,15 @@ pub fn stage(cfg: &Config, item: &Value, authority: &Authority) -> Result<String
     payload["uid"] = json!(uuid::Uuid::new_v4().to_string());
     let bytes = serde_json::to_vec_pretty(&payload).map_err(|_|Error::Unavailable)?;
     if bytes.len() > crate::MAX_REVIEW_BYTES { return Err(Error::TooLarge); }
-    let dir = cfg.root.join("pending"); files::private_dir(&dir)?;
+    let dir = cfg.root.join("pending"); files::private_dir(&dir)?;let directory=files::open_directory(&dir)?;
     let stamp = crate::utcnow().replace(['-',':','T','Z'], "");
     for index in 0..10000 {
-        let id = format!("{stamp}-{index:02}"); let path = dir.join(format!("{id}.json"));
-        let mut options = OpenOptions::new(); options.write(true).create_new(true);
-        #[cfg(unix)] options.mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC);
-        match options.open(&path) {
-            Ok(mut file) => { file.write_all(&bytes).map_err(|_|Error::MayHaveApplied)?; file.sync_all().map_err(|_|Error::MayHaveApplied)?; fs::File::open(&dir).and_then(|dir|dir.sync_all()).map_err(|_|Error::MayHaveApplied)?;
+        let id = format!("{stamp}-{index:02}");let name=format!("{id}.json");
+        match files::create_private_file(&directory,std::ffi::OsStr::new(&name),true) {
+            Ok(mut file) => { file.write_all(&bytes).map_err(|_|Error::MayHaveApplied)?; file.sync_all().map_err(|_|Error::MayHaveApplied)?; directory.sync_all().map_err(|_|Error::MayHaveApplied)?;
                 append_file_op(cfg,"pending","stage",pending_project(&payload),&json!({"uid":payload["uid"],"item":payload})).map_err(|_|Error::MayHaveApplied)?; return Ok(id); }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return Err(Error::Unavailable),
+            Err(Error::Changed) => continue,
+            Err(error) => return Err(error),
         }
     }
     Err(Error::OverCap)

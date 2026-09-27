@@ -1,6 +1,6 @@
 //! Exact reviewed proposal claims. Failed application preserves a recoverable
 //! proposal; archive failure explicitly reports whether application landed.
-use std::{fs::{self,File,Metadata},io::Read,path::{Path,PathBuf}};
+use std::{fs::{self,File,Metadata},io::{Read,Write},path::{Path,PathBuf}};
 #[cfg(unix)] use std::os::unix::fs::{MetadataExt};
 use serde_json::{json,Value};
 use crate::{config::{Config,valid_id,valid_slug,valid_skill_name,project_slug},files,gate::{self,Authority},memory::{self,Scope},Error,Result};
@@ -16,12 +16,15 @@ fn same_file(before:&Metadata,after:&Metadata)->bool {
     #[cfg(not(unix))] {before.len()==after.len()&&before.modified().ok()==after.modified().ok()}
 }
 pub fn snapshot(path:&Path)->Result<Snapshot>{
-    let mut file=files::open_regular(path,crate::MAX_REVIEW_BYTES)?;let before=file.metadata()?;let metadata=file.metadata()?;
+    let directory=files::open_directory(path.parent().ok_or(Error::UnsafePath)?)?;snapshot_at(&directory,path.file_name().ok_or(Error::UnsafePath)?)
+}
+fn snapshot_at(directory:&File,name:&std::ffi::OsStr)->Result<Snapshot>{
+    let mut file=files::open_regular_at(directory,name,crate::MAX_REVIEW_BYTES)?;let before=file.metadata()?;let metadata=file.metadata()?;
     if !metadata.is_file()||metadata.len()>crate::MAX_REVIEW_BYTES as u64||!same_file(&before,&metadata){return Err(Error::Changed);}
     #[cfg(unix)] if metadata.uid()!=unsafe{libc::geteuid()}||metadata.nlink()!=1{return Err(Error::UnsafePath);}
     let mut bytes=Vec::new();Read::by_ref(&mut file).take(crate::MAX_REVIEW_BYTES as u64+1).read_to_end(&mut bytes)?;
     if bytes.len()>crate::MAX_REVIEW_BYTES{return Err(Error::TooLarge);}
-    if !same_file(&metadata,&file.metadata()?)||!same_file(&metadata,&files::open_regular(path,crate::MAX_REVIEW_BYTES)?.metadata()?){return Err(Error::Changed);}
+    if !same_file(&metadata,&file.metadata()?)||!same_file(&metadata,&files::open_regular_at(directory,name,crate::MAX_REVIEW_BYTES)?.metadata()?){return Err(Error::Changed);}
     let sha256=crate::digest(&bytes);let raw=String::from_utf8(bytes).map_err(|_|Error::InvalidRequest)?;
     let item:Value=serde_json::from_str(&raw).map_err(|_|Error::InvalidRequest)?;if !item.is_object(){return Err(Error::InvalidRequest);}
     #[cfg(unix)] let inode=metadata.ino();
@@ -152,17 +155,24 @@ fn private_claim_dir(cfg:&Config)->Result<PathBuf>{
     }files::private_dir(&dir)?;Ok(dir)
 }
 fn restore_claim(source:&Path,claimed:&Path,id:&str)->Result<()> {
-    match fs::hard_link(claimed,source){Ok(())=>{fs::remove_file(claimed)?;File::open(source.parent().ok_or(Error::UnsafePath)?)?.sync_all()?;Ok(())},
-        Err(error) if error.kind()==std::io::ErrorKind::AlreadyExists=>{let recovery=source.with_file_name(format!("{id}-recovered-{}.json",uuid::Uuid::new_v4().simple()));fs::rename(claimed,recovery)?;Err(Error::Changed)},
-        Err(_)=>Err(Error::Unavailable)}
+    let source_dir=files::open_directory(source.parent().ok_or(Error::UnsafePath)?)?;let claim_dir=files::open_directory(claimed.parent().ok_or(Error::UnsafePath)?)?;
+    restore_claim_at(&source_dir,source.file_name().ok_or(Error::UnsafePath)?,&claim_dir,claimed.file_name().ok_or(Error::UnsafePath)?,id)
+}
+fn restore_claim_at(source_dir:&File,source_name:&std::ffi::OsStr,claim_dir:&File,claim_name:&std::ffi::OsStr,id:&str)->Result<()> {
+    match files::link_move_at(claim_dir,claim_name,source_dir,source_name){Ok(())=>Ok(()),
+        Err(Error::Changed)=>{let recovery=format!("{id}-recovered-{}.json",uuid::Uuid::new_v4().simple());files::rename_at(claim_dir,claim_name,source_dir,std::ffi::OsStr::new(&recovery),false)?;Err(Error::Changed)},
+        Err(error)=>Err(error)}
 }
 fn archive(cfg:&Config,id:&str,claimed:&Path,snap:&Snapshot,status:&str)->Result<()> {archive_inner(cfg,id,claimed,snap,status,true)}
 fn archive_inner(cfg:&Config,id:&str,claimed:&Path,snap:&Snapshot,status:&str,tidy_listing:bool)->Result<()> {
     let mut item=snap.item.clone();item["status"]=json!(status);item["resolved"]=json!(crate::utcnow());
-    let dir=cfg.root.join("pending/archive");files::private_dir(&dir)?;let destination=dir.join(format!("{id}-{status}-{}.json",uuid::Uuid::new_v4().simple()));
-    files::atomic_write(&destination,&serde_json::to_vec_pretty(&item).map_err(|_|Error::Unavailable)?)?;
-    let current=snapshot(claimed)?;if current.inode!=snap.inode||current.sha256!=snap.sha256{return Err(Error::Changed);}
-    fs::remove_file(claimed)?;File::open(claimed.parent().ok_or(Error::UnsafePath)?)?.sync_all()?;
+    let claim_dir=files::open_directory(claimed.parent().ok_or(Error::UnsafePath)?)?;let claim_name=claimed.file_name().ok_or(Error::UnsafePath)?;
+    let current=snapshot_at(&claim_dir,claim_name)?;if current.inode!=snap.inode||current.sha256!=snap.sha256{return Err(Error::Changed);}
+    let dir=cfg.root.join("pending/archive");files::private_dir(&dir)?;let archive_dir=files::open_directory(&dir)?;let name=format!("{id}-{status}-{}.json",uuid::Uuid::new_v4().simple());
+    let bytes=serde_json::to_vec_pretty(&item).map_err(|_|Error::Unavailable)?;let mut archived=files::create_private_file(&archive_dir,std::ffi::OsStr::new(&name),true)?;
+    archived.write_all(&bytes).map_err(|_|Error::MayHaveApplied)?;archived.sync_all().map_err(|_|Error::MayHaveApplied)?;archive_dir.sync_all().map_err(|_|Error::MayHaveApplied)?;
+    let current=snapshot_at(&claim_dir,claim_name)?;if current.inode!=snap.inode||current.sha256!=snap.sha256{return Err(Error::MayHaveApplied);}
+    files::unlink_at(&claim_dir,claim_name).map_err(|_|Error::MayHaveApplied)?;
     if tidy_listing&&fs::symlink_metadata(proposal_path(cfg,id)?).is_err_and(|error|error.kind()==std::io::ErrorKind::NotFound) {let mut data=listings(cfg)?;if data.as_object_mut().unwrap().remove(id).is_some(){save_listings(cfg,&data)?;}}
     if let Some(uid)=item["uid"].as_str(){gate::append_file_op(cfg,"pending","resolve",gate::pending_project(&item),&json!({"uid":uid,"status":status})).map_err(|_|Error::MayHaveApplied)?;}Ok(())
 }
@@ -173,10 +183,10 @@ pub(crate) fn archive_uid(cfg:&Config,uid:&str,status:&str)->Result<bool>{
     let matches=ids(cfg)?.into_iter().filter_map(|id|snapshot(&proposal_path(cfg,&id).ok()?).ok().filter(|snap|snap.item["uid"]==uid).map(|snap|(id,snap))).collect::<Vec<_>>();
     if matches.len()>1{return Err(Error::Changed);}let Some((id,before))=matches.into_iter().next()else{return Ok(false);};
     let source=proposal_path(cfg,&id)?;let _locks=files::Locks::acquire(&cfg.root,&[source.clone()],cfg.timeout)?;
-    let snap=snapshot(&source)?;if snap.sha256!=before.sha256||snap.inode!=before.inode{return Err(Error::Changed);}
-    let claimed=private_claim_dir(cfg)?.join(format!("{id}-{}.json",uuid::Uuid::new_v4().simple()));fs::rename(&source,&claimed)?;
-    File::open(source.parent().ok_or(Error::UnsafePath)?)?.sync_all()?;File::open(claimed.parent().ok_or(Error::UnsafePath)?)?.sync_all()?;
-    let mut local=cfg.clone();local.sync.enabled=false;archive_inner(&local,&id,&claimed,&snap,status,false)?;Ok(true)
+    let source_dir=files::open_directory(source.parent().ok_or(Error::UnsafePath)?)?;let snap=snapshot_at(&source_dir,source.file_name().ok_or(Error::UnsafePath)?)?;if snap.sha256!=before.sha256||snap.inode!=before.inode{return Err(Error::Changed);}
+    let claim_path=private_claim_dir(cfg)?;let claim_dir=files::open_directory(&claim_path)?;
+    let claimed=claim_path.join(format!("{id}-{}.json",uuid::Uuid::new_v4().simple()));files::rename_at(&source_dir,source.file_name().ok_or(Error::UnsafePath)?,&claim_dir,claimed.file_name().ok_or(Error::UnsafePath)?,false)?;
+    let mut local=cfg.clone();local.sync.enabled=false;archive_inner(&local,&id,&claimed,&snap,status,false).map_err(|_|Error::MayHaveApplied)?;Ok(true)
 }
 pub fn skill_file_text(name:&str,description:Option<&str>,body:&str)->String{
     let frontmatter=body.strip_prefix("---\n").and_then(|value|value.split_once("\n---\n")).is_some_and(|(head,_)|head.lines().any(|line|line.strip_prefix("name:").is_some_and(|value|!value.trim().is_empty())));
@@ -194,8 +204,8 @@ fn apply_skill(cfg:&Config,item:&Value,authority:&Authority)->Result<()> {
     let learned=existing.as_ref().is_some_and(|text|text.chars().take(600).collect::<String>().contains("lore-learned"));
     if item["action"]=="retire"{
         if !learned{return Err(Error::Untrusted);}let graveyard=cfg.root.join("skills-retired");files::private_dir(&graveyard)?;
-        let destination=graveyard.join(format!("{name}-{}",crate::utcnow().replace(':',"")));
-        if destination.try_exists()?{return Err(Error::Changed);}fs::rename(&directory,&destination)?;File::open(&graveyard)?.sync_all()?;File::open(&cfg.skills)?.sync_all()?;
+        let skills_dir=files::open_directory(&cfg.skills)?;let retired_dir=files::open_directory(&graveyard)?;let destination=format!("{name}-{}",crate::utcnow().replace(':',""));
+        files::rename_at(&skills_dir,std::ffi::OsStr::new(name),&retired_dir,std::ffi::OsStr::new(&destination),true)?;
         gate::append_file_op(cfg,"skill","remove",None,&json!({"name":name})).map_err(|_|Error::MayHaveApplied)?;return Ok(());
     }
     if existing.is_some()&&!(item["action"]=="update"&&learned){return Err(Error::Untrusted);}
@@ -232,15 +242,17 @@ pub fn apply_item(cfg:&Config,item:&Value,authority:&Authority,applier:&impl Pen
 pub fn resolve(cfg:&Config,req:&Value,authority:&Authority,applier:&impl PendingApplier)->Result<Value>{
     authority.require_review()?;let id=req["pid"].as_str().ok_or(Error::InvalidRequest)?;let decision=req["decision"].as_str().filter(|decision|matches!(*decision,"approve"|"reject")).ok_or(Error::InvalidRequest)?;
     let source=proposal_path(cfg,id)?;let _locks=files::Locks::acquire(&cfg.root,&[source.clone(),cfg.root.join("pending/.listed")],cfg.timeout)?;
-    let before=snapshot(&source)?;check_expected(req,&before)?;reviewable(&before)?;if !visible(&before.item,&project_slug(gate::cwd(req)?)){return Err(Error::Untrusted);}
+    let source_dir=files::open_directory(source.parent().ok_or(Error::UnsafePath)?)?;let source_name=source.file_name().ok_or(Error::UnsafePath)?;
+    let before=snapshot_at(&source_dir,source_name)?;check_expected(req,&before)?;reviewable(&before)?;if !visible(&before.item,&project_slug(gate::cwd(req)?)){return Err(Error::Untrusted);}
     // The carrier's explicit HumanReview plus expected exact snapshot is the
     // completed UI review signal. Model JSON cannot manufacture this marker.
     if decision=="approve"{record_full_locked(cfg,id,&before)?;}
-    let claimed=private_claim_dir(cfg)?.join(format!("{id}-{}.json",uuid::Uuid::new_v4().simple()));fs::rename(&source,&claimed)?;
-    File::open(source.parent().ok_or(Error::UnsafePath)?)?.sync_all()?;File::open(claimed.parent().ok_or(Error::UnsafePath)?)?.sync_all()?;
-    let checked=(||{let snap=snapshot(&claimed)?;check_expected(req,&snap)?;let listed=listings(cfg)?;
+    let claim_path=private_claim_dir(cfg)?;let claim_dir=files::open_directory(&claim_path)?;
+    let claimed=claim_path.join(format!("{id}-{}.json",uuid::Uuid::new_v4().simple()));let claim_name=claimed.file_name().ok_or(Error::UnsafePath)?;
+    files::rename_at(&source_dir,source_name,&claim_dir,claim_name,false)?;
+    let checked=(||{let snap=snapshot_at(&claim_dir,claim_name)?;check_expected(req,&snap)?;let listed=listings(cfg)?;
         if changed_listing(&listed,id,&snap)||snap.item["kind"]=="sync"&&!listed_exact(&listed,id,&snap){return Err(Error::Changed);}Ok(snap)})();
-    let mut snap=match checked{Ok(snap)=>snap,Err(error)=>{restore_claim(&source,&claimed,id)?;return Err(error);}};
+    let mut snap=match checked{Ok(snap)=>snap,Err(error)=>{restore_claim_at(&source_dir,source_name,&claim_dir,claim_name,id)?;return Err(error);}};
     let status=if decision=="approve"{"approved"}else{"rejected"};
     if decision=="approve"{let original_cwd=snap.item.get("cwd").cloned();snap.item["cwd"]=req["cwd"].clone();
         match apply_item(cfg,&snap.item,authority,applier){
@@ -248,7 +260,7 @@ pub fn resolve(cfg:&Config,req:&Value,authority:&Authority,applier:&impl Pending
             Ok(ApplyOutcome::Partial(error))=>return Ok(json!({"status":"refused","error":error.code(),"applied":true})),
             Ok(ApplyOutcome::Uncertain(error))=>return Ok(json!({"status":"refused","error":error.code(),"applied":null,"may_have_applied":true})),
             Err(Error::MayHaveApplied)=>return Ok(json!({"status":"refused","error":"may_have_applied","applied":null,"may_have_applied":true})),
-            Err(error)=>{restore_claim(&source,&claimed,id)?;return Ok(json!({"status":"refused","error":error.code(),"applied":false}));}
+            Err(error)=>{restore_claim_at(&source_dir,source_name,&claim_dir,claim_name,id)?;return Ok(json!({"status":"refused","error":error.code(),"applied":false}));}
         }
         if let Some(cwd)=original_cwd{snap.item["cwd"]=cwd;}else{snap.item.as_object_mut().unwrap().remove("cwd");}
     }
