@@ -1,26 +1,26 @@
 //! Canonical native LORE core, sharing the Python carrier's store formats.
 //! Caller identity and human review are authority; stored text is only data.
-pub mod config;
-pub mod gate;
-pub mod beliefs;
-pub mod graph;
-pub mod index;
-pub mod history;
-pub mod files;
-pub mod scrub;
-pub mod store;
-pub mod memory;
-pub mod filemap;
-pub mod pending;
-pub mod context;
-pub mod skills;
 pub mod agents;
+pub mod beliefs;
+pub mod config;
+pub mod context;
+mod core;
+pub mod dream;
+pub mod filemap;
+pub mod files;
+pub mod gate;
+pub mod graph;
+pub mod history;
+pub mod index;
+pub mod memory;
+pub mod pending;
+pub mod review;
+pub mod scrub;
+pub mod skills;
+pub mod store;
 pub mod sync;
 pub mod sync_apply;
-pub mod review;
 pub mod worker;
-pub mod dream;
-mod core;
 pub use core::Core;
 
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -58,16 +58,22 @@ impl Error {
     }
 }
 impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.code()) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
 }
 impl std::error::Error for Error {}
 impl From<std::io::Error> for Error {
-    fn from(_: std::io::Error) -> Self { Self::Unavailable }
+    fn from(_: std::io::Error) -> Self {
+        Self::Unavailable
+    }
 }
 impl From<rusqlite::Error> for Error {
     fn from(e: rusqlite::Error) -> Self {
         match e.sqlite_error_code() {
-            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => Self::Timeout,
+            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+                Self::Timeout
+            }
             Some(rusqlite::ErrorCode::TooBig) => Self::TooLarge,
             _ => Self::Unavailable,
         }
@@ -79,5 +85,9 @@ pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 pub fn utcnow() -> String {
-    time::OffsetDateTime::now_utc().format(time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z")).unwrap_or_default()
+    time::OffsetDateTime::now_utc()
+        .format(time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second]Z"
+        ))
+        .unwrap_or_default()
 }
