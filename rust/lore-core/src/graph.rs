@@ -73,8 +73,15 @@ pub fn context_candidates(_cfg:&Config,conn:&Connection,prompt:&str,subjects:&[S
     let mut rows:Vec<_>=out.into_values().collect();rows.sort_by(|a,b|b["calibrated"].as_bool().cmp(&a["calibrated"].as_bool()).then_with(||b["score"].as_f64().unwrap_or(0.).total_cmp(&a["score"].as_f64().unwrap_or(0.))).then_with(||a["claim"].as_str().unwrap_or("").chars().count().cmp(&b["claim"].as_str().unwrap_or("").chars().count())));Ok(rows)
 }
 fn html_escape(s:&str)->String{s.replace('&',"&amp;").replace('<',"&lt;").replace('>',"&gt;").replace('"',"&quot;").replace('\'',"&#39;")}
+pub fn mermaid_label(bid:i64,claim:&str,chars:usize)->String{
+    let mut text=beliefs::one_line(claim);if text.chars().count()>chars{let prefix=beliefs::crop(&text,chars);text=format!("{}…",prefix.rsplit_once(' ').map_or(prefix.as_str(),|p|p.0));}
+    // Mermaid syntax and HTML are separate grammars: an HTML quote entity
+    // alone becomes a literal quote when the browser reads the pre element.
+    for (from,to) in [("&","&amp;"),("#","#35;"),("\"","#quot;"),("[","#91;"),("]","#93;"),("{","#123;"),("}","#125;"),("|","#124;"),("<","&lt;"),(">","&gt;")]{text=text.replace(from,to)}
+    format!("<b>{bid}</b><br/>{text}")
+}
 pub fn mermaid_source(adj:&Adjacency,claims:&BTreeMap<i64,String>,nodes:&BTreeSet<i64>)->String{
-    let mut out=String::from("flowchart LR\n");for id in nodes{out.push_str(&format!("  b{id}[\"<b>{id}</b><br/>{}\"]\n",html_escape(&beliefs::crop(&beliefs::one_line(claims.get(id).map_or("?",String::as_str)),90))));}let mut seen=BTreeSet::new();for src in nodes{for edge in adj.get(src).into_iter().flatten(){if !nodes.contains(&edge.dst){continue}let key=if symmetric(&edge.rel){((*src).min(edge.dst),(*src).max(edge.dst),edge.rel.clone())}else{(*src,edge.dst,edge.rel.clone())};if seen.insert(key){out.push_str(&format!("  b{src} {}|{}| b{}\n",if symmetric(&edge.rel){"---"}else{"-->"},edge.rel,edge.dst));}}}out
+    let mut out=String::from("flowchart LR\n");for id in nodes{out.push_str(&format!("  b{id}[\"{}\"]\n",mermaid_label(*id,claims.get(id).map_or("?",String::as_str),90)));}let mut seen=BTreeSet::new();for src in nodes{for edge in adj.get(src).into_iter().flatten(){if !nodes.contains(&edge.dst){continue}let key=if symmetric(&edge.rel){((*src).min(edge.dst),(*src).max(edge.dst),edge.rel.clone())}else{(*src,edge.dst,edge.rel.clone())};if seen.insert(key){out.push_str(&format!("  b{src} {}|{}| b{}\n",if symmetric(&edge.rel){"---"}else{"-->"},edge.rel,edge.dst));}}}out
 }
 pub fn read(cfg:&Config,req:&Value)->Result<Value>{
     let scope=beliefs::subjects(req)?;let bid=beliefs::id(req,"belief_id")?;let browser=req["browser"].as_bool().ok_or(Error::InvalidRequest)?;let mut conn=store::connect(cfg)?;let tx=conn.transaction()?;
@@ -97,5 +104,7 @@ pub fn backfill(cfg:&Config,_req:&Value,authority:&Authority)->Result<Value>{bel
     #[test]fn superseding_lower_endpoint_preserves_symmetric_assertion_support(){
         let temp=tempfile::tempdir_in("/home/docwilde/.cache/t").unwrap();let cfg=Config::for_root(temp.path().join("lore"));let authority=Authority::HumanReview{agent:"fixture".into(),engine:"unknown".into()};let mut ids=Vec::new();for claim in ["old","neighbor","survivor"]{ids.push(beliefs::insert(&cfg,&json!({"subject":"user","claim":claim,"confidence":0.8}),&authority).unwrap()["id"].as_i64().unwrap());}edge_insert(&cfg,&json!({"src":ids[0],"dst":ids[1],"rel":"contradicts","source":"derived","session_id":"one"}),&authority).unwrap();beliefs::supersede(&cfg,&json!({"belief_id":ids[0],"by":ids[2],"reason":"merge"}),&authority).unwrap();let conn=store::connect(&cfg).unwrap();assert_eq!(edge_support(&conn,ids[2],ids[1],"contradicts").unwrap(),1);assert_eq!(edge_support(&conn,ids[0],ids[1],"contradicts").unwrap(),0);let(adj,_)=adjacency(&conn,None,&["active"],None,false).unwrap();assert!(adj[&ids[2]].iter().any(|e|e.dst==ids[1]&&(e.weight-support_factor(1)).abs()<1e-12));
     }
+
+    #[test]fn mermaid_claims_cannot_escape_node_syntax_or_inject_html(){let label=mermaid_label(1,"claim \" ] | <script>alert(1)</script> #",90);assert!(label.contains("#quot;"));assert!(label.contains("#93;"));assert!(label.contains("#124;"));assert!(!label.contains("<script>"));assert!(!label.contains('\"'));assert_eq!(label.matches("<b>").count(),1);}
 
 }
