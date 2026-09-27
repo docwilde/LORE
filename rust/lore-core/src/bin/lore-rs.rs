@@ -13,12 +13,23 @@ fn main() {
     let outcome = match args.as_slice() {
         [command] if command == "bridge" => bridge(false),
         [command] if command == "agent-bridge" => bridge(true),
+        [command,flag,engine] if command == "review-worker" && flag=="--engine" => review_worker(engine),
         _ => Err(Error::InvalidRequest),
     };
     if let Err(error) = outcome {
         eprintln!("lore-rs: {}", error.code());
         std::process::exit(1);
     }
+}
+
+fn review_worker(engine:&str)->lore_core::Result<()> {
+    let stdin=io::stdin();let mut input=stdin.lock();let mut raw=Vec::new();
+    let length=(&mut input).take(16*1024+1).read_until(b'\n',&mut raw)?;
+    if length>16*1024||!raw.ends_with(b"\n"){return Err(Error::TooLarge);}
+    let request=serde_json::from_slice::<Value>(&raw).map_err(|_|Error::InvalidRequest)?;
+    if !request.is_object(){return Err(Error::InvalidRequest);}
+    let config=Config::from_env(Duration::from_secs(3))?;
+    lore_core::worker::run(&config,&request,engine)
 }
 
 fn bridge(agent: bool) -> lore_core::Result<()> {

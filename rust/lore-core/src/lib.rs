@@ -16,6 +16,8 @@ pub mod skills;
 pub mod agents;
 pub mod sync;
 pub mod sync_apply;
+pub mod review;
+pub mod worker;
 mod core;
 pub use core::Core;
 

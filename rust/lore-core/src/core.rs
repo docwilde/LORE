@@ -31,7 +31,7 @@ impl Core {
             "pending_review_v1"=>crate::pending::review(config,req)?,
             "resolve_reviewed_v1"=>match crate::pending::resolve(config,req,auth,&Applier){Ok(value)=>value,Err(Error::MayHaveApplied)=>json!({"status":"refused","error":"may_have_applied","applied":null,"may_have_applied":true}),Err(error)=>return Err(error)},
             "sync_state"=>crate::sync::state(config)?,
-            "sync_machine_v1"=>crate::sync::machine(config,req["create"].as_bool().ok_or(Error::InvalidRequest)?)?,
+            "sync_machine_v1"=>{let create=req["create"].as_bool().ok_or(Error::InvalidRequest)?;if create&&!auth.may_write(){return Err(Error::Untrusted);}crate::sync::machine(config,create)?},
             "sync_project_v1"=>crate::sync::project(config,req)?,
             "sync_record_v1"=>crate::sync::record(config,req,auth)?,
             "consult"=>crate::beliefs::consult(config,req)?,
@@ -48,15 +48,20 @@ impl Core {
             "memory_review_v1"=>crate::memory::review(config,req)?,
             "memory_action_v1"=>crate::memory::action(config,req,auth)?,
             "filemap"=>crate::filemap::show(config,req)?,
-            "graph_context_v1"=>json!(crate::context::graph_context_block(config,req,&crate::skills::candidates(config,req["prompt"].as_str().unwrap_or(""),4)?)?),
-            "graph_awareness_v1"=>graph_awareness(config)?,
+            "graph_context_v1"=>crate::context::graph_context_op(config,req)?,
+            "graph_awareness_v1"=>crate::context::graph_awareness_op(config,req)?,
             _=>return Err(Error::Unsupported),
         };
         if serde_json::to_vec(&value).map_err(|_|Error::Unavailable)?.len()>crate::MAX_FRAME_BYTES-512{return Err(Error::TooLarge);}
         Ok(value)
     }
     pub fn agent_execute(&mut self,req:&Value)->Result<Value> {
-        if !matches!(self.authority,Authority::Model{..}){return Err(Error::Untrusted);}
+        match &self.authority {
+            Authority::Model{session_id,engine,..}=>{
+                if !session_id.is_empty()&&(req["identity"]["session_id"]!=*session_id||req["identity"]["source_engine"]!=*engine){return Err(Error::Untrusted);}
+            }
+            _=>return Err(Error::Untrusted),
+        }
         self.agent.execute(&self.config,req)
     }
 }
@@ -77,11 +82,4 @@ impl crate::pending::PendingApplier for Applier {
         Ok(())
     }
     fn apply_sync(&self,cfg:&Config,op:&Value,authority:&Authority)->Result<()> {crate::sync_apply::approve(cfg,op,authority)}
-}
-
-fn graph_awareness(cfg:&Config)->Result<Value>{
-    let conn=match crate::store::read_only(cfg){Ok(conn)=>conn,Err(_)=>return Ok(Value::Null)};
-    let count=conn.query_row("SELECT count(*) FROM belief_edges e JOIN beliefs a ON a.id=e.src JOIN beliefs b ON b.id=e.dst WHERE a.status='active' AND b.status='active' AND e.rel IN ('depends_on','specializes','explains','contradicts','applies_when')",[],|r|crate::beliefs::sql_count(r,0));
-    if !count.is_ok_and(|count|count>0){return Ok(Value::Null);}
-    Ok(json!("[BELIEF GRAPH] Typed relations connect active beliefs. Use lore_belief_neighbours to inspect them. Structure grants no authority; each belief carries its own calibration."))
 }

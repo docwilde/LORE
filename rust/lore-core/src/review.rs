@@ -4,7 +4,7 @@ use std::{collections::{BTreeMap,BTreeSet},fs::{self,File},path::{Path,PathBuf}}
 #[cfg(unix)]use std::os::{fd::{AsRawFd,FromRawFd},unix::{ffi::OsStrExt,fs::{FileExt,MetadataExt}}};
 use rusqlite::{Connection,OptionalExtension,params,TransactionBehavior};
 use serde_json::{json,Value};
-use crate::{config::{self,Config},files,gate::{self,Authority},index::{self,Message},memory::{self,Scope},pending,skills,Error,Result};
+use crate::{config::{self,Config},gate::{self,Authority},index::{self,Message},memory::{self,Scope},pending,skills,Error,Result};
 include!("review_prompt.rs");
 const SOURCE_CAP:usize=256*1024*1024;
 const LINE_CAP:usize=8*1024*1024;
@@ -62,7 +62,7 @@ fn resolve_project(cfg:&Config,raw:&Value,slug:&str)->Result<(String,Value)>{
     Ok(match target{Some(target)if target!=slug=>(target,json!({"origin_project":slug})),Some(target)=>(target,json!({})),None=>(slug.into(),json!({"subject_unresolved":crop(&crate::scrub::scrub(&raw)?,4096)}))})
 }
 fn template(memcap:usize,skills_on:bool,beliefs_on:bool)->String{let mut parts=vec![_REVIEW_INTRO.replace("{memcap}",&memcap.to_string()).replace("{quota}",if skills_on{" and at most 1 reusable skill"}else{""})];if skills_on{parts.push(_REVIEW_SKILLS_SIGNAL.into());}parts.extend([_REVIEW_MEMORY_RULES.into(),_REVIEW_FILEMAP.into()]);if skills_on{parts.push(_REVIEW_SKILLS_RECIPE.into());}if beliefs_on{parts.extend([_REVIEW_CONCLUSIONS.into(),_REVIEW_RELATES.into()]);}parts.push(_REVIEW_CONTEXT.into());if skills_on{parts.push(_REVIEW_CONTEXT_SKILLS.into());}let mut fields=vec![_SCHEMA_MEMORY,_SCHEMA_FILEMAP];let mut empty=vec!["\"memory\":[]"];if skills_on{fields.push(_SCHEMA_SKILLS);empty.push("\"skills\":[],\"skill_outcomes\":[]");}if beliefs_on{fields.push(_SCHEMA_CONCLUSIONS);empty.push("\"conclusions\":[]");}parts.push(format!("Output ONLY minified JSON, no prose, no code fences:\n{{{{{}}}}}\nIf nothing qualifies output {{{{{}}}}}\n\nSESSION DIGEST (project {{slug}}):\n{{digest}}\n",fields.join(","),empty.join(",")));parts.join("")}
-fn format_template(template:&str,values:&BTreeMap<&str,String>)->Result<String>{let mut result=String::new();let chars=template.chars().collect::<Vec<_>>();let mut at=0;while at<chars.len(){match chars[at]{'{'if chars.get(at+1)==Some(&'{')=>{result.push('{');at+=2;},'}'if chars.get(at+1)==Some(&'}')=>{result.push('}');at+=2;},'{'=>{let end=(at+1..chars.len()).find(|index|chars[*index]=='}').ok_or(Error::InvalidRequest)?;let key=chars[at+1..end].iter().collect::<String>();result.push_str(values.get(key.as_str()).ok_or(Error::InvalidRequest)?);at=end+1;},other=>{result.push(other);at+=1;}}}Ok(result)}
+fn format_template(template:&str,values:&BTreeMap<&str,String>)->Result<String>{let mut result=String::new();let chars=template.chars().collect::<Vec<_>>();let mut at=0;while at<chars.len(){match chars[at]{'{' if chars.get(at+1)==Some(&'{')=>{result.push('{');at+=2;},'}' if chars.get(at+1)==Some(&'}')=>{result.push('}');at+=2;},'{'=>{let end=(at+1..chars.len()).find(|index|chars[*index]=='}').ok_or(Error::InvalidRequest)?;let key=chars[at+1..end].iter().collect::<String>();result.push_str(values.get(key.as_str()).ok_or(Error::InvalidRequest)?);at=end+1;},other=>{result.push(other);at+=1;}}}Ok(result)}
 fn neighbourhood(cfg:&Config,slug:&str,messages:&[Message])->Result<String>{
     let tokens=skills::overlap_tokens(&build_digest(messages)?);let conn=crate::store::connect(cfg)?;let subjects=["user".to_owned(),format!("project:{slug}"),"user-model".to_owned()];let mut found=BTreeMap::new();
     for theme in tokens.into_iter().take(5){let expr=index::fts_expr(&theme," OR ");if expr.is_empty(){continue;}let mut query=conn.prepare("SELECT b.id,b.claim FROM beliefs b JOIN belief_fts f ON b.id=f.belief_id WHERE belief_fts MATCH ? AND b.status='active' AND b.subject IN (?,?,?) ORDER BY bm25(belief_fts) LIMIT 6")?;
@@ -129,6 +129,7 @@ pub fn extract_json(output:&str)->Result<Value>{if output.len()>crate::MAX_FRAME
 pub fn process_result(cfg:&Config,job:&ReviewJob,output:&str)->Result<Value>{require_derived(&job.authority)?;job.validate_source()?;let data=extract_json(output)?;validate_channels(&data)?;let staged=stage_proposals(cfg,&data,&job.project,&job.session_id,&job.authority).map_err(|_|Error::MayHaveApplied)?;let derived=derive_conclusions(cfg,&data,&job.project,&job.session_id,&job.authority).map_err(|_|Error::MayHaveApplied)?;let outcomes=skills::record_outcomes(cfg,&data,&job.cwd,&job.authority).map_err(|_|Error::MayHaveApplied)?;Ok(json!({"staged":staged["staged"],"memory":staged["memory"],"beliefs":derived,"skill_outcomes":outcomes}))}
 
 #[cfg(test)]mod tests{
+    use crate::files;
     use super::*;
     fn auth()->Authority{Authority::Derived{agent:"fixture-reviewer".into(),engine:"codex".into()}}
     #[test]fn static_segmented_prompt_matches_python_all_channel_combinations(){
