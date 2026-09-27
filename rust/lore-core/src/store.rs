@@ -11,7 +11,7 @@ pub fn connect(config:&Config)->Result<Connection> {
     let path=checked_path(config)?;
     let mut connection=Connection::open_with_flags(&path,OpenFlags::SQLITE_OPEN_READ_WRITE|OpenFlags::SQLITE_OPEN_CREATE|OpenFlags::SQLITE_OPEN_NOFOLLOW|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
     #[cfg(unix)] fs::set_permissions(path,fs::Permissions::from_mode(0o600))?;
-    connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,8*1024*1024);
+    connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,8*1024*1024)?;
     connection.busy_timeout(config.timeout)?;
     connection.pragma_update(None,"journal_mode","WAL")?;
     connection.pragma_update(None,"synchronous","FULL")?;
@@ -35,7 +35,7 @@ fn checked_path(config:&Config)->Result<std::path::PathBuf> {
 pub fn read_only(config:&Config)->Result<Connection> {
     let path=checked_path(config)?;
     let connection=Connection::open_with_flags(&path,OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NOFOLLOW|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,8*1024*1024);
+    connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,8*1024*1024)?;
     connection.busy_timeout(config.timeout)?;
     Ok(connection)
 }

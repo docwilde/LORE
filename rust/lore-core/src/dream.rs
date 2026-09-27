@@ -1,7 +1,7 @@
 //! Reconciliation uses a frozen belief snapshot and short database
 //! transactions. Model promotions remain proposals for human review.
 use std::{collections::{BTreeMap,BTreeSet},fs::File,path::Path};
-use rusqlite::{params,OptionalExtension,TransactionBehavior};
+use rusqlite::{params,TransactionBehavior};
 use serde_json::{json,Value};
 use crate::{beliefs,config::Config,files,gate::Authority,review,store,Error,Result};
 
@@ -83,7 +83,9 @@ pub fn process(cfg:&Config,job:&Job,output:&str)->Result<Value> {
         let Some((ra,rb))=job.rows.get(&a).zip(job.rows.get(&b))else{continue;};
         if ra.subject!=rb.subject{continue;}
         for row in [ra,rb]{
-            let current=tx.query_row("SELECT uid,subject,claim FROM beliefs WHERE id=? AND status='active'",[row.id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()?;
+            let mut query=tx.prepare("SELECT uid,subject,claim FROM beliefs WHERE id=? AND status='active'")?;
+            let mut cursor=query.query([row.id])?;let mut budget=crate::MAX_FRAME_BYTES;
+            let current=match cursor.next()?{Some(found)=>Some((crate::graph::db_text(found,0,128,&mut budget)?,crate::graph::db_text(found,1,1024,&mut budget)?,crate::graph::db_text(found,2,65536,&mut budget)?)),None=>None};
             if current!=Some((row.uid.clone(),row.subject.clone(),row.claim.clone())){return Err(Error::Changed);}
         }
         let reason=beliefs::crop(&crate::gate::one_line(&crate::scrub::scrub(result["reason"].as_str().unwrap_or(""))?),300);

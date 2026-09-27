@@ -1,7 +1,7 @@
 //! Model tools share native storage and graph algorithms with the human UI.
 //! The carrier binds identity once; model arguments cannot change attribution.
 use std::{collections::BTreeMap, path::Path, sync::OnceLock};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use crate::{beliefs, config::{self, Config}, gate, graph, memory::{self, Scope}, pending, scrub, store, Error, Result};
 

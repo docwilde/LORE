@@ -1,7 +1,7 @@
 //! Canonical stored assertions, projected co-derivation, and bounded graph
 //! algorithms. Structural edges are observed state, never model assertions.
 use std::{cmp::Ordering,collections::{BTreeMap,BTreeSet,BinaryHeap,VecDeque}};
-use rusqlite::{params,Connection,OptionalExtension,TransactionBehavior};
+use rusqlite::{params,Connection,TransactionBehavior};
 use serde_json::{json,Value};
 use crate::{beliefs,config::Config,gate::Authority,scrub,store,Error,Result};
 /// Inspect SQLite's borrowed bytes before any owned String allocation. Each
