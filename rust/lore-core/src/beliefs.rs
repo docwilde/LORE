@@ -22,11 +22,15 @@ pub(crate) fn id(req:&Value,key:&str)->Result<i64>{req[key].as_i64().filter(|n|*
 pub(crate) fn text<'a>(req:&'a Value,key:&str,cap:usize)->Result<&'a str>{
     req[key].as_str().filter(|s|!s.is_empty()&&s.len()<=cap&&!s.contains('\0')).ok_or(Error::InvalidRequest)
 }
-pub(crate) fn page(req:&Value,cap:u64)->Result<(u64,u64)>{
+pub(crate) fn page(req:&Value,cap:u64)->Result<(i64,i64)>{
     let offset=req.get("offset").map_or(Some(0),Value::as_u64).filter(|n|*n<=10000).ok_or(Error::InvalidRequest)?;
     let limit=req.get("limit").map_or(Some(cap),Value::as_u64).filter(|n|*n<=cap).ok_or(Error::InvalidRequest)?;
-    Ok((offset,limit))
+    Ok((i64::try_from(offset).map_err(|_|Error::TooLarge)?,i64::try_from(limit).map_err(|_|Error::TooLarge)?))
 }
+/// SQLite integers are signed. Reject malformed negative counters instead of
+/// wrapping them into large unsigned values at protocol boundaries.
+pub(crate) fn sql_count(row:&rusqlite::Row<'_>,index:usize)->rusqlite::Result<u64>{let value=row.get::<_,i64>(index)?;u64::try_from(value).map_err(|_|rusqlite::Error::IntegralValueOutOfRange(index,value))}
+pub(crate) fn sql_integer(value:usize)->Result<i64>{i64::try_from(value).map_err(|_|Error::TooLarge)}
 pub(crate) fn subjects(req:&Value)->Result<[String;3]>{
     let cwd=text(req,"cwd",4096)?;
     Ok(["user".into(),"user-model".into(),format!("project:{}",config::project_slug(Path::new(cwd)))])
@@ -43,7 +47,7 @@ fn uid_subject(conn:&Connection,bid:i64)->Result<(String,String)>{
 }
 pub(crate) fn require_write(authority:&Authority)->Result<()>{if !authority.may_write()&&!authority.may_derive_beliefs(){return Err(Error::Untrusted)}Ok(())}
 fn require_operator(authority:&Authority)->Result<()>{if !authority.may_write(){return Err(Error::Untrusted)}Ok(())}
-fn attributed(req:&Value,authority:&Authority)->Result<Value>{if !req.is_object(){return Err(Error::InvalidRequest)}let mut req=req.clone();req["writer"]=json!(authority.writer());req["source_engine"]=json!(authority.engine());req["via"]=json!(if matches!(authority,Authority::HumanReview{..}){"approved"}else if authority.may_derive_beliefs(){"derived"}else{"direct"});Ok(req)}
+fn attributed(req:&Value,authority:&Authority)->Result<Value>{if !req.is_object(){return Err(Error::InvalidRequest)}let mut req=req.clone();req["writer"]=json!(authority.writer());req["source_engine"]=json!(crate::gate::current_engine(authority.engine()));req["via"]=json!(if matches!(authority,Authority::HumanReview{..}){"approved"}else if authority.may_derive_beliefs(){"derived"}else{"direct"});Ok(req)}
 fn confidence(req:&Value)->Result<f64>{req["confidence"].as_f64().filter(|n|n.is_finite()).map(|n|n.clamp(0.,1.)).ok_or(Error::InvalidRequest)}
 fn evidence_fields(req:&Value)->Result<(Option<String>,Option<String>,Option<String>,Option<String>)>{
     Ok((optional(req,"session_id",128)?,optional(req,"project",4096)?,optional(req,"note",4096)?.map(|s|scrub::scrub(&s).map(|s|crop(&one_line(&s),300))).transpose()?,optional(req,"source_engine",32)?))
@@ -111,12 +115,12 @@ pub fn evidence(cfg:&Config,req:&Value)->Result<Value>{
     if more{if let Some(last)=out.last_mut(){last["trail_truncated"]=json!(true)}}bounded(json!(out))
 }
 pub fn consult(cfg:&Config,req:&Value)->Result<Value>{
-    let prompt=text(req,"prompt",32000)?;let expression=crate::index::fts_expr(prompt," ");if expression.is_empty(){return Ok(Value::Null)}let conn=store::connect(cfg)?;
+    let prompt=text(req,"prompt",32768)?;if prompt.chars().count()>8192{return Err(Error::InvalidRequest)}let expression=crate::index::fts_expr(prompt," OR ");if expression.is_empty(){return Ok(Value::Null)}let conn=store::connect(cfg)?;
     let row=conn.query_row("SELECT b.id,b.claim,b.confidence,bm25(belief_fts) FROM beliefs b JOIN belief_fts f ON b.id=f.belief_id WHERE belief_fts MATCH ? AND status='active' ORDER BY bm25(belief_fts) LIMIT 1",[expression],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,f64>(2)?,r.get::<_,f64>(3)?))).optional()?;
     match row{None=>Ok(Value::Null),Some((id,claim,confidence,score))=>{let claim=scrub::scrub(&claim)?;Ok(json!({"id":id,"claim":crop(&claim,240),"claim_truncated":claim.chars().count()>240,"confidence":confidence,"score":score,"citation_status":"cite_only"}))}}
 }
 pub fn calibrated_confidence(prior:f64,confirms:u64,contradicts:u64)->f64{(prior*2.+confirms as f64)/(2.+confirms as f64+contradicts as f64)}
-pub fn outcome_counts(conn:&Connection,bid:i64)->Result<(u64,u64,u64)>{Ok(conn.query_row("SELECT coalesce(sum(event='confirmed'),0),coalesce(sum(event='contradicted'),0),coalesce(sum(event='stale'),0) FROM belief_outcomes WHERE belief_id=?",[bid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?)}
+pub fn outcome_counts(conn:&Connection,bid:i64)->Result<(u64,u64,u64)>{Ok(conn.query_row("SELECT coalesce(sum(event='confirmed'),0),coalesce(sum(event='contradicted'),0),coalesce(sum(event='stale'),0) FROM belief_outcomes WHERE belief_id=?",[bid],|r|Ok((sql_count(r,0)?,sql_count(r,1)?,sql_count(r,2)?)))?)}
 pub(crate) fn reinforce_in_transaction(cfg:&Config,conn:&Connection,bid:i64,confidence:f64,req:&Value,authority:&Authority)->Result<()> {
     require_write(authority)?;let attributed=attributed(req,authority)?;let req=&attributed;
     let (uid,subject)=uid_subject(conn,bid)?;let old:f64=conn.query_row("SELECT confidence FROM beliefs WHERE id=?",[bid],|r|r.get(0))?;let confidence=old.max(confidence);let now=crate::utcnow();let (sid,project,note,engine)=evidence_fields(req)?;
@@ -159,7 +163,7 @@ pub fn reinforce(cfg:&Config,req:&Value,authority:&Authority)->Result<Value>{req
 pub fn retract(cfg:&Config,req:&Value,authority:&Authority)->Result<Value>{require_write(authority)?;let mut conn=store::connect(cfg)?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;let changed=retract_in_transaction(cfg,&tx,id(req,"belief_id")?,text(req,"reason",4096)?,authority)?;tx.commit()?;Ok(json!({"changed":changed}))}
 pub fn supersede(cfg:&Config,req:&Value,authority:&Authority)->Result<Value>{require_write(authority)?;let mut conn=store::connect(cfg)?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;let by=match req.get("by"){None|Some(Value::Null)=>None,_=>Some(id(req,"by")?)};let changed=supersede_in_transaction(cfg,&tx,id(req,"belief_id")?,by,text(req,"reason",4096)?,authority)?;tx.commit()?;Ok(json!({"changed":changed}))}
 pub fn outcome(cfg:&Config,req:&Value,authority:&Authority)->Result<Value>{require_operator(authority)?;let mut conn=store::connect(cfg)?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;let sid=optional(req,"session_id",128)?;let agent=Some(authority.agent().to_owned());let note=optional(req,"note",4096)?;let uid=optional(req,"uid",128)?;let bid=id(req,"belief_id")?;outcome_in_transaction(cfg,&tx,bid,text(req,"event",32)?,text(req,"source",32)?,sid.as_deref(),agent.as_deref(),note.as_deref(),uid.as_deref(),authority)?;let counts=outcome_counts(&tx,bid)?;tx.commit()?;Ok(json!({"confirmed":counts.0,"contradicted":counts.1,"stale":counts.2}))}
-pub fn dormant(cfg:&Config,req:&Value,authority:&Authority)->Result<Value>{require_operator(authority)?;
+pub fn dormant(cfg:&Config,req:&Value,authority:&Authority)->Result<Value>{require_write(authority)?;
     let days=req.get("days").map_or(Some(45),Value::as_u64).filter(|n|*n<=36500).ok_or(Error::InvalidRequest)?;let mut conn=store::connect(cfg)?;let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut stmt=tx.prepare("SELECT id,subject,uid FROM beliefs WHERE status='active' AND confidence<0.95 AND coalesce(last_referenced,updated)<datetime('now',?)")?;let rows=stmt.query_map([format!("-{days} day")],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;drop(stmt);
     for (id,subject,uid) in &rows{tx.execute("UPDATE beliefs SET status='dormant',updated=? WHERE id=?",params![crate::utcnow(),id])?;let pk=key(&tx,subject)?;store::append_op(cfg,&tx,"belief","status",pk.as_deref(),&json!({"uid":uid,"status":"dormant"}))?}tx.commit()?;Ok(json!({"moved":rows.len()}))

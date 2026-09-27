@@ -9,7 +9,7 @@ pub fn symmetric(rel:&str)->bool{matches!(rel,"contradicts"|"co_derived")}
 pub fn support_factor(n:u64)->f64{(1.-(-(n as f64)/2.).exp()).min(0.99)}
 #[derive(Clone,Debug)]pub struct Edge{pub dst:i64,pub rel:String,pub weight:f64}
 pub type Adjacency=BTreeMap<i64,Vec<Edge>>;
-pub fn edge_support(conn:&Connection,mut src:i64,mut dst:i64,rel:&str)->Result<u64>{if symmetric(rel)&&src>dst{std::mem::swap(&mut src,&mut dst)}Ok(conn.query_row("SELECT count(DISTINCT session_id) FROM belief_edge_assertions WHERE src=? AND dst=? AND rel=?",params![src,dst,rel],|r|r.get(0))?)}
+pub fn edge_support(conn:&Connection,mut src:i64,mut dst:i64,rel:&str)->Result<u64>{if symmetric(rel)&&src>dst{std::mem::swap(&mut src,&mut dst)}Ok(conn.query_row("SELECT count(DISTINCT session_id) FROM belief_edge_assertions WHERE src=? AND dst=? AND rel=?",params![src,dst,rel],|r|beliefs::sql_count(r,0))?)}
 pub(crate) fn edge_insert_in_transaction(cfg:&Config,conn:&Connection,mut src:i64,mut dst:i64,rel:&str,source:&str,sid:Option<&str>,note:Option<&str>,authority:&Authority)->Result<bool>{
     beliefs::require_write(authority)?;
     if src==dst||!(ASSERTED.contains(&rel)||rel=="supersedes"){return Ok(false)}if symmetric(rel)&&src>dst{std::mem::swap(&mut src,&mut dst)}
