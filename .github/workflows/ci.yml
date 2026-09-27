@@ -102,3 +102,23 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           [ "$failed" -eq 0 ]
+
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CARGO_BUILD_JOBS: 2
+      RUST_TEST_THREADS: 1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Native contracts, storage and owned reviewer fixtures
+        run: cargo +stable test --locked
+      - name: Python and native store interoperability
+        env:
+          LORE_TEST_NATIVE_BINARY: ${{ github.workspace }}/target/debug/lore-rs
+        run: python3 tests/test_native_interop.py

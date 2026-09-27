@@ -9,7 +9,7 @@ include!("review_prompt.rs");
 const SOURCE_CAP:usize=256*1024*1024;
 const LINE_CAP:usize=8*1024*1024;
 fn crop(text:&str,count:usize)->String{text.chars().take(count).collect()}
-fn disabled(name:&str)->bool{std::env::var(name).is_ok_and(|value|!matches!(value.as_str(),""|"0"))}
+use crate::config::disabled;
 fn bound_env(name:&str,default:usize,max:usize)->Result<usize>{std::env::var(name).ok().map_or(Some(default),|value|value.trim().parse().ok()).filter(|value|*value<=max).ok_or(Error::InvalidRequest)}
 fn require_derived(authority:&Authority)->Result<()>{if matches!(authority,Authority::Derived{..}){Ok(())}else{Err(Error::Untrusted)}}
 fn threshold()->Result<f64>{std::env::var("LORE_DUP_CONTAINMENT").ok().map_or(Some(0.60),|value|value.parse::<f64>().ok()).filter(|value|value.is_finite()&&(0.0..=1.0).contains(value)).ok_or(Error::InvalidRequest)}

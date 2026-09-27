@@ -85,6 +85,7 @@ conn.close();print(json.dumps([result,rows,alias]))
 
 
 @unittest.skipUnless(BINARY.is_file(), "set LORE_TEST_NATIVE_BINARY to a built native fixture executable")
+@unittest.skipUnless(BINARY.is_file(), "build lore-rs and set LORE_TEST_NATIVE_BINARY for native interoperability")
 class NativeInterop(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="lore-native-interop-")

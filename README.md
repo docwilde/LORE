@@ -109,9 +109,13 @@ for setup and the [protocol](docs/sync-protocol.md) for the wire format.
 
 ## DOXA — the native terminal
 
-LORE runs in-process in [DOXA](https://github.com/docwilde/doxa), sharing
-the same files, SQLite store, and sync log as the plugins. `lore_core` is
-also an installable [library](docs/manual.md#lore_core-as-a-library).
+LORE 0.61.0 provides a canonical **Rust module** for
+[DOXA](https://github.com/docwilde/doxa): memory, beliefs, review, context and
+session search share the existing files, SQLite store and signed sync log.
+See the [native core guide](docs/native-core.md) for build commands and contracts.
+The Python plugin and administrative CLI remain available for Claude Code and
+Codex; `lore_core` remains an installable
+[library](docs/manual.md#lore_core-as-a-library).
 
 ## Reference
 
