@@ -120,9 +120,11 @@ pub fn graph_context_block(cfg:&Config,req:&Value,skills:&[Value])->Result<Strin
     let conn=crate::store::connect(cfg)?;let subjects=vec!["user".to_owned(),"user-model".to_owned(),format!("project:{}",project_slug(cwd))];
     let rows=crate::graph::context_candidates(cfg,&conn,prompt,&subjects,hops)?;render_graph_context(&rows,skills,cap)
 }
+pub fn graph_context_op(cfg:&Config,req:&Value)->Result<Value>{let skills=if disabled("LORE_DISABLE_SKILLS"){Vec::new()}else{crate::skills::candidates(cfg,req["prompt"].as_str().unwrap_or(""),4)?};Ok(json!(graph_context_block(cfg,req,&skills)?))}
+pub fn graph_awareness_op(cfg:&Config,_req:&Value)->Result<Value>{let conn=crate::store::connect(cfg)?;let exists=conn.query_row("SELECT EXISTS(SELECT 1 FROM belief_edges e JOIN beliefs s ON s.id=e.src AND s.status='active' JOIN beliefs d ON d.id=e.dst AND d.status='active' WHERE e.rel IN ('depends_on','specializes','explains','contradicts','applies_when'))",[],|row|row.get::<_,bool>(0))?;Ok(if exists{json!("[BELIEF GRAPH] Beyond the five-step ladder above: some beliefs here carry typed relations to each other (depends_on, specializes, explains, contradicts, applies_when). Once you know a belief's id, call lore_belief_neighbours(belief_id) to see what it depends on, contradicts or specializes, or the confidence-scored path to another belief. Reachability is not authority: a belief found by traversal is CITE-only unless it earned STEER on its own.")}else{Value::Null})}
 fn disabled(name:&str)->bool{std::env::var(name).is_ok_and(|value|!matches!(value.as_str(),""|"0"))}
 fn refresh_frame(text:&str,message:&str)->Value{json!({"suppressOutput":true,"systemMessage":message,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":text}})}
-pub fn refresh(cfg:&Config,req:&Value)->Result<Value>{refresh_with_skills(cfg,req,&[])}
+pub fn refresh(cfg:&Config,req:&Value)->Result<Value>{let skills=if disabled("LORE_DISABLE_SKILLS"){Vec::new()}else{crate::skills::candidates(cfg,req["prompt"].as_str().unwrap_or(""),4).unwrap_or_default()};refresh_with_skills(cfg,req,&skills)}
 pub fn refresh_with_skills(cfg:&Config,req:&Value,skills:&[Value])->Result<Value>{
     if std::env::var("LORE_SKIP").is_ok_and(|value|!value.is_empty())||disabled("LORE_DISABLE_INJECT"){return Ok(Value::Null);}
     let graph=graph_context_block(cfg,req,skills).unwrap_or_default();
@@ -153,6 +155,13 @@ pub fn refresh_with_skills(cfg:&Config,req:&Value,skills:&[Value])->Result<Value
         assert!(baseline.contains(&format!("{} used",baseline.chars().count())));assert!(render_graph_context(&rows,&[],10).unwrap().is_empty());
         let mut scoped=rows.clone();scoped[0]["via"]=json!("in scope");let fallback=render_graph_context(&scoped,&[],1200).unwrap();assert!(fallback.contains("NOT prompt-scoped"));
         let full=render_graph_context(&rows,&skills,1200).unwrap();assert!(full.contains("skill:fixture")&&full.contains("UNTESTED"));
+    }
+    #[test]fn awareness_requires_an_asserted_relation_between_two_active_endpoints(){
+        let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));let conn=crate::store::connect(&cfg).unwrap();
+        for id in [1,2]{conn.execute("INSERT INTO beliefs(id,subject,claim,confidence,status,created,updated,uid) VALUES(?,'user','fixture',0.8,'active','2026-01-01','2026-01-01',?)",rusqlite::params![id,format!("fixture-{id}")]).unwrap();}
+        conn.execute("INSERT INTO belief_edges(src,dst,rel,source,created) VALUES(1,2,'co_derived','fixture','2026-01-01')",[]).unwrap();assert!(graph_awareness_op(&cfg,&json!({})).unwrap().is_null());
+        conn.execute("INSERT INTO belief_edges(src,dst,rel,source,created) VALUES(1,2,'explains','derived','2026-01-01')",[]).unwrap();assert!(graph_awareness_op(&cfg,&json!({})).unwrap().as_str().unwrap().contains("Reachability is not authority"));
+        conn.execute("UPDATE beliefs SET status='retracted' WHERE id=2",[]).unwrap();assert!(graph_awareness_op(&cfg,&json!({})).unwrap().is_null());
     }
     #[test]fn context_keeps_filemap_body_and_other_host_facts_out_of_snapshot(){
         let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));let cwd=temp.path().join("repo");let slug=project_slug(&cwd);

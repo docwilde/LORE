@@ -2,7 +2,7 @@
 //! only a frozen reviewer may record outcomes or alter the usage ledger.
 use std::{collections::{BTreeMap,BTreeSet},fs,path::{Path,PathBuf}};
 use serde_json::{json,Value};
-use crate::{config::{Config,valid_skill_name,project_identity_root},files,gate::{self,Authority},Error,Result};
+use crate::{config::{Config,valid_skill_name},files,gate::{self,Authority},Error,Result};
 const MAX_SKILLS:usize=400;
 const MAX_SOURCE:usize=1024*1024;
 pub fn overlap_tokens(text:&str)->BTreeSet<String>{
@@ -25,6 +25,7 @@ pub fn learned(cfg:&Config)->Result<BTreeMap<String,String>>{
 pub fn load_usage(cfg:&Config)->Result<Value>{let path=cfg.root.join("skill_usage.json");if !path.try_exists()?{return Ok(json!({}));}let value:Value=serde_json::from_slice(&files::read_regular(&path,MAX_SOURCE)?).map_err(|_|Error::Unavailable)?;if !value.is_object(){return Err(Error::Unavailable);}Ok(value)}
 fn save_usage(cfg:&Config,value:&Value)->Result<()>{let bytes=serde_json::to_vec_pretty(value).map_err(|_|Error::Unavailable)?;if bytes.len()>MAX_SOURCE{return Err(Error::TooLarge);}files::atomic_write(&cfg.root.join("skill_usage.json"),&bytes)}
 fn count(row:&Value,key:&str)->u64{row[key].as_u64().unwrap_or(0)}
+pub fn record_line(row:&Value)->String{let mut parts=vec![format!("used {}x",count(row,"uses"))];if count(row,"ok")>0||count(row,"fail")>0{parts.push(format!("{} ok / {} failed",count(row,"ok"),count(row,"fail")));}if let Some(last)=row["last_outcome"].as_str().filter(|last|matches!(*last,"success"|"failure"|"unclear")){parts.push(format!("last: {last}"));}parts.join(", ")}
 pub fn candidates(cfg:&Config,prompt:&str,limit:usize)->Result<Vec<Value>>{
     if prompt.chars().count()>8192||limit>20{return Err(Error::InvalidRequest);}let learned=learned(cfg)?;let usage=load_usage(cfg)?;let want=overlap_tokens(prompt);let need=if want.len()>=3{2}else{1};let mut rows=Vec::new();
     for(name,desc)in learned{let shared=want.intersection(&overlap_tokens(&format!("{} {desc}",name.replace('-'," ")))).count();if !want.is_empty()&&shared<need{continue;}
@@ -40,11 +41,12 @@ fn append_tail(row:&mut Value,key:&str,value:Value){if !row[key].is_array(){row[
 /// Read git's public hash without running git or hooks. A missing/unusable
 /// symbolic ref is unknown, never fabricated attribution.
 pub fn repo_head(cwd:&Path)->Option<String>{
-    let root=project_identity_root(cwd);let marker=root.join(".git");let git=if marker.is_dir(){marker}else{let bytes=files::read_regular(&marker,4096).ok()?;let text=std::str::from_utf8(&bytes).ok()?;root.join(text.trim().strip_prefix("gitdir: ")?)};
+    let root=cwd.ancestors().find(|root|root.join(".git").exists())?;let marker=root.join(".git");let git=if marker.is_dir(){marker}else{let bytes=files::read_regular(&marker,4096).ok()?;let text=std::str::from_utf8(&bytes).ok()?;root.join(text.trim().strip_prefix("gitdir: ")?)};
+    let common=files::read_regular(&git.join("commondir"),4096).ok().and_then(|bytes|String::from_utf8(bytes).ok()).map(|relative|git.join(relative.trim())).unwrap_or_else(||git.clone());
     let bytes=files::read_regular(&git.join("HEAD"),4096).ok()?;let head=std::str::from_utf8(&bytes).ok()?.trim();let hash=if let Some(reference)=head.strip_prefix("ref: "){
         if !reference.starts_with("refs/")||reference.contains("..")||reference.contains('\\'){return None;}
-        let direct=files::read_regular(&git.join(reference),4096).ok().and_then(|bytes|String::from_utf8(bytes).ok());
-        direct.or_else(||files::read_regular(&git.join("packed-refs"),MAX_SOURCE).ok().and_then(|bytes|String::from_utf8(bytes).ok()).and_then(|text|text.lines().find_map(|line|line.split_once(' ').filter(|(_,name)|*name==reference).map(|(hash,_)|hash.to_owned()))))?
+        let direct=files::read_regular(&common.join(reference),4096).ok().and_then(|bytes|String::from_utf8(bytes).ok());
+        direct.or_else(||files::read_regular(&common.join("packed-refs"),MAX_SOURCE).ok().and_then(|bytes|String::from_utf8(bytes).ok()).and_then(|text|text.lines().find_map(|line|line.split_once(' ').filter(|(_,name)|*name==reference).map(|(hash,_)|hash.to_owned()))))?
     }else{head.to_owned()};let hash=hash.trim();if hash.len()==40||hash.len()==64{if hash.bytes().all(|byte|byte.is_ascii_hexdigit()){return Some(hash[..12].to_lowercase());}}None
 }
 pub fn record_outcomes(cfg:&Config,data:&Value,cwd:&Path,authority:&Authority)->Result<usize>{
@@ -80,6 +82,11 @@ pub fn update_admitted(action:&str,row:&Value)->bool{
     #[test]fn graduated_update_guard_excludes_drift_and_requires_more_for_retirement(){
         let one=json!({"ok":1,"fail":0,"trail":[{"o":"success","h":"same"},{"o":"failure","h":"same","r":"exit code 1"}]});assert!(update_admitted("update",&one));assert!(!update_admitted("retire",&one));
         let mut drift=one.clone();drift["trail"][1]["h"]=json!("new");assert!(!update_admitted("update",&drift));assert!(update_admitted("retire",&json!({"fail":3})));
+    }
+    #[test]fn head_attribution_uses_linked_checkout_not_main_checkout(){
+        let temp=tempfile::tempdir().unwrap();let main=temp.path().join("main");let checkout=temp.path().join("checkout");let git=main.join(".git");let worktree=git.join("worktrees/fixture");
+        files::atomic_write(&git.join("HEAD"),b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n").unwrap();files::atomic_write(&worktree.join("HEAD"),b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n").unwrap();files::atomic_write(&worktree.join("commondir"),b"../..\n").unwrap();files::atomic_write(&checkout.join(".git"),format!("gitdir: {}\n",worktree.display()).as_bytes()).unwrap();
+        assert_eq!(repo_head(&checkout),Some("bbbbbbbbbbbb".into()));assert_eq!(record_line(&json!({})),"used 0x");
     }
     #[test]fn outcomes_ignore_unknown_skills_and_json_identity_cannot_grant_reviewer(){
         let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));install(&cfg,"fixture","recipe");let data=json!({"skill_outcomes":[{"name":"unknown","outcome":"success"}]});assert_eq!(record_outcomes(&cfg,&data,temp.path(),&auth()),Ok(0));
