@@ -86,7 +86,8 @@ pub fn provenance_tag(cfg: &Config, kind: &str, bucket: &str, entries: &[String]
     parts.extend(counts.into_iter().map(|(label,count)|format!("{count} {label}")));format!(" — provenance: {}",parts.join(", "))
 }
 pub fn append_file_op(cfg: &Config, class: &str, op: &str, slug: Option<&str>, payload: &Value) -> Result<()> {
-    if !cfg.sync.enabled { return Ok(()); }
+    let configured=match class {"belief"=>"beliefs","skill"=>"skills","session"=>"sessions",other=>other};
+    if !cfg.sync.enabled||!cfg.sync.classes.contains(configured) { return Ok(()); }
     let mut conn = crate::store::connect(cfg)?;
     let key = slug.map(|slug| crate::store::project_key_for_slug(&conn,slug)).transpose()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -110,8 +111,8 @@ pub fn stage(cfg: &Config, item: &Value, authority: &Authority) -> Result<String
         let mut options = OpenOptions::new(); options.write(true).create_new(true);
         #[cfg(unix)] options.mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC);
         match options.open(&path) {
-            Ok(mut file) => { file.write_all(&bytes)?; file.sync_all()?; fs::File::open(&dir)?.sync_all()?;
-                let _ = append_file_op(cfg,"pending","stage",pending_project(&payload),&json!({"uid":payload["uid"],"item":payload})); return Ok(id); }
+            Ok(mut file) => { file.write_all(&bytes).map_err(|_|Error::MayHaveApplied)?; file.sync_all().map_err(|_|Error::MayHaveApplied)?; fs::File::open(&dir).and_then(|dir|dir.sync_all()).map_err(|_|Error::MayHaveApplied)?;
+                append_file_op(cfg,"pending","stage",pending_project(&payload),&json!({"uid":payload["uid"],"item":payload})).map_err(|_|Error::MayHaveApplied)?; return Ok(id); }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(_) => return Err(Error::Unavailable),
         }
@@ -123,6 +124,18 @@ pub fn cwd(req: &Value) -> Result<&Path> {
 }
 
 #[cfg(test)] mod tests {
+    #[test] fn landed_proposal_sync_failure_is_explicit_and_disabled_class_never_opens_database() {
+        let temp=tempfile::tempdir().unwrap();let mut cfg=Config::for_root(temp.path().join("lore"));cfg.sync.enabled=true;
+        cfg.sync.classes=["pending".into()].into_iter().collect();files::private_dir(&cfg.root).unwrap();fs::write(cfg.root.join("state.db"),b"owned corrupt fixture").unwrap();
+        let auth=Authority::Model{agent:"fixture".into(),engine:"codex".into(),session_id:"fixture".into()};
+        assert_eq!(stage(&cfg,&json!({"kind":"memory","scope":"user","text":"private fixture"}),&auth),Err(Error::MayHaveApplied));
+        let ids=crate::pending::ids(&cfg).unwrap();assert_eq!(ids.len(),1);
+        let item:Value=serde_json::from_slice(&files::read_regular(&cfg.root.join("pending").join(format!("{}.json",ids[0])),65536).unwrap()).unwrap();
+        assert_eq!(item["text"],"private fixture");assert_eq!(item["source_engine"],"codex");
+        cfg.sync.classes.clear();assert!(stage(&cfg,&json!({"kind":"memory","scope":"user","text":"disabled fixture"}),&auth).is_ok());
+        assert_eq!(fs::read(cfg.root.join("state.db")).unwrap(),b"owned corrupt fixture");
+    }
+
     use super::*;
     #[test] fn provenance_keys_match_python_unicode_normalization() {
         assert_eq!(entry_key("memory","user","  Hello\n WORLD "), "memory:user:b94d27b9934d3e08a52e");

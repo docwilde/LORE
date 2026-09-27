@@ -47,7 +47,7 @@ pub(crate) fn mutate_locked(cfg:&Config,slug:&str,action:&str,needle:&str,map_pa
     let payload=match op {"add"=>json!({"text":text,"via":via,"writer":authority.writer()}),
         "replace"=>json!({"old_key":gate::entry_key("filemap",slug,old.as_deref().unwrap()),"text":text,"via":via,"writer":authority.writer()}),
         _=>json!({"key":gate::entry_key("filemap",slug,old.as_deref().unwrap())})};
-    let _=gate::append_file_op(cfg,"filemap",op,Some(slug),&payload);Ok(())
+    gate::append_file_op(cfg,"filemap",op,Some(slug),&payload).map_err(|_|Error::MayHaveApplied)
 }
 pub fn action(cfg:&Config,req:&Value,authority:&Authority)->Result<Value> {
     let cwd=gate::cwd(req)?;let slug=project_slug(cwd);let action=req["action"].as_str().filter(|action|matches!(*action,"add"|"replace"|"remove")).ok_or(Error::InvalidRequest)?;
@@ -59,6 +59,15 @@ pub fn action(cfg:&Config,req:&Value,authority:&Authority)->Result<Value> {
 }
 
 #[cfg(test)] mod tests {
+    #[test] fn landed_filemap_with_failed_enabled_log_reports_partial_effect() {
+        let temp=tempfile::tempdir().unwrap();let mut cfg=Config::for_root(temp.path().join("lore"));cfg.sync.enabled=true;cfg.sync.classes=["filemap".into()].into_iter().collect();
+        files::private_dir(&cfg.root).unwrap();std::fs::write(cfg.root.join("state.db"),b"owned corrupt fixture").unwrap();
+        let auth=Authority::HumanReview{agent:"fixture".into(),engine:"codex".into()};
+        let result=action(&cfg,&json!({"cwd":temp.path(),"action":"add","path":"src.rs","purpose":"owned fixture"}),&auth).unwrap();
+        assert_eq!(result["status"],"refused");assert_eq!(result["applied"],true);assert_eq!(result["error"],"may_have_applied");
+        assert_eq!(entries_for(&cfg,&project_slug(temp.path())).unwrap(),[("src.rs".into(),"owned fixture".into())]);
+    }
+
     use super::*;
     #[test] fn keyed_update_and_root_relative_paths_are_canonical() {
         let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));let authority=Authority::Interactive{agent:"fixture".into(),engine:"codex".into()};

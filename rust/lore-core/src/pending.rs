@@ -1,7 +1,7 @@
 //! Exact reviewed proposal claims. Failed application preserves a recoverable
 //! proposal; archive failure explicitly reports whether application landed.
-use std::{fs::{self,File,OpenOptions,Metadata},io::Read,path::{Path,PathBuf}};
-#[cfg(unix)] use std::os::unix::fs::{MetadataExt,OpenOptionsExt};
+use std::{fs::{self,File,Metadata},io::Read,path::{Path,PathBuf}};
+#[cfg(unix)] use std::os::unix::fs::{MetadataExt};
 use serde_json::{json,Value};
 use crate::{config::{Config,valid_id,valid_slug,valid_skill_name,project_slug},files,gate::{self,Authority},memory::{self,Scope},Error,Result};
 
@@ -16,14 +16,12 @@ fn same_file(before:&Metadata,after:&Metadata)->bool {
     #[cfg(not(unix))] {before.len()==after.len()&&before.modified().ok()==after.modified().ok()}
 }
 pub fn snapshot(path:&Path)->Result<Snapshot>{
-    let before=fs::symlink_metadata(path)?;let mut options=OpenOptions::new();options.read(true);
-    #[cfg(unix)] options.custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK|libc::O_CLOEXEC);
-    let mut file=options.open(path)?;let metadata=file.metadata()?;
+    let mut file=files::open_regular(path,crate::MAX_REVIEW_BYTES)?;let before=file.metadata()?;let metadata=file.metadata()?;
     if !metadata.is_file()||metadata.len()>crate::MAX_REVIEW_BYTES as u64||!same_file(&before,&metadata){return Err(Error::Changed);}
     #[cfg(unix)] if metadata.uid()!=unsafe{libc::geteuid()}||metadata.nlink()!=1{return Err(Error::UnsafePath);}
     let mut bytes=Vec::new();Read::by_ref(&mut file).take(crate::MAX_REVIEW_BYTES as u64+1).read_to_end(&mut bytes)?;
     if bytes.len()>crate::MAX_REVIEW_BYTES{return Err(Error::TooLarge);}
-    if !same_file(&metadata,&file.metadata()?)||!same_file(&metadata,&fs::symlink_metadata(path)?){return Err(Error::Changed);}
+    if !same_file(&metadata,&file.metadata()?)||!same_file(&metadata,&files::open_regular(path,crate::MAX_REVIEW_BYTES)?.metadata()?){return Err(Error::Changed);}
     let sha256=crate::digest(&bytes);let raw=String::from_utf8(bytes).map_err(|_|Error::InvalidRequest)?;
     let item:Value=serde_json::from_str(&raw).map_err(|_|Error::InvalidRequest)?;if !item.is_object(){return Err(Error::InvalidRequest);}
     #[cfg(unix)] let inode=metadata.ino();
@@ -32,8 +30,8 @@ pub fn snapshot(path:&Path)->Result<Snapshot>{
 }
 fn visible(item:&Value,slug:&str)->bool{item["scope"]!="project"||item["project"]==slug}
 pub fn ids(cfg:&Config)->Result<Vec<String>> {
-    let dir=cfg.root.join("pending");if !dir.try_exists()?{return Ok(Vec::new());}
-    let mut ids=Vec::new();for (index,entry) in fs::read_dir(dir)?.take(4097).enumerate(){if index>=4096{return Err(Error::TooLarge);}let entry=entry?;let path=entry.path();if path.extension().is_some_and(|extension|extension=="json"){
+    let dir=cfg.root.join("pending");if fs::symlink_metadata(&dir).is_err_and(|error|error.kind()==std::io::ErrorKind::NotFound){return Ok(Vec::new());}
+    let mut ids=Vec::new();for name in files::directory_names(&dir,4096)?{let path=dir.join(name);if path.extension().is_some_and(|extension|extension=="json"){
         if let Some(id)=path.file_stem().and_then(|value|value.to_str()).filter(|id|valid_id(id)){ids.push(id.to_owned());}
     }}
     ids.sort();Ok(ids)
@@ -125,7 +123,7 @@ fn archive_inner(cfg:&Config,id:&str,claimed:&Path,snap:&Snapshot,status:&str,ti
     let current=snapshot(claimed)?;if current.inode!=snap.inode||current.sha256!=snap.sha256{return Err(Error::Changed);}
     fs::remove_file(claimed)?;File::open(claimed.parent().ok_or(Error::UnsafePath)?)?.sync_all()?;
     if tidy_listing&&fs::symlink_metadata(proposal_path(cfg,id)?).is_err_and(|error|error.kind()==std::io::ErrorKind::NotFound) {let mut data=listings(cfg)?;if data.as_object_mut().unwrap().remove(id).is_some(){save_listings(cfg,&data)?;}}
-    if let Some(uid)=item["uid"].as_str(){let _=gate::append_file_op(cfg,"pending","resolve",gate::pending_project(&item),&json!({"uid":uid,"status":status}));}Ok(())
+    if let Some(uid)=item["uid"].as_str(){gate::append_file_op(cfg,"pending","resolve",gate::pending_project(&item),&json!({"uid":uid,"status":status})).map_err(|_|Error::MayHaveApplied)?;}Ok(())
 }
 /// Internal MAC-verified sync replay only; does not apply proposal content or
 /// infer human authority from its stored fields. The dispatcher owns admission.
@@ -218,6 +216,17 @@ pub fn resolve(cfg:&Config,req:&Value,authority:&Authority,applier:&impl Pending
 }
 
 #[cfg(test)] mod tests {
+    #[cfg(unix)] #[test] fn linked_pending_directory_never_yields_outside_review_proof() {
+        use std::os::unix::fs::symlink;
+        let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));fs::create_dir(&cfg.root).unwrap();
+        let outside=temp.path().join("outside");fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("fixture.json"),br#"{"kind":"belief","scope":"user","claim":"outside fixture"}"#).unwrap();
+        symlink(&outside,cfg.root.join("pending")).unwrap();
+        assert_eq!(ids(&cfg),Err(Error::UnsafePath));
+        assert!(matches!(review(&cfg,&json!({"cwd":temp.path(),"pid":"fixture"})),Err(Error::UnsafePath)));
+        assert!(outside.join("fixture.json").exists());assert!(!outside.join(".listed").exists());
+    }
+
     use super::*;
     struct Applier;impl PendingApplier for Applier{fn apply_belief(&self,_:&Config,_:&Value,_:&Authority)->Result<()>{Err(Error::Unavailable)}fn apply_sync(&self,_:&Config,_:&Value,_:&Authority)->Result<()>{Err(Error::Unavailable)}}
     fn auth()->Authority{Authority::HumanReview{agent:"fixture".into(),engine:"claude".into()}}

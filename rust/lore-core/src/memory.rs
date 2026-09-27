@@ -100,8 +100,8 @@ pub fn usage(cfg:&Config,req:&Value)->Result<Value> {
     for scope in [Scope::User,Scope::Project]{let entries=read_entries(&scope.path(cfg,&key)?)?;let chars=render_entries(&entries).chars().count();
         result[format!("{}_chars",scope.name())]=json!(chars);result[format!("{}_cap_chars",scope.name())]=json!(scope.cap(cfg));}Ok(result)
 }
-fn append_memory_op(cfg:&Config,scope:Scope,key:&str,op:&str,payload:&Value) {
-    if scope!=Scope::Machine{let _=gate::append_file_op(cfg,"memory",op,(scope==Scope::Project).then_some(key),payload);}
+fn append_memory_op(cfg:&Config,scope:Scope,key:&str,op:&str,payload:&Value)->Result<()> {
+    if scope!=Scope::Machine{gate::append_file_op(cfg,"memory",op,(scope==Scope::Project).then_some(key),payload).map_err(|_|Error::MayHaveApplied)?;}Ok(())
 }
 pub fn mutate_locked(cfg:&Config,scope:Scope,key:&str,action:&str,needle:&str,text:&str,via:&str,origin:Option<&str>,source_engine:Option<&str>,authority:&Authority)->Result<()> {
     if !authority.may_write(){return Err(Error::Untrusted);}let path=scope.path(cfg,key)?;let mut entries=read_entries(&path)?;let bucket=scope.bucket(key);
@@ -117,7 +117,7 @@ pub fn mutate_locked(cfg:&Config,scope:Scope,key:&str,action:&str,needle:&str,te
     let payload=match action {"add"=>json!({"text":text,"via":via,"writer":authority.writer(),"source_engine":gate::current_engine(source_engine.unwrap_or(authority.engine()))}),
         "replace"=>json!({"old_key":gate::entry_key("memory",&bucket,old.as_deref().unwrap()),"text":text,"via":via,"writer":authority.writer(),"source_engine":gate::current_engine(source_engine.unwrap_or(authority.engine()))}),
         _=>json!({"key":gate::entry_key("memory",&bucket,old.as_deref().unwrap())})};
-    append_memory_op(cfg,scope,key,action,&payload);Ok(())
+    append_memory_op(cfg,scope,key,action,&payload)
 }
 pub fn mutate(cfg:&Config,scope:Scope,key:&str,action:&str,needle:&str,text:&str,via:&str,origin:Option<&str>,source_engine:Option<&str>,authority:&Authority)->Result<()> {
     let path=scope.path(cfg,key)?;let _lock=files::Locks::acquire(&cfg.root,&[path],cfg.timeout)?;
@@ -161,7 +161,7 @@ fn move_with_writer(cfg:&Config,scope:Scope,from:&str,needle:&str,to_scope:Scope
     let src_bucket=scope.bucket(from);let provenance=gate::provenance(cfg,"memory",&src_bucket,&text);
     if !dst.iter().any(|entry|entry.to_lowercase()==text.to_lowercase()){dst.push(text.clone());match observe_file_write(&[destination.clone()],||write(&destination,&dst,to_scope.cap(cfg)))?{FileOutcome::Complete=>{},FileOutcome::Partial(error)=>return Ok(MoveOutcome::DestinationOnly(error)),FileOutcome::Uncertain(error)=>return Ok(MoveOutcome::Uncertain(error))};if let Err(error)=gate::record_preserved(cfg,"memory",&to_scope.bucket(to),&text,&provenance,&format!("moved from {}",if scope==Scope::User{"user"}else{from})){return Ok(MoveOutcome::DestinationOnly(error));}}
     src.remove(hits[0]);if let Err(error)=write(&source,&src,scope.cap(cfg)){return Ok(MoveOutcome::DestinationOnly(error));}if let Err(error)=gate::forget(cfg,"memory",&src_bucket,&text){return Ok(MoveOutcome::DestinationOnly(error));}
-    if to_scope==Scope::Machine&&scope!=Scope::Machine{append_memory_op(cfg,scope,from,"remove",&json!({"key":gate::entry_key("memory",&src_bucket,&text)}));}Ok(MoveOutcome::Complete)
+    if to_scope==Scope::Machine&&scope!=Scope::Machine{if let Err(error)=append_memory_op(cfg,scope,from,"remove",&json!({"key":gate::entry_key("memory",&src_bucket,&text)})){return Ok(MoveOutcome::DestinationOnly(error));}}Ok(MoveOutcome::Complete)
 }
 pub fn move_action(cfg:&Config,req:&Value,authority:&Authority)->Result<Value> {
     let (scope,key,_)=identity(cfg,req)?;let to_scope=Scope::parse(req["to_scope"].as_str().unwrap_or(scope.name()))?;
@@ -171,6 +171,16 @@ pub fn move_action(cfg:&Config,req:&Value,authority:&Authority)->Result<Value> {
 }
 
 #[cfg(test)] mod tests {
+    #[test] fn landed_memory_with_failed_enabled_log_reports_partial_effect() {
+        let temp=tempfile::tempdir().unwrap();let mut cfg=Config::for_root(temp.path().join("lore"));cfg.sync.enabled=true;cfg.sync.classes=["memory".into()].into_iter().collect();
+        files::private_dir(&cfg.root).unwrap();fs::write(cfg.root.join("state.db"),b"owned corrupt fixture").unwrap();
+        let reviewed=review(&cfg,&json!({"cwd":temp.path(),"scope":"user"})).unwrap();
+        let result=action(&cfg,&json!({"cwd":temp.path(),"scope":"user","action":"add","text":"landed fixture","expected":{"key":"user","sha256":reviewed["sha256"]}}),&auth()).unwrap();
+        assert_eq!(result["status"],"refused");assert_eq!(result["applied"],true);assert_eq!(result["error"],"may_have_applied");
+        assert_eq!(read_entries(&cfg.root.join("USER.md")).unwrap(),["landed fixture"]);
+        assert_eq!(fs::read(cfg.root.join("state.db")).unwrap(),b"owned corrupt fixture");
+    }
+
     use super::*;
     fn auth()->Authority{Authority::HumanReview{agent:"fixture".into(),engine:"codex".into()}}
     #[test] fn unicode_cap_duplicate_and_exact_snapshot_are_canonical() {
