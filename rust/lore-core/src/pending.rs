@@ -196,13 +196,13 @@ fn apply_skill(cfg:&Config,item:&Value,authority:&Authority)->Result<()> {
         if !learned{return Err(Error::Untrusted);}let graveyard=cfg.root.join("skills-retired");files::private_dir(&graveyard)?;
         let destination=graveyard.join(format!("{name}-{}",crate::utcnow().replace(':',"")));
         if destination.try_exists()?{return Err(Error::Changed);}fs::rename(&directory,&destination)?;File::open(&graveyard)?.sync_all()?;File::open(&cfg.skills)?.sync_all()?;
-        let _=gate::append_file_op(cfg,"skill","remove",None,&json!({"name":name}));return Ok(());
+        gate::append_file_op(cfg,"skill","remove",None,&json!({"name":name})).map_err(|_|Error::MayHaveApplied)?;return Ok(());
     }
     if existing.is_some()&&!(item["action"]=="update"&&learned){return Err(Error::Untrusted);}
     let body=item["body"].as_str().ok_or(Error::InvalidRequest)?;let body=crate::scrub::scrub(body)?;
     let description=item["description"].as_str().map(crate::scrub::scrub).transpose()?;
     let text=skill_file_text(name,description.as_deref(),&body);if text.len()>crate::MAX_REVIEW_BYTES{return Err(Error::TooLarge);}
-    files::atomic_write(&target,text.as_bytes())?;let _=gate::append_file_op(cfg,"skill","put",None,&json!({"name":name,"body":text}));Ok(())
+    files::atomic_write(&target,text.as_bytes())?;gate::append_file_op(cfg,"skill","put",None,&json!({"name":name,"body":text})).map_err(|_|Error::MayHaveApplied)
 }
 #[derive(Clone,Copy,Debug,Eq,PartialEq)] pub enum ApplyOutcome {Complete,Partial(Error),Uncertain(Error)}
 impl From<memory::FileOutcome> for ApplyOutcome{fn from(outcome:memory::FileOutcome)->Self{match outcome{memory::FileOutcome::Complete=>Self::Complete,memory::FileOutcome::Partial(error)=>Self::Partial(error),memory::FileOutcome::Uncertain(error)=>Self::Uncertain(error)}}}
@@ -272,6 +272,25 @@ pub fn resolve(cfg:&Config,req:&Value,authority:&Authority,applier:&impl Pending
     struct Applier;impl PendingApplier for Applier{fn apply_belief(&self,_:&Config,_:&Value,_:&Authority)->Result<()>{Err(Error::Unavailable)}fn apply_sync(&self,_:&Config,_:&Value,_:&Authority)->Result<()>{Err(Error::Unavailable)}}
     fn auth()->Authority{Authority::HumanReview{agent:"fixture".into(),engine:"claude".into()}}
     fn request(cfg:&Config,id:&str,cwd:&Path)->Value{let snap=snapshot(&proposal_path(cfg,id).unwrap()).unwrap();json!({"cwd":cwd,"pid":id,"decision":"approve","expected":{"sha256":snap.sha256,"inode":snap.inode}})}
+    #[test] fn enabled_skills_only_log_failure_preserves_landed_claim_without_retry() {
+        for action in ["add","update","retire"] {
+            let temp=tempfile::tempdir().unwrap();let mut cfg=Config::for_root(temp.path().join("lore"));
+            cfg.sync.enabled=true;cfg.sync.classes=["skills".to_owned()].into_iter().collect();
+            let target=cfg.skills.join("fixture-skill/SKILL.md");
+            if action!="add"{files::atomic_write(&target,skill_file_text("fixture-skill",None,"old owned fixture").as_bytes()).unwrap();}
+            let id=gate::stage(&cfg,&json!({"kind":"skill","action":action,"name":"fixture-skill","body":"new owned fixture"}),&auth()).unwrap();
+            let req=request(&cfg,&id,temp.path());let original=snapshot(&proposal_path(&cfg,&id).unwrap()).unwrap();
+            fs::write(cfg.root.join("state.db"),b"owned corrupt fixture").unwrap();
+            let reply=resolve(&cfg,&req,&auth(),&Applier).unwrap();
+            assert_eq!(reply["status"],"refused");assert_eq!(reply["error"],"may_have_applied");assert_eq!(reply["applied"],true);
+            assert!(!proposal_path(&cfg,&id).unwrap().exists());assert!(!cfg.root.join("pending/archive").exists());
+            let claims=files::directory_names(&cfg.root.join("pending/.claimed"),10).unwrap();assert_eq!(claims.len(),1);
+            let claimed=snapshot(&cfg.root.join("pending/.claimed").join(&claims[0])).unwrap();assert_eq!(claimed.sha256,original.sha256);assert_eq!(claimed.inode,original.inode);
+            assert_eq!(fs::read(cfg.root.join("state.db")).unwrap(),b"owned corrupt fixture");
+            if action=="retire"{assert!(!target.exists());let retired=files::directory_names(&cfg.root.join("skills-retired"),10).unwrap();assert_eq!(retired.len(),1);}
+            else{assert!(String::from_utf8(files::read_regular(&target,65536).unwrap()).unwrap().contains("new owned fixture"));}
+        }
+    }
     #[test] fn exact_changed_inode_and_model_review_are_refused() {
         let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));let id=gate::stage(&cfg,&json!({"kind":"memory","scope":"user","text":"fixture"}),&auth()).unwrap();
         let req=request(&cfg,&id,temp.path());let file=proposal_path(&cfg,&id).unwrap();let bytes=files::read_regular(&file,65536).unwrap();files::atomic_write(&file,&bytes).unwrap();
