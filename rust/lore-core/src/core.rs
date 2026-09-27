@@ -14,14 +14,16 @@ impl Core {
         &["scrub","snapshot","pending","sync_state","refresh","filemap","refresh_interval","transcript_identity",
           "consult","beliefs","evidence","beliefs_filtered_v1","belief_display_v1",
           "belief_review_v1","belief_action_v1","belief_graph_v1","index_transcript_v1",
-          "session_search_v1","memory_usage_v1","memory_entries_v1","memory_review_v1",
+          "session_search_v1","sessions_recent_v1","sessions_prefix_v1","session_meta_v1","memory_usage_v1","memory_entries_v1","memory_review_v1",
           "memory_action_v1","pending_review_v1","resolve_reviewed_v1","graph_context_v1","graph_awareness_v1",
-          "sync_machine_v1","sync_project_v1","sync_record_v1"]
+          "sync_machine_v1","sync_project_v1","sync_record_v1","runtime_config_v1","store_status_v1"]
     }
     pub fn execute(&mut self,req:&Value)->Result<Value> {
         if !req.is_object()||serde_json::to_vec(req).map_err(|_|Error::InvalidRequest)?.len()>crate::MAX_FRAME_BYTES {return Err(Error::InvalidRequest);}
         let config=&self.config;let auth=&self.authority;
         let value=match req["op"].as_str().ok_or(Error::InvalidRequest)? {
+            "runtime_config_v1"=>crate::config::runtime(config),
+            "store_status_v1"=>{let conn=crate::store::read_only(config)?;let count=conn.query_row("SELECT count(*) FROM beliefs WHERE status='active'",[],|r|r.get::<_,i64>(0))?;json!({"root":config.root,"active_beliefs":count,"version":env!("CARGO_PKG_VERSION")})},
             "scrub"=>json!(crate::scrub::scrub(req["text"].as_str().ok_or(Error::InvalidRequest)?)?),
             "snapshot"=>crate::context::snapshot(config,req)?,
             "refresh"=>crate::context::refresh_with_skills(config,req,&crate::skills::candidates(config,req["prompt"].as_str().unwrap_or(""),4)?)?,
@@ -43,6 +45,9 @@ impl Core {
             "belief_graph_v1"=>crate::graph::read(config,req)?,
             "index_transcript_v1"=>{let indexed=crate::index::live(config,req)?;json!({"indexed":indexed["messages"],"consumed":indexed["lines_consumed"]})},
             "session_search_v1"=>crate::index::search(config,req)?,
+            "sessions_recent_v1"=>crate::history::recent(config,req)?,
+            "sessions_prefix_v1"=>crate::history::prefix(config,req)?,
+            "session_meta_v1"=>crate::history::metadata(config,req)?,
             "memory_usage_v1"=>crate::memory::usage(config,req)?,
             "memory_entries_v1"=>crate::memory::entries(config,req)?,
             "memory_review_v1"=>crate::memory::review(config,req)?,

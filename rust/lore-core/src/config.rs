@@ -121,3 +121,12 @@ pub fn normalize_origin(raw:&str)->String {
     if value.ends_with(".git") {value.truncate(value.len()-4);}
     value.to_lowercase()
 }
+
+/// Canonical stage switch semantics shared with the compatible Python plugin.
+pub fn disabled(name:&str)->bool {
+    std::env::var(name).is_ok_and(|value|!matches!(value.as_str(),""|"0"))
+}
+pub fn runtime(cfg:&Config)->serde_json::Value {
+    let stages=[("inject","LORE_DISABLE_INJECT"),("index","LORE_DISABLE_INDEX"),("review","LORE_DISABLE_REVIEW"),("beliefs","LORE_DISABLE_BELIEFS"),("skills","LORE_DISABLE_SKILLS")];
+    serde_json::json!({"root":cfg.root,"projects_dir":cfg.projects,"version":env!("CARGO_PKG_VERSION"),"disabled_stages":stages.into_iter().filter(|(_,name)|disabled(name)).map(|(stage,_)|stage).collect::<Vec<_>>()})
+}

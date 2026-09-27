@@ -5,6 +5,7 @@ pub mod gate;
 pub mod beliefs;
 pub mod graph;
 pub mod index;
+pub mod history;
 pub mod files;
 pub mod scrub;
 pub mod store;

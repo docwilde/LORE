@@ -50,7 +50,7 @@ pub fn recent(cfg: &Config, req: &Value) -> Result<Value> {
     let conn = store::read_only(cfg)?;
     let slug = config::project_slug(Path::new(cwd));
     let mut stmt = conn.prepare(&format!("SELECT {COLUMNS} FROM sessions ORDER BY CASE WHEN project=? THEN 0 ELSE 1 END,last_ts DESC,session_id LIMIT ?"))?;
-    let mut cursor = stmt.query(params![slug, cap])?;
+    let mut cursor = stmt.query(params![slug, cap as i64])?;
     let mut rows = Vec::new();
     while let Some(row) = cursor.next()? { rows.push(hit(row,true)?); }
     finish(rows)
@@ -64,7 +64,7 @@ pub fn prefix(cfg: &Config, req: &Value) -> Result<Value> {
     let conn = store::read_only(cfg)?;
     // instr is literal: SQL LIKE's '%' and '_' never become wildcards.
     let mut stmt = conn.prepare(&format!("SELECT {COLUMNS} FROM sessions WHERE instr(session_id,?)=1 ORDER BY last_ts DESC,session_id LIMIT ?"))?;
-    let mut cursor = stmt.query(params![term, cap])?;
+    let mut cursor = stmt.query(params![term, cap as i64])?;
     let mut rows = Vec::new();
     while let Some(row) = cursor.next()? { rows.push(hit(row,false)?); }
     finish(rows)
@@ -125,7 +125,7 @@ pub fn metadata(cfg: &Config, req: &Value) -> Result<Value> {
         assert_eq!(prefix(&cfg,&json!({"prefix":"owned_","limit":9})).unwrap().as_array().unwrap().len(),9);
         assert!(prefix(&cfg,&json!({"prefix":"owned_","limit":10})).is_err());
         assert!(prefix(&cfg,&json!({"prefix":"owned_0%"})).is_err());
-        assert_eq!(conn.query_row("SELECT count(*) FROM sessions",[],|r|r.get::<_,u64>(0)).unwrap(),30);
+        assert_eq!(conn.query_row("SELECT count(*) FROM sessions",[],|r|r.get::<_,i64>(0)).unwrap(),30);
     }
     #[test] fn metadata_deduplicates_scrubs_and_rejects_oversized_or_negative_columns() {
         let (_temp,cfg,conn)=fixture();conn.execute("INSERT INTO sessions(session_id,project,title,messages,engine) VALUES('codex:owned','project',?,1,'codex')",["sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012345"]).unwrap();
