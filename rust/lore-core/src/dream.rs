@@ -1,6 +1,6 @@
 //! Reconciliation uses a frozen belief snapshot and short database
 //! transactions. Model promotions remain proposals for human review.
-use std::{collections::{BTreeMap,BTreeSet},fs::{File,OpenOptions},path::Path};
+use std::{collections::{BTreeMap,BTreeSet},fs::File,path::Path};
 use rusqlite::{params,OptionalExtension,TransactionBehavior};
 use serde_json::{json,Value};
 use crate::{beliefs,config::Config,files,gate::Authority,review,store,Error,Result};
@@ -16,10 +16,10 @@ fn tokens(claim:&str)->BTreeSet<String> {
     claim.to_lowercase().split(|c:char|!c.is_ascii_alphanumeric()).filter(|s|!s.is_empty()&&!stop.contains(*s)).map(str::to_owned).collect()
 }
 fn lock(cfg:&Config)->Result<Option<File>> {
-    use std::os::unix::fs::{OpenOptionsExt,MetadataExt};
+    use std::os::unix::fs::MetadataExt;
     files::private_dir(&cfg.root)?;
-    let file=OpenOptions::new().read(true).write(true).create(true).mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK|libc::O_CLOEXEC).open(cfg.root.join("dream.lock"))?;
+    let directory=files::open_directory(&cfg.root)?;
+    let file=files::create_private_file(&directory,std::ffi::OsStr::new("dream.lock"),false)?;
     let meta=file.metadata()?;
     if !meta.is_file()||meta.uid()!=unsafe{libc::geteuid()}||meta.nlink()!=1{return Err(Error::UnsafePath);}
     use std::os::fd::AsRawFd;
