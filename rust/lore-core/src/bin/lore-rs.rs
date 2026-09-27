@@ -14,6 +14,8 @@ fn main() {
         [command] if command == "bridge" => bridge(false),
         [command] if command == "agent-bridge" => bridge(true),
         [command,flag,engine] if command == "review-worker" && flag=="--engine" => review_worker(engine),
+        [group, command, options @ ..] if group == "memory" && command == "show" => memory_show(options),
+        [group, command] if group == "filemap" && command == "show" => filemap_show(),
         _ => Err(Error::InvalidRequest),
     };
     if let Err(error) = outcome {
@@ -76,4 +78,67 @@ fn write_frame(output: &mut impl Write, reply: &Value, limit: usize) -> lore_cor
     output.write_all(&raw)?;
     output.flush()?;
     Ok(())
+}
+
+// Readback advertised by native context. These commands open only existing
+// curated files/labels; they never initialize a database, lock or store.
+const SHOW_BYTES: usize = 64 * 1024;
+fn show_output(text: String) -> lore_core::Result<()> {
+    if text.len() > SHOW_BYTES { return Err(Error::TooLarge); }
+    if text.chars().any(|c| c.is_control() && c != '\n') { return Err(Error::Untrusted); }
+    let text = lore_core::scrub::scrub(&text)?;
+    if text.len() > SHOW_BYTES { return Err(Error::TooLarge); }
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(text.as_bytes())?;
+    stdout.flush()?;
+    Ok(())
+}
+fn memory_show(options: &[String]) -> lore_core::Result<()> {
+    use lore_core::{config, gate, memory::{self, Scope}};
+    let mut scope = None;
+    let mut host = None;
+    let mut at = 0;
+    while at < options.len() {
+        let value = options.get(at + 1).ok_or(Error::InvalidRequest)?;
+        match options[at].as_str() {
+            "--scope" if scope.is_none() => scope = Some(Scope::parse(value)?),
+            "--host" if host.is_none() && !value.is_empty() && value.chars().count() <= 255
+                && !value.chars().any(char::is_control) => host = Some(value.as_str()),
+            _ => return Err(Error::InvalidRequest),
+        }
+        at += 2;
+    }
+    if host.is_some() && scope.is_some_and(|scope| scope != Scope::Machine) { return Err(Error::InvalidRequest); }
+    let cfg = Config::from_env(Duration::from_secs(3))?;
+    let cwd = std::env::current_dir()?;
+    let slug = config::project_slug(&cwd);
+    let mut out = String::new();
+    for tier in [Scope::User, Scope::Project, Scope::Machine] {
+        if scope.is_some_and(|scope| scope != tier) { continue; }
+        let key = if tier == Scope::Machine { memory::resolve_machine(&cfg, host) } else { slug.clone() };
+        let entries = memory::read_entries(&tier.path(&cfg, &key)?)?;
+        let label = if tier == Scope::Machine { format!("machine — {key}") } else { tier.name().into() };
+        out.push_str(&format!("## {label} ({}){}\n", memory::usage_line(&entries, tier.cap(&cfg)), gate::provenance_tag(&cfg, "memory", &tier.bucket(&key), &entries)));
+        if entries.is_empty() { out.push_str("(empty)\n"); }
+        else {
+            for (entry, source) in entries.iter().zip(gate::source_labels(&cfg, &tier.bucket(&key), &entries)) {
+                out.push_str(&format!("- {entry}{}\n", source.map(|engine| format!(" [source: {engine}]")).unwrap_or_default()));
+                if out.len() > SHOW_BYTES { return Err(Error::TooLarge); }
+            }
+        }
+        if tier == Scope::Machine {
+            let others = memory::known_machines(&cfg).into_iter().filter(|name| name != &key).collect::<Vec<_>>();
+            if !others.is_empty() { out.push_str(&format!("\nother machines on file: {} — lore-rs memory show --scope machine --host <name>\n", others.join(", "))); }
+        }
+    }
+    show_output(out)
+}
+fn filemap_show() -> lore_core::Result<()> {
+    use lore_core::{config, filemap, gate, memory};
+    let cfg = Config::from_env(Duration::from_secs(3))?;
+    let cwd = std::env::current_dir()?;
+    let slug = config::project_slug(&cwd);
+    let entries = memory::read_entries(&filemap::path(&cfg, &slug)?)?;
+    let out = format!("## file map ({}) — {slug}{}\n{}\n", memory::usage_line(&entries, cfg.filemap_cap), gate::provenance_tag(&cfg, "filemap", &slug, &entries), if entries.is_empty() { "(empty)".into() } else { memory::render_entries(&entries).trim_end().to_owned() });
+    show_output(out)
 }
