@@ -73,7 +73,7 @@ from .beliefs import (
 )
 from .config import ROOT, SKILLS_DIR, private_dir, utcnow, valid_skill_name
 from .filemap import SEP, filemap_add, filemap_path, filemap_remove, filemap_replace
-from .gate import entry_key
+from .gate import current_engine, entry_key
 from .memory import (
     memory_add,
     memory_bucket,
@@ -642,6 +642,15 @@ def _apply_belief(conn: sqlite3.Connection, op: dict) -> bool:
             via=payload.get("via", "direct"), uid=uid,
             source_engine=payload.get("source_engine", "unknown"),
         )
+        if created:
+            # Replay carries original informational provenance. The receiver's
+            # process writer is not the author; MAC/exact approval admission
+            # already happened above, and these labels grant no authority.
+            conn.execute(
+                "UPDATE beliefs SET writer = ?, via = ?, source_engine = ? WHERE id = ?",
+                (payload.get("writer", "unknown"), payload.get("via", "direct"),
+                 current_engine(payload.get("source_engine", "unknown")), bid),
+            )
         if not created:
             # FOLDED onto an existing active row with the same (subject,
             # lower(claim)) -- the same rule belief_insert already applies to a

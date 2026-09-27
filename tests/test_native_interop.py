@@ -50,14 +50,38 @@ def verify(op):
     return hmac.compare_digest(hmac.new(KEY.encode(), raw, hashlib.sha256).hexdigest(), op["mac"])
 
 
-def snapshot(root, compare_writer=True):
+def snapshot(root):
     with sqlite3.connect(f"file:{root / 'state.db'}?mode=ro", uri=True) as conn:
         beliefs = conn.execute("SELECT uid,subject,claim,confidence,status,writer,via,source_engine FROM beliefs ORDER BY uid").fetchall()
         outcomes = conn.execute("SELECT uid,event,source,session_id,agent,note FROM belief_outcomes ORDER BY uid").fetchall()
-    if not compare_writer:
-        beliefs = [(*row[:5], *row[6:]) for row in beliefs]
     return {"beliefs": beliefs, "outcomes": outcomes,
             "user": (root / "USER.md").read_text() if (root / "USER.md").exists() else ""}
+
+
+class PythonReplayProvenance(unittest.TestCase):
+    def test_verified_insert_preserves_original_labels_and_fold_retains_first_origin(self):
+        with tempfile.TemporaryDirectory(prefix="lore-python-replay-") as directory:
+            base=Path(directory);root=base/"lore";env=environment(base,root,"bbbbbbbb-2222-4222-8222-222222222222")
+            code="""
+import json
+from lore_core.store import db_connect
+from lore_core.sync_apply import apply_ops
+from lore_core.sync_oplog import compute_mac
+conn=db_connect()
+ops=[]
+for seq,uid,writer,via,engine in [(1,'fixture-first','terminal','approved','codex'),(2,'fixture-folded','derived','dream','claude')]:
+ op={'op_id':f'fixture-op-{seq}','machine_id':'fixture-author','machine_seq':seq,'lamport':seq,'class':'belief','op':'insert','project_key':None,'payload':{'uid':uid,'subject':'user','claim':'owned exact replay fact','confidence':0.8,'writer':writer,'via':via,'source_engine':engine,'evidence':{}},'created':'2026-01-01T00:00:00Z'}
+ op['mac']=compute_mac(op,'native-interop-owned-fixture-key');ops.append(op)
+result=apply_ops(conn,ops);conn.commit()
+rows=conn.execute('SELECT uid,writer,via,source_engine FROM beliefs').fetchall()
+alias=conn.execute('SELECT uid FROM sync_belief_aliases').fetchall()
+conn.close();print(json.dumps([result,rows,alias]))
+"""
+            child=subprocess.run([sys.executable,"-c",code],text=True,capture_output=True,cwd=REPO,env=env,timeout=10)
+            self.assertEqual(child.returncode,0,child.stderr);result,rows,aliases=json.loads(child.stdout)
+            self.assertEqual(result["applied"],2,result)
+            self.assertEqual(rows,[["fixture-first","terminal","approved","codex"]])
+            self.assertEqual(aliases,[["fixture-folded"]])
 
 
 @unittest.skipUnless(BINARY.is_file(), "set LORE_TEST_NATIVE_BINARY to a built native fixture executable")
@@ -150,11 +174,8 @@ print(json.dumps([first,second]))
 ''', ops)
         self.assertEqual(result[0]["applied"], 3, result)
         self.assertEqual(result[1]["duplicate"], 3, result)
-        # Python 0.60.2 replay attributes writer_class() to the receiver; native
-        # preserves the original wire writer. Compare compatible state and
-        # independently pin native provenance instead of endorsing that bug.
         self.assertEqual(snapshot(self.native_root)["beliefs"][0][5], "terminal")
-        self.assertEqual(snapshot(self.python_root, False), snapshot(self.native_root, False))
+        self.assertEqual(snapshot(self.python_root), snapshot(self.native_root))
         self.assertEqual({op["op_id"]: op for op in read_ops(self.python_root)}, {op["op_id"]: op for op in ops})
 
     def test_streaming_index_partial_tail_matches_python_without_duplicate_history(self):

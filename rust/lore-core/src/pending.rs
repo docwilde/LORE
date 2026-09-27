@@ -44,20 +44,61 @@ fn scrub_display(value:&Value,depth:usize)->Result<Value>{
         _=>value.clone(),
     })
 }
+fn public_project_key(value:&mut Value)->Result<()> {
+    match value {Value::Null=>{},Value::String(text) if !text.is_empty()&&text.len()<=2048&&!text.chars().any(char::is_control)=>{
+        if crate::scrub::scrub(text)?!=*text{return Err(Error::Untrusted);}
+    },_=>return Err(Error::InvalidRequest)}
+    // This is a typed public project identity, not a credential named *_key.
+    *value=Value::Null;Ok(())
+}
+fn content_pairs(value:&Value,depth:usize)->Result<()> {
+    if depth>32{return Err(Error::TooLarge);}
+    match value {
+        Value::Object(fields)=>for (key,value) in fields {
+            if value.is_string()||value.is_number(){let pair=json!({key:value});let text=serde_json::to_string(&pair).map_err(|_|Error::Unavailable)?;
+                if crate::scrub::scrub(&text)?!=text{return Err(Error::Untrusted);}}
+            content_pairs(value,depth+1)?;
+        },
+        Value::Array(values)=>for value in values{content_pairs(value,depth+1)?;},
+        _=>{},
+    }Ok(())
+}
 fn reviewable(snapshot:&Snapshot)->Result<()>{
     let mut checked=snapshot.item.clone();
     if checked["kind"]=="sync"{
         let op=checked.get_mut("op").filter(|value|value.is_object()).ok_or(Error::InvalidRequest)?;
+        for (key,cap) in [("op_id",128),("machine_id",128),("class",64),("op",64)]{
+            if !op[key].as_str().is_some_and(|text|!text.is_empty()&&text.len()<=cap&&!text.chars().any(char::is_control)){return Err(Error::InvalidRequest);}
+        }
+        for key in ["machine_seq","lamport"]{if !op[key].as_i64().is_some_and(|value|value>=0){return Err(Error::InvalidRequest);}}
+        if !op["payload"].is_object(){return Err(Error::InvalidRequest);}
         if let Some(mac)=op.get("mac").filter(|value|!value.is_null()){
             if !mac.as_str().is_some_and(|mac|mac.len()==64&&mac.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte))){return Err(Error::InvalidRequest);}
         }
-        // Public typed envelope HMAC is checked separately by the sync
-        // adapter. This clone is ONLY a secret check; displayed raw bytes,
-        // digest, and the approved operation remain exactly unchanged.
+        let id=op["op_id"].as_str().unwrap().to_owned();
+        let project_key=op.get_mut("project_key").ok_or(Error::InvalidRequest)?;public_project_key(project_key)?;
+        if op["class"]=="session"&&op["op"]=="upsert"{if let Some(value)=op["payload"].get_mut("project_key"){public_project_key(value)?;}}
+        if op["class"]=="belief"&&matches!(op["op"].as_str(),Some("insert"|"reinforce")){
+            if let Some(value)=op["payload"]["evidence"].get_mut("project_key"){public_project_key(value)?;}
+        }
+        if matches!(op["class"].as_str(),Some("memory"|"filemap"))&&matches!(op["op"].as_str(),Some("remove"|"replace")){
+            let field=if op["op"]=="remove"{"key"}else{"old_key"};
+            let value=op["payload"].get_mut(field).ok_or(Error::InvalidRequest)?;
+            let key=value.as_str().filter(|key|key.len()<=4096&&!key.chars().any(char::is_control)).ok_or(Error::InvalidRequest)?;
+            let (prefix,digest)=key.rsplit_once(':').ok_or(Error::InvalidRequest)?;
+            if !prefix.starts_with("memory:")&&!prefix.starts_with("filemap:")||digest.len()!=20||!digest.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte)){return Err(Error::InvalidRequest);}
+            *value=Value::Null;
+        }
+        // MAC and deterministic proposal UID are public typed identifiers.
+        // This clone is ONLY a secret check; raw review bytes and exact proof
+        // are unchanged, and neither metadata field grants write authority.
         op["mac"]=Value::Null;
+        if checked["uid"]==crate::digest(id.as_bytes()){checked["uid"]=Value::Null;}
     }
-    let serialized=serde_json::to_string(&checked).map_err(|_|Error::Unavailable)?;
-    if scrub_display(&checked,0)?!=checked||crate::scrub::scrub(&serialized)?!=serialized{return Err(Error::Untrusted);}Ok(())
+    if scrub_display(&checked,0)?!=checked{return Err(Error::Untrusted);}
+    // Checking individual scalar pairs catches {api_key: <secret>} while
+    // avoiding a regex crossing JSON null/array/object structural delimiters.
+    content_pairs(&checked,0)
 }
 pub fn list(cfg:&Config,req:&Value)->Result<Value> {
     let slug=project_slug(gate::cwd(req)?);let offset=req.get("offset").map_or(Some(0),Value::as_u64).filter(|value|*value<=10000).ok_or(Error::InvalidRequest)? as usize;
@@ -256,13 +297,22 @@ pub fn resolve(cfg:&Config,req:&Value,authority:&Authority,applier:&impl Pending
     #[test] fn sync_review_exempts_only_typed_mac_and_refuses_nested_secret_or_secret_key() {
         let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));
         for payload in [json!({"text":"safe fixture"}),json!({"api_key":"abcdefghijklmnop"}),json!({"token=abcdefghijklmnop":"safe"})]{
-            let id=gate::stage(&cfg,&json!({"kind":"sync","op":{"class":"memory","op":"add","mac":"a".repeat(64),"payload":payload}}),&auth()).unwrap();
+            let id=gate::stage(&cfg,&json!({"kind":"sync","op":{"op_id":"fixture-op","machine_id":"fixture-machine","machine_seq":1,"lamport":1,"project_key":null,"class":"memory","op":"add","mac":"a".repeat(64),"payload":payload}}),&auth()).unwrap();
             let req=json!({"cwd":temp.path(),"pid":id});let result=review(&cfg,&req);
             if payload.get("text").is_some(){let raw=result.unwrap()["raw"].as_str().unwrap().to_owned();assert!(raw.contains(&"a".repeat(64)));}
             else{assert_eq!(result,Err(Error::Untrusted));}
         }
         let id=gate::stage(&cfg,&json!({"kind":"sync","op":{"mac":"b".repeat(63),"payload":{"text":"safe"}}}),&auth()).unwrap();
         assert_eq!(review(&cfg,&json!({"cwd":temp.path(),"pid":id})),Err(Error::InvalidRequest));
+    }
+    #[test] fn typed_sync_null_project_and_deterministic_uid_are_reviewable_without_exempting_payload_hashes() {
+        let temp=tempfile::tempdir().unwrap();let cfg=Config::for_root(temp.path().join("lore"));
+        let op=json!({"op_id":"fixture-op","machine_id":"fixture-machine","machine_seq":1,"lamport":1,"class":"belief","op":"insert","project_key":null,"mac":"a".repeat(64),"payload":{"uid":"fixture-belief","subject":"user","claim":"owned fixture","confidence":0.8,"evidence":{"project_key":null}}});
+        let path=cfg.root.join("pending/fixture.json");let item=json!({"kind":"sync","uid":crate::digest(b"fixture-op"),"op":op});
+        files::atomic_write(&path,&serde_json::to_vec(&item).unwrap()).unwrap();
+        let req=json!({"cwd":temp.path(),"pid":"fixture"});let result=review(&cfg,&req).unwrap();assert_eq!(result["complete"],true);assert_eq!(serde_json::from_str::<Value>(result["raw"].as_str().unwrap()).unwrap(),item);
+        let mut unsafe_item=item;unsafe_item["op"]["payload"]["claim"]=json!("b".repeat(64));files::atomic_write(&path,&serde_json::to_vec(&unsafe_item).unwrap()).unwrap();assert_eq!(review(&cfg,&req),Err(Error::Untrusted));
+        unsafe_item["op"]["payload"]["claim"]=json!("owned fixture");unsafe_item["op"]["payload"]["api_key"]=json!("not-real-fixture-credential");files::atomic_write(&path,&serde_json::to_vec(&unsafe_item).unwrap()).unwrap();assert_eq!(review(&cfg,&req),Err(Error::Untrusted));
     }
     #[test] fn indeterminate_adapter_failure_retains_private_claim_without_retryable_original() {
         struct Uncertain;impl PendingApplier for Uncertain{fn apply_belief(&self,_:&Config,_:&Value,_:&Authority)->Result<()>{Err(Error::MayHaveApplied)}fn apply_sync(&self,_:&Config,_:&Value,_:&Authority)->Result<()>{Err(Error::MayHaveApplied)}}
