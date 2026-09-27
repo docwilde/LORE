@@ -12,6 +12,21 @@ pub struct Config {
     pub machine_cap: usize,
     pub filemap_cap: usize,
     pub timeout: Duration,
+    pub sync: SyncConfig,
+}
+#[derive(Clone)]
+pub struct SyncConfig {pub enabled:bool,pub classes:std::collections::HashSet<String>,pub key:Option<String>}
+impl std::fmt::Debug for SyncConfig {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {
+        f.debug_struct("SyncConfig").field("enabled",&self.enabled).field("classes",&self.classes).field("key_configured",&self.key.is_some()).finish()
+    }
+}
+impl SyncConfig {
+    pub fn from_env()->Self {
+        let enabled=std::env::var("LORE_DISABLE_SYNC").map_or(true,|s|s.is_empty()||s=="0");
+        let classes=std::env::var("LORE_SYNC_CLASSES").unwrap_or_else(|_|"memory,filemap,beliefs,pending,skills,sessions".into()).split(',').map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect();
+        Self{enabled,classes,key:std::env::var("LORE_SYNC_HMAC_KEY").ok().filter(|s|!s.is_empty())}
+    }
 }
 impl Config {
     pub fn from_env(timeout: Duration) -> Result<Self> {
@@ -26,12 +41,12 @@ impl Config {
         let codex_sessions = env::var_os("LORE_CODEX_SESSIONS_DIR").map(PathBuf::from).unwrap_or_else(|| codex_home.join("sessions"));
         Ok(Self { root, skills, projects, codex_sessions,
             user_cap: cap("LORE_USER_CAP", 9000)?, project_cap: cap("LORE_MEMORY_CAP", 8800)?,
-            machine_cap: cap("LORE_MACHINE_CAP", 4400)?, filemap_cap: cap("LORE_FILEMAP_CAP", 4400)?, timeout })
+            machine_cap: cap("LORE_MACHINE_CAP", 4400)?, filemap_cap: cap("LORE_FILEMAP_CAP", 4400)?, timeout,sync:SyncConfig::from_env() })
     }
     pub fn for_root(root: PathBuf) -> Self {
         Self { skills: root.join("skills"), projects: root.join("session-projects"),
             codex_sessions: root.join("codex-sessions"), root, user_cap:9000, project_cap:8800,
-            machine_cap:4400, filemap_cap:4400, timeout:Duration::from_secs(3) }
+            machine_cap:4400, filemap_cap:4400, timeout:Duration::from_secs(3),sync:SyncConfig::from_env() }
     }
 }
 fn cap(name: &str, default: usize) -> Result<usize> {
