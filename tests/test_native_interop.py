@@ -161,6 +161,34 @@ class NativeInterop(unittest.TestCase):
                             expected={"sha256": review["sha256"], "inode": review["inode"]})
         self.assertEqual(result["status"], "approved", result)
 
+    def test_concurrent_python_native_authors_converge_exact_memory_bytes(self):
+        self.oracle("""
+import json
+from lore_core.memory import memory_add
+assert memory_add('user', '', 'zebra Python author', source_engine='codex') is None
+assert memory_add('user', '', 'éclair Python author', source_engine='codex') is None
+print(json.dumps(True))
+""")
+        for text in ("😀 native author", "Alpha native author"):
+            reviewed = self.value("memory_review_v1", scope="user")
+            result = self.value("memory_action_v1", scope="user", action="add", text=text,
+                                expected={"key": "user", "sha256": reviewed["sha256"]})
+            self.assertEqual(result["status"], "applied")
+        python_ops, native_ops = read_ops(self.python_root), read_ops(self.native_root)
+        for op in reversed(python_ops):
+            self.approve({"kind": "sync", "op": op})
+        result = self.oracle("""
+import json,sys
+from lore_core.store import db_connect
+from lore_core.sync_apply import apply_ops
+conn=db_connect();result=apply_ops(conn,json.load(sys.stdin));conn.commit();conn.close()
+print(json.dumps(result))
+""", list(reversed(native_ops)))
+        self.assertEqual(result["applied"], 2)
+        expected = "- Alpha native author\n- zebra Python author\n- éclair Python author\n- 😀 native author\n".encode()
+        self.assertEqual((self.python_root / "USER.md").read_bytes(), expected)
+        self.assertEqual((self.native_root / "USER.md").read_bytes(), expected)
+
     def test_python_producer_to_native_exact_review_preserves_identity_and_no_echo(self):
         self.oracle('''
 import json
