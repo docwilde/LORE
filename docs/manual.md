@@ -26,7 +26,8 @@ decisions were made, see [`user-model-channel-separation.md`](user-model-channel
 | `/lore:config` | Prints the stage table and toggles stages by multi-select; writes `settings.json` → `"env"`. |
 | `/lore:help` | One-screen reference card: commands plus the memory model. |
 
-Everything runs as a plain CLI too — `python3 <plugin>/bin/lore.py --help`, stdlib only:
+Everything runs through the native CLI too — `<plugin>/bin/lore --help`
+or the installed `lore` command:
 
 `inject` · `snapshot` · `memory` · `filemap` · `search` · `session` · `index` · `review` · `backfill` · `pending` · `approve` · `reject` · `belief` · `ask` · `outcome` · `audit` · `consult` · `stats` · `dream` · `crosscheck` · `status` · `motd` · `statusline` · `provenance` · `config` · `doctor` · `sync` · `teardown` · `reset`
 
@@ -338,4 +339,6 @@ Only `lore_core/` is packaged — `bin/`, `hooks/`, `commands/` and `skills/` ar
 
 `.claude-plugin/plugin.json` stays the one place the version is written. The build reads it, `lore_core.__version__` reads it, and an installed wheel — which carries no manifest — falls back to its own metadata, built from that same file.
 
-**This changes nothing for plugin users.** `/plugin install lore` copies the same tree and runs the same `bin/lore.py`; nothing on the plugin path reads `pyproject.toml`.
+The plugin runs native `bin/lore`; Python packaging is retained for compatibility
+library consumers and interoperability tests. Plugin operation does not use
+`pyproject.toml` or a Python interpreter.

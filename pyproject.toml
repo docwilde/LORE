@@ -1,19 +1,7 @@
-# Packaging metadata for `lore_core` -- the importable half of this repo.
-#
-# LORE is a Claude Code plugin first: `/plugin install lore` copies this
-# whole tree and runs `bin/lore.py` out of it. That path does not read this
-# file and is unchanged by it. What this file adds is the SECOND carrier --
-# `pip install`/`uv add` of `lore-core` as an ordinary distribution, so a
-# consumer that imports the library (DOXA, whose daemon runs lore_core
-# in-process) can DECLARE the dependency instead of reaching into a plugin
-# checkout on the machine and hoping it is there.
-#
-# Only `lore_core/` is importable. The wheel includes one copy of bin/lore.py
-# inside that package because context snapshots and detached jobs invoke it
-# by absolute path. Other plugin assets remain outside the wheel.
-#
-# Still stdlib-only at runtime: `dependencies` is deliberately empty and
-# hatchling is a BUILD requirement, present only while a wheel is made.
+# Python compatibility library metadata. Production plugin hooks, CLI and
+# network transports use the native Rust core and bin/lore launcher.
+# The wheel retains the Python implementation for downstream library consumers
+# and the interoperability oracle; it does not install a CLI entrypoint.
 
 [project]
 name = "lore-core"
@@ -58,10 +46,7 @@ Homepage = "https://github.com/docwilde/LORE"
 Repository = "https://github.com/docwilde/LORE"
 Changelog = "https://github.com/docwilde/LORE/blob/main/CHANGELOG.md"
 
-# No [project.scripts]. `lore` is the plugin's CLI, invoked as
-# `python3 <plugin>/bin/lore.py` from hooks and commands that resolve it by
-# path; installing a second `lore` binary on PATH from a library dependency
-# would give a machine two entry points that can be different versions.
+# No [project.scripts]: native task/install owns the lore command.
 
 [build-system]
 # >=1.27 is the first hatchling that speaks PEP 639 (`license` as an SPDX

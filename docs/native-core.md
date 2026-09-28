@@ -1,9 +1,9 @@
 # Native LORE core
 
-LORE 0.61.0 includes `rust/lore-core`, the canonical Rust library used by
+LORE includes `rust/lore-core`, the canonical Rust library used by
 DOXA's native runtime. It uses the existing curated files, `state.db`, pending
 proposals, transcript index and signed operation log. Existing stores remain
-compatible with the Python plugin; no export or replacement database is needed.
+compatible with existing plugin stores; no export or replacement database is needed.
 
 ## Build and inspect
 
@@ -48,9 +48,10 @@ derived memory writes create proposals rather than changing curated memory.
 `lore-rs bridge` is the trusted local UI carrier; `agent-bridge` binds the model
 operator identity on its first catalog request. These entrypoints are local
 carrier APIs, not a sandbox against a process already running as the same user.
-The standalone Python plugin, transport services and administrative CLI remain
-available for existing Claude Code and Codex installations. DOXA uses the Rust
-library in-process and the native CLI for its retained SDK/MCP adapters.
+Claude Code and Codex hooks use `bin/lore`, the native launcher. The standalone
+CLI, MCP server, review, setup and administrative workflows use the same Rust
+core. DOXA links the library and uses the native carrier for detached work.
+Python modules remain development compatibility references.
 
 ## Bounds and failure semantics
 
@@ -89,3 +90,25 @@ This upgrade does not rerun operations already marked applied. A store affected
 by older project-key lookup or overwritten file-map conflicts must be compared
 with the author’s retained log and reconciled through reviewed memory/file-map
 operations. Local edits and pending proposals are not reset automatically.
+
+## Native command and network runtime
+
+`./task install` builds and installs `lore-rs` and a `lore` launcher. Plugin
+`bin/lore` accepts a matching installed carrier or builds one in a private disk
+cache on a non-hook command. Hooks never compile; run setup before enabling them.
+`LORE_RS` selects an explicit version-matched carrier.
+
+The native CLI includes setup/teardown, scoped memory/file maps, beliefs,
+evidence and graph operations, session search/indexing, review/backfill,
+learned skills, calibration, reconciliation and project relocation. Memory
+imports and derived replacements still enter staged review. Unknown flags and
+unsafe ownership proofs produce refusals rather than partial success claims.
+
+Hub and peer clients use Reqwest with TLS validation, bounded pages and no
+redirects. Peer serving uses Hyper with connection, header and body bounds.
+Pull-only peer service requires a configured shared secret by default, even
+on loopback; forwarding a Tailscale login header is not authentication.
+`--auth none` is an explicit unauthenticated pull-only choice. Full pulls are
+validated before application; push acknowledgements advance only the settled
+prefix. Offline bundles retain original signed bytes and refuse overwriting
+an existing destination.

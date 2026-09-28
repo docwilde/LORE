@@ -6,7 +6,7 @@ allowed-tools: Bash, Read, Edit, AskUserQuestion
 Run `"${CLAUDE_PLUGIN_ROOT}/bin/lore" doctor` and the extra checks from `/lore:doctor` (permissions allowlist, unported auto-memory entries, unreviewed session backlog). Then fix what was found, **one change at a time, each behind its own confirmation** — show exactly what will change before changing it:
 
 1. **Built-in auto-memory still active** → add `"autoMemoryEnabled": false` to `~/.claude/settings.json` (Read it first; create the key without disturbing the rest; valid JSON after).
-2. **No permissions allowlist for the lore CLI** → add `"Bash(python3 */plugins/lore/bin/lore.py *)"` to `permissions.allow` in `~/.claude/settings.json`, so memory writes stop costing a prompt each.
+2. **No permissions allowlist for the lore CLI** → add `"Bash(*/plugins/lore/bin/lore *)"` to `permissions.allow` in `~/.claude/settings.json`, so memory writes stop costing a prompt each.
 3. **Unported auto-memory entries** → read each `~/.claude/projects/<slug>/memory/*.md` for the current project, condense each into one dense declarative line, show the list with proposed scopes (user vs project), and on approval `lore memory add` each. Warn that cap errors mean consolidating before continuing.
 4. **Empty session index** → prime it: `"${CLAUDE_PLUGIN_ROOT}/bin/lore" index` (fast, incremental afterwards).
 5. **Unreviewed session backlog** → see below. Indexing only builds the search tier; every session that ended before lore was installed never fired `review`, so memory and the belief store stay empty until the backlog is reviewed once.
