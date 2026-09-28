@@ -165,7 +165,7 @@ impl Transport {
                     format!(":{p}")
                 }
             )
-        } else if p == port() {
+        } else if p == 8765 {
             format!("peer:{host}")
         } else if p == 80 {
             format!("peer:http://{host}")
@@ -391,14 +391,12 @@ fn apply_drained(cfg: &Config, ops: &[Value]) -> Result<Value> {
         chunks.push(start..ordered.len());
     }
     let mut report = empty_report();
-    for (index, range) in chunks.into_iter().enumerate() {
-        let result = sync_apply::apply_ops(cfg, &ordered[range]).map_err(|error| {
-            if index > 0 {
-                Error::MayHaveApplied
-            } else {
-                error
-            }
-        })?;
+    for range in chunks {
+        // Receipt/application may fail after earlier rows in the first chunk
+        // have landed. Once the receiver is entered, its global error cannot
+        // certify that no effect occurred; retries remain idempotent.
+        let result =
+            sync_apply::apply_ops(cfg, &ordered[range]).map_err(|_| Error::MayHaveApplied)?;
         for (k, v) in result.as_object().ok_or(Error::Unavailable)? {
             report[k] =
                 json!(report[k].as_u64().unwrap_or(0) + v.as_u64().ok_or(Error::Unavailable)?);

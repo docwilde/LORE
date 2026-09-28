@@ -808,3 +808,74 @@ fn remote_error_code_cannot_echo_credentials_into_diagnostics() {
     assert!(!format!("{error:?}").contains("fixture_secret"));
     h.join().unwrap();
 }
+
+#[test]
+fn native_cli_import_reports_possible_effects_within_first_chunk() {
+    let (t, dest) = config();
+    let (_source_temp, source) = config();
+    let rows = [
+        op("Synthetic first receipt", 1),
+        op("Synthetic second receipt", 2),
+    ];
+    assert_eq!(
+        lore_core::sync_apply::apply_ops(&source, &rows).unwrap()["applied"],
+        2
+    );
+    let path = t.path().join("receipt-failure.json");
+    net::export_bundle(&source, &path).unwrap();
+    let conn = store::connect(&dest).unwrap();
+    conn.execute_batch("CREATE TRIGGER reject_second BEFORE INSERT ON sync_ops WHEN NEW.machine_seq=2 BEGIN SELECT RAISE(ABORT,'synthetic second receipt failure'); END").unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lore-rs"))
+        .args(["sync", "import"])
+        .arg(&path)
+        .env_clear()
+        .env("HOME", t.path())
+        .env("LORE_ROOT", &dest.root)
+        .env("LORE_PROJECTS_DIR", &dest.projects)
+        .env("LORE_CODEX_SESSIONS_DIR", &dest.codex_sessions)
+        .env("LORE_SYNC_HMAC_KEY", KEY)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("may_have_applied"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM sync_ops", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        lore_core::memory::read_entries(&dest.root.join("USER.md")).unwrap(),
+        ["Synthetic first receipt"]
+    );
+}
+
+#[test]
+fn changing_default_peer_port_cannot_reuse_another_endpoint_cursor() {
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => std::env::set_var("LORE_SYNC_PEER_PORT", value),
+                None => std::env::remove_var("LORE_SYNC_PEER_PORT"),
+            }
+        }
+    }
+    let _restore = Restore(std::env::var_os("LORE_SYNC_PEER_PORT"));
+    std::env::set_var("LORE_SYNC_PEER_PORT", "8765");
+    let legacy = Transport::peer("host.test").unwrap().peer;
+    std::env::set_var("LORE_SYNC_PEER_PORT", "9000");
+    let changed = Transport::peer("host.test").unwrap().peer;
+    assert_ne!(legacy, changed);
+    assert_eq!(
+        changed,
+        Transport::peer("http://host.test:9000/v1").unwrap().peer
+    );
+    assert_eq!(
+        legacy,
+        Transport::peer("http://host.test:8765/v1").unwrap().peer
+    );
+}
