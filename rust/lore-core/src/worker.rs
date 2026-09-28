@@ -51,7 +51,7 @@ pub fn run(cfg: &Config, req: &Value, engine: &str) -> Result<()> {
             let cwd = crate::gate::cwd(req)?;
             if let Some(dream) = crate::dream::build(cfg, cwd, &authority)? {
                 let response = review_provider(
-        cfg,
+                    cfg,
                     &program,
                     "LORE_DREAMER_MODEL",
                     "sonnet",

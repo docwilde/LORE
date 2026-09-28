@@ -165,6 +165,17 @@ impl Fixture {
             .stdin(Stdio::piped())
             .stdout(Stdio::from(fs::File::create(&output).unwrap()))
             .stderr(Stdio::from(fs::File::create(&error).unwrap()));
+        if mode == "persisted_preferences" {
+            files::atomic_write(&self.home.join("settings.json"), json!({"env":{
+                "LORE_CLAUDE_BIN":self.home.join("provider"),
+                "LORE_DERIVER_MODEL":"owned-model",
+                "LORE_DREAMER_MODEL":"owned-model"
+            }}).to_string().as_bytes()).unwrap();
+            command.env("CLAUDE_CONFIG_DIR", &self.home)
+                .env_remove("LORE_CLAUDE_BIN")
+                .env_remove("LORE_DERIVER_MODEL")
+                .env_remove("LORE_DREAMER_MODEL");
+        }
         // The production supervisor creates a fresh session/process group.
         unsafe {
             command.pre_exec(|| {
@@ -575,5 +586,16 @@ fn failed_automatic_dream_preserves_landed_review_and_reports_no_safe_retry() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["derived_by"], "doxa-deriver");
     assert_eq!(items[0]["source_engine"], "claude");
+    fixture.assert_not_curated();
+}
+
+#[test]
+fn persisted_worker_provider_and_model_preferences() {
+    let fixture = Fixture::new("claude", false);
+    let mut worker = fixture.spawn("claude", "persisted_preferences");
+    worker.observe_provider(&fixture.home);
+    assert!(worker.finish(Duration::from_secs(5)).unwrap().success());
+    assert!(worker.stderr().is_empty());
+    assert_eq!(fixture.pending().len(),1);
     fixture.assert_not_curated();
 }
