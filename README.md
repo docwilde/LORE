@@ -30,13 +30,15 @@ and relations between beliefs do not turn them into approved facts.
 
 ## What you get
 
-- **Shared memory.** Capped, reviewed user and repo facts; host facts stay local.
+- **Claude Code, Codex, and DOXA memory.** Share capped, reviewed user and
+  project facts across engines; host facts stay local.
 - **Beliefs with evidence.** Query conclusions, citations, and their graph on demand.
 - **Session search.** Local FTS5 index of Claude Code, DOXA, and Codex transcripts.
 - **File maps.** A short `path — purpose` guide to important project files.
 - **Learned skills.** Verified recipes are proposed, evaluated, and updated or retired.
 - **Cross-machine sync.** Signed hub, peer, or offline transfer; off by default.
-- **Agent integration.** Shared startup context, Claude review, and explicit Codex proposals.
+- **Agent integration.** Claude Code and Codex plugins inject startup context;
+  Claude review and explicit Codex writes retain the proposal and approval gates.
 
 Engine-origin labels add context, not authority. The [manual](docs/manual.md)
 explains the write gates, hooks, and belief model.
@@ -62,20 +64,35 @@ startup. From a checkout, use `./task build` or `./task install`.
 
 ### Codex
 
-This checkout also contains a portable Codex `plugin.json`. When LORE is
-installed as a Codex plugin, its session-start hook loads the same user and
-repo snapshot as the Claude plugin. The shared skill provides memory writes
-and session search. For a skill-only local setup from this checkout:
+LORE supports Codex through the portable [`plugin.json`](plugin.json) and
+its [SessionStart hook](codex/hooks/hooks.json). Installing the full Codex
+plugin automatically injects the shared user and current project snapshot
+at startup, resume, clear, and compaction. Claude Code, Codex, and DOXA read
+the same store; set `LORE_ROOT` when using a store other than `~/.claude/lore`.
+
+The [Codex skill](codex/skills/lore/SKILL.md) supports explicit recall and
+memory writes. Index local Codex, Claude Code, and DOXA transcripts with
+`lore index`, search them with `lore search "terms" --all`, and read a match
+with `lore session <id>`. Indexing and search stay local and use SQLite FTS5.
+The Codex startup hook does not index transcripts or run the Claude reviewer.
+
+Use `lore memory add --scope user|project "one concise fact"` for an explicit
+write. Detached Codex writes become proposals under the normal write gate;
+inspect them with `lore pending` and resolve the exact reviewed proposal in
+the native terminal or DOXA. A proposal or search result is not an approved
+fact. The plugin manifest declares hooks and interface metadata; the native
+`lore mcp` server is available separately and is not registered automatically.
+
+For a skill-only local setup from this checkout:
 
 ```sh
 mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
 ln -s "$(pwd)/codex/skills/lore" "${CODEX_HOME:-$HOME/.codex}/skills/lore"
 ```
 
-The skill calls LORE's CLI against the shared store. This skill-only setup
-reads memory when a task needs it; installing the plugin adds automatic
-session-start injection. The Codex hook does not run LORE's Claude-only
-reviewer, so Codex memories enter through explicit writes and approvals.
+The skill calls LORE's CLI against the shared store when a task needs recall.
+This skill-only setup does not install the automatic SessionStart hook;
+install the full Codex plugin for startup context injection.
 
 ## Sync — one memory on every machine
 
