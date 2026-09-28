@@ -21,6 +21,16 @@ pub fn run(cfg: &Config, req: &Value, engine: &str) -> Result<()> {
     }
     #[cfg(not(unix))]
     return Err(Error::Unsupported);
+    let settings = cfg.settings()?;
+    if settings
+        .get("LORE_DISABLE_REVIEW")
+        .is_ok_and(|value| !matches!(value.as_str(), "" | "0"))
+        || settings
+            .get("LORE_SKIP")
+            .is_ok_and(|value| !value.is_empty())
+    {
+        return Err(Error::Untrusted);
+    }
     let authority = Authority::Derived {
         agent: "doxa-deriver".into(),
         engine: engine.into(),

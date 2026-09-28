@@ -183,6 +183,21 @@ impl Fixture {
                 .env_remove("LORE_DERIVER_MODEL")
                 .env_remove("LORE_DREAMER_MODEL");
         }
+        if matches!(mode, "persisted_disabled_review" | "persisted_skip") {
+            let name = if mode == "persisted_disabled_review" {
+                "LORE_DISABLE_REVIEW"
+            } else {
+                "LORE_SKIP"
+            };
+            let mut saved = serde_json::Map::new();
+            saved.insert(name.into(), json!("1"));
+            files::atomic_write(
+                &self.home.join("settings.json"),
+                json!({"env":saved}).to_string().as_bytes(),
+            )
+            .unwrap();
+            command.env("CLAUDE_CONFIG_DIR", &self.home);
+        }
         // The production supervisor creates a fresh session/process group.
         unsafe {
             command.pre_exec(|| {
@@ -605,4 +620,23 @@ fn persisted_worker_provider_and_model_preferences() {
     assert!(worker.stderr().is_empty());
     assert_eq!(fixture.pending().len(), 1);
     fixture.assert_not_curated();
+}
+
+#[test]
+fn persisted_disabled_worker_refuses_without_provider_invocation() {
+    for mode in ["persisted_disabled_review", "persisted_skip"] {
+        let fixture = Fixture::new("claude", false);
+        let mut worker = fixture.spawn("claude", mode);
+        assert!(!worker.finish(Duration::from_secs(5)).unwrap().success());
+        assert_eq!(
+            worker.stderr(),
+            "lore-rs: untrusted
+"
+        );
+        assert!(!fixture.home.join("ready").exists());
+        assert!(!fixture.home.join("calls").exists());
+        assert!(!fixture.home.join("prompt").exists());
+        assert!(fixture.pending().is_empty());
+        fixture.assert_not_curated();
+    }
 }
