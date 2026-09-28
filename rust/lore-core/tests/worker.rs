@@ -628,11 +628,7 @@ fn persisted_disabled_worker_refuses_without_provider_invocation() {
         let fixture = Fixture::new("claude", false);
         let mut worker = fixture.spawn("claude", mode);
         assert!(!worker.finish(Duration::from_secs(5)).unwrap().success());
-        assert_eq!(
-            worker.stderr(),
-            "lore-rs: untrusted
-"
-        );
+        assert_eq!(worker.stderr(), "lore-rs: untrusted_write\n");
         assert!(!fixture.home.join("ready").exists());
         assert!(!fixture.home.join("calls").exists());
         assert!(!fixture.home.join("prompt").exists());
