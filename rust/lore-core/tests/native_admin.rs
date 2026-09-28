@@ -836,3 +836,81 @@ fn incremental_review_skips_idle_work_and_prompt_scheduler_starts_clock_without_
         .unwrap()
         .contains("Second fresh delta scheduled natively"));
 }
+#[test]
+fn standalone_ask_and_consult_preserve_no_model_global_matches_and_calibration_gates() {
+    let (t, cfg) = config();
+    let auth = interactive();
+    let mut ids = Vec::new();
+    for (subject, claim) in [
+        ("user", "Ownership failures retain a staged receipt"),
+        (
+            "project:other-fixture",
+            "Ownership provenance follows portable memory",
+        ),
+        ("user", "A structural dependency with different vocabulary"),
+    ] {
+        ids.push(
+            lore_core::beliefs::insert(
+                &cfg,
+                &json!({"subject":subject,"claim":claim,"confidence":0.8}),
+                &auth,
+            )
+            .unwrap()["id"]
+                .as_i64()
+                .unwrap(),
+        );
+    }
+    for _ in 0..3 {
+        lore_core::beliefs::outcome(
+            &cfg,
+            &json!({"belief_id":ids[0],"event":"confirmed","source":"user"}),
+            &auth,
+        )
+        .unwrap();
+    }
+    lore_core::graph::edge_insert(&cfg,&json!({"src":ids[0],"dst":ids[2],"rel":"depends_on","source":"derived","session_id":"fixture-edge"}),&auth).unwrap();
+    let conn = store::connect(&cfg).unwrap();
+    conn.execute("INSERT INTO msg(session_id,project,ts,role,content) VALUES('fixture-session','other-fixture','2026-01-01','user','Ownership session evidence fixture')",[]).unwrap();
+    lore_core::files::atomic_write(
+        &cfg.root.join("USER.md"),
+        b"- Curated ownership memory fixture\n",
+    )
+    .unwrap();
+    let result = native(&t, &cfg, &["consult", "ownership"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let consult: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(consult["steer"].as_array().unwrap().len(), 1);
+    assert_eq!(consult["steer"][0]["outcomes"], 3);
+    assert_eq!(consult["cite_only"].as_array().unwrap().len(), 1);
+    assert_eq!(consult["cite_only"][0]["subject"], "project:other-fixture");
+    assert_eq!(consult["related_by_structure"][0]["id"], ids[2]);
+    assert_eq!(
+        consult["related_by_structure"][0]["citation_status"],
+        "structure_only"
+    );
+    let result = native(&t, &cfg, &["ask", "ownership"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let pack: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(pack["beliefs"]["matches"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        pack["curated_memory"]["user"][0],
+        "Curated ownership memory fixture"
+    );
+    assert_eq!(pack["sessions"][0]["session_id"], "fixture-session");
+    let referenced: Option<String> = conn
+        .query_row(
+            "SELECT last_referenced FROM beliefs WHERE id=?",
+            [ids[1]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(referenced.is_some());
+}

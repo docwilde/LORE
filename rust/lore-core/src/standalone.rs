@@ -483,7 +483,7 @@ pub fn run(args: &[String]) -> Result<()> {
         }
         ("consult", _) => {
             pos(&mut req, "query", &p, true)?;
-            crate::beliefs::consult(&cfg, &req)?
+            crate::standalone_ops::consult(&cfg, &req, false)?
         }
         ("ask" | "dialectic", _) => {
             pos(&mut req, "query", &p, true)?;

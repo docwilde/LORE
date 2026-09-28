@@ -1507,10 +1507,14 @@ pub fn search(cfg: &Config, req: &Value) -> Result<Value> {
         vec![Some(slug.as_str()), None]
     };
     for scope in scopes {
-        for expr in [
-            crate::index::fts_expr(query, " "),
-            crate::index::fts_expr(query, " OR "),
-        ] {
+        for expr in if req["or_only"] == true {
+            vec![crate::index::fts_expr(query, " OR ")]
+        } else {
+            vec![
+                crate::index::fts_expr(query, " "),
+                crate::index::fts_expr(query, " OR "),
+            ]
+        } {
             if expr.is_empty() {
                 return Err(Error::InvalidRequest);
             }
@@ -1562,15 +1566,108 @@ pub fn session(cfg: &Config, req: &Value) -> Result<Value> {
     Ok(json!({"session":meta,"rows":rows,"offset":offset,"limit":limit}))
 }
 
+/// The standalone evidence pack follows Python's global OR search and ledger
+/// admission gate. Structure never promotes a claim into evidence or influence.
+pub fn consult(cfg: &Config, req: &Value, ask: bool) -> Result<Value> {
+    let query = req["query"]
+        .as_str()
+        .filter(|q| q.len() <= 32768 && !q.chars().any(char::is_control))
+        .ok_or(Error::InvalidRequest)?;
+    let expression = crate::index::fts_expr(query, " OR ");
+    if expression.is_empty() {
+        return Err(Error::InvalidRequest);
+    }
+    let limit = cap(req, "limit", if ask { 12 } else { 8 }, 100)?;
+    let conn = store::connect(cfg)?;
+    let dormant = ask && config::disabled("LORE_INCLUDE_DORMANT");
+    let mut statement=conn.prepare("SELECT b.id,b.subject,b.claim,b.confidence,b.status,(SELECT count(*) FROM belief_outcomes o WHERE o.belief_id=b.id),(SELECT coalesce(sum(event='confirmed'),0) FROM belief_outcomes o WHERE o.belief_id=b.id),(SELECT coalesce(sum(event='contradicted'),0) FROM belief_outcomes o WHERE o.belief_id=b.id),(SELECT count(*) FROM belief_evidence e WHERE e.belief_id=b.id),(SELECT count(DISTINCT session_id) FROM belief_evidence e WHERE e.belief_id=b.id) FROM beliefs b JOIN belief_fts f ON b.id=f.belief_id WHERE belief_fts MATCH ? AND (status='active' OR (? AND status='dormant')) ORDER BY bm25(belief_fts) LIMIT ?")?;
+    let mut cursor = statement.query(params![expression, dormant, limit as i64])?;
+    let mut budget = 8 * 1024 * 1024;
+    let mut steer = Vec::new();
+    let mut cite = Vec::new();
+    let mut matches = Vec::new();
+    let mut seeds = BTreeSet::new();
+    while let Some(row) = cursor.next()? {
+        let id = row.get::<_, i64>(0)?;
+        let prior = row.get::<_, f64>(3)?;
+        let outcomes = beliefs::sql_count(row, 5)?;
+        let confirms = beliefs::sql_count(row, 6)?;
+        let contradicts = beliefs::sql_count(row, 7)?;
+        if confirms > outcomes || contradicts > outcomes.saturating_sub(confirms) {
+            return Err(Error::InvalidRequest);
+        }
+        let mut result = json!({"id":id,"subject":crate::scrub::scrub(&crate::graph::db_text(row,1,4096,&mut budget)?)?,"claim":crate::scrub::scrub(&crate::graph::db_text(row,2,65536,&mut budget)?)?,"confidence":prior,"status":crate::graph::db_text(row,4,32,&mut budget)?,"outcomes":outcomes,"confirmed":confirms,"contradicted":contradicts,"stale":outcomes-confirms-contradicts,"evidence_count":beliefs::sql_count(row,8)?,"independent_derivations":beliefs::sql_count(row,9)?});
+        if outcomes >= 3 {
+            result["calibrated_confidence"] = json!(beliefs::calibrated_confidence(
+                prior,
+                confirms,
+                if ask {
+                    contradicts
+                } else {
+                    outcomes - confirms
+                }
+            ));
+            result["citation_status"] = json!("steer");
+            steer.push(result.clone());
+        } else {
+            result["citation_status"] = json!("cite_only");
+            cite.push(result.clone());
+        }
+        seeds.insert(id);
+        matches.push(result);
+    }
+    drop(cursor);
+    drop(statement);
+    if ask {
+        for id in &seeds {
+            conn.execute(
+                "UPDATE beliefs SET last_referenced=? WHERE id=?",
+                params![crate::utcnow(), id],
+            )?;
+        }
+    }
+    let mut related = Vec::new();
+    let mut graph_error = None;
+    if !seeds.is_empty() {
+        match crate::graph::adjacency(&conn, None, &["active"], None, true) {
+            Ok((adj, claims)) => {
+                let mut reached = BTreeMap::new();
+                for seed in &seeds {
+                    for (node, depth) in crate::graph::khop(&adj, *seed, 1, None) {
+                        if depth == 0 || seeds.contains(&node) {
+                            continue;
+                        }
+                        let rel = adj
+                            .get(seed)
+                            .into_iter()
+                            .flatten()
+                            .find(|edge| edge.dst == node)
+                            .map_or("reached", |e| e.rel.as_str())
+                            .to_owned();
+                        reached.entry(node).or_insert((depth, rel));
+                    }
+                }
+                for (id, (depth, rel)) in reached.into_iter().take(if ask { 8 } else { 6 }) {
+                    related.push(json!({"id":id,"hops":depth,"rel":rel,"claim":claims.get(&id),"citation_status":"structure_only"}));
+                }
+            }
+            Err(error) => graph_error = Some(error.code()),
+        }
+    }
+    Ok(
+        json!({"matches":matches,"steer":steer,"cite_only":cite,"related_by_structure":related,"structure_error":graph_error,"calibration_min_outcomes":3,"note":"Confidence is deriver-claimed until the outcome ledger admits calibration. Structural relations never establish evidence or influence."}),
+    )
+}
 pub fn ask(cfg: &Config, req: &Value) -> Result<Value> {
     let mut search_req = req.clone();
     search_req["all"] = json!(true);
     search_req["limit"] = json!(12);
+    search_req["or_only"] = json!(true);
     let sessions = search(cfg, &search_req)?;
     let beliefs = if config::disabled("LORE_DISABLE_BELIEFS") {
         json!({"disabled":true})
     } else {
-        crate::beliefs::consult(cfg, &search_req)?
+        consult(cfg, &search_req, true)?
     };
     let slug = config::project_slug(gate::cwd(req)?);
     let host = memory::this_machine();
