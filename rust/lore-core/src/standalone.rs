@@ -561,7 +561,8 @@ pub fn run(args: &[String]) -> Result<()> {
     let failed = value["partial"] == true
         || value["error"].is_string()
         || value["failed"].as_u64().unwrap_or(0) > 0
-        || value["may_have_applied"].as_u64().unwrap_or(0) > 0;
+        || value["may_have_applied"].as_u64().unwrap_or(0) > 0
+        || (group == "sync" && sub == "import" && value["unverified"].as_u64().unwrap_or(0) > 0);
     output(value)?;
     if failed {
         return Err(Error::MayHaveApplied);

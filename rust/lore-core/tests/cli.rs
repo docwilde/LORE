@@ -226,6 +226,31 @@ fn native_bootstrap_refuses_ambiguous_source_before_network_or_store_changes() {
 }
 
 #[test]
+fn native_import_reports_unverified_operations_as_failed_without_curated_writes() {
+    let fixture = Fixture::new();
+    let ops = json!([{
+        "op_id":uuid::Uuid::new_v4().to_string(),
+        "machine_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "machine_seq":1, "lamport":1,
+        "class":"memory", "op":"add", "project_key":null,
+        "payload":{"text":"Unverified fixture fact", "writer":"approved", "via":"test"},
+        "created":"2026-09-28T00:00:00Z", "mac":null
+    }]);
+    let digest = lore_core::digest(&lore_core::store::canonical_bytes(&ops).unwrap());
+    let path = fixture.home.join("unverified-bundle.json");
+    let bundle = json!({"format":"lore-manual-transfer", "version":1,
+        "classes":["memory"], "count":1, "sha256":digest, "ops":ops});
+    fixture.write(&path, &serde_json::to_string(&bundle).unwrap());
+    let (success, stdout, _) = fixture.invoke_env(
+        &["sync", "import", path.to_str().unwrap()],
+        &[("LORE_SYNC_HMAC_KEY", "fixture-shared-key")],
+    );
+    assert!(!success);
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["unverified"], 1);
+    assert!(!fixture.root.join("USER.md").exists());
+}
+
+#[test]
 fn fresh_context_readback_is_lazy_and_does_not_create_a_store() {
     let fixture = Fixture::new();
     for args in [

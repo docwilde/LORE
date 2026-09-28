@@ -15,6 +15,13 @@
 
 - Wire recovery into the native CLI and list its full command families in help.
   Add real CLI, socket and signed-store regressions.
+- Report unverified imports and possible partial writes as failed commands.
+  Preserve their per-operation results and curated-memory gates.
+
+**Cursor ownership**
+
+- Bind hub/peer cursors to canonical endpoint and configured credential.
+  Preserve legacy rows and safely replay instead of inheriting ambiguous cursors.
 
 ## 0.62.1 — 2026-09-28
 
