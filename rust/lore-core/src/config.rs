@@ -12,10 +12,13 @@ pub struct ResolvedSettings {
 }
 impl ResolvedSettings {
     pub fn from_env() -> Result<Self> {
+        Self::from_env_with_root(None)
+    }
+    pub fn from_env_with_root(effective_root: Option<&Path>) -> Result<Self> {
         let home = env::var_os("HOME").map(PathBuf::from).ok_or(Error::Unavailable)?;
         let directory = env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from)
             .unwrap_or_else(|| home.join(".claude"));
-        let root = env::var_os("LORE_ROOT").filter(|v| !v.is_empty()).map(PathBuf::from);
+        let root = effective_root.map(PathBuf::from).or_else(|| env::var_os("LORE_ROOT").filter(|v| !v.is_empty()).map(PathBuf::from));
         // An isolated store must never inherit the host's saved credentials.
         if root.as_ref().is_some_and(|r| r != &directory.join("lore")) {
             return Ok(Self::default());
@@ -120,14 +123,17 @@ impl SyncConfig {
 }
 impl Config {
     pub fn from_env(timeout: Duration) -> Result<Self> {
-        let saved = ResolvedSettings::from_env()?;
+        Self::from_env_with_root(None, timeout)
+    }
+    pub fn from_env_with_root(effective_root: Option<PathBuf>, timeout: Duration) -> Result<Self> {
+        let saved = ResolvedSettings::from_env_with_root(effective_root.as_deref())?;
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or(Error::Unavailable)?;
         let default_root = home.join(".claude/lore");
-        let root = env::var_os("LORE_ROOT")
+        let root = effective_root.or_else(|| env::var_os("LORE_ROOT")
             .filter(|s| !s.to_string_lossy().trim().is_empty())
-            .map(PathBuf::from)
+            .map(PathBuf::from))
             .unwrap_or_else(|| default_root.clone());
         if !root.is_absolute() || timeout.is_zero() {
             return Err(Error::InvalidRequest);
@@ -162,6 +168,9 @@ impl Config {
             timeout,
             sync: SyncConfig::from_settings(&saved),
         })
+    }
+    pub fn settings(&self) -> Result<ResolvedSettings> {
+        ResolvedSettings::from_env_with_root(Some(&self.root))
     }
     pub fn for_root(root: PathBuf) -> Self {
         Self {

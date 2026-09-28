@@ -977,18 +977,18 @@ fn sync(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
         }
         "health" | "whoami" => {
             let t = if let Some(peer) = req["peer"].as_str() {
-                n::Transport::peer(peer)?
+                n::Transport::peer_with_settings(&cfg.settings()?,peer)?
             } else {
-                n::Transport::hub()?
+                n::Transport::hub_with_settings(&cfg.settings()?)?
             };
             t.request("GET", sub, &[], None).map_err(|e| {
                 eprintln!("{e}");
                 Error::Unavailable
             })
         }
-        "push" => n::push(cfg, &n::Transport::hub()?, req["from_seq"].as_i64()),
+        "push" => n::push(cfg, &n::Transport::hub_with_settings(&cfg.settings()?)?, req["from_seq"].as_i64()),
         "pull" | "" => {
-            let targets = n::configured_targets(req["peer"].as_str())?;
+            let targets = n::configured_targets_with_settings(&cfg.settings()?,req["peer"].as_str())?;
             n::exchange(cfg, &targets, sub.is_empty())
         }
         "export" | "import" => {

@@ -13,7 +13,7 @@ fn configured(cfg: &Config) -> bool {
     cfg.sync.enabled
         && ["LORE_SYNC_URL", "LORE_SYNC_PEER"]
             .iter()
-            .any(|name| std::env::var(name).is_ok_and(|s| !s.trim().is_empty()))
+            .any(|name| cfg.settings().and_then(|s| s.get(name).map_err(|_| Error::Unavailable)).is_ok_and(|s| !s.trim().is_empty()))
 }
 pub fn machine(cfg: &Config, create: bool) -> Result<Value> {
     if create {
@@ -46,7 +46,7 @@ pub fn state(cfg: &Config) -> Result<Value> {
     }
 }
 fn read_state(cfg: &Config) -> Result<Value> {
-    let (hub, active) = crate::sync_network::configured_cursor_keys()?;
+    let (hub, active) = crate::sync_network::configured_cursor_keys_with_settings(&cfg.settings()?)?;
     let conn = store::read_only(cfg)?;
     let mine = conn
         .query_row("SELECT machine_id FROM sync_machine LIMIT 1", [], |r| {
