@@ -643,6 +643,7 @@ fn conflict(
             .and_then(|k| portable_key(k, kind, bucket).ok())
             .as_ref()
             == Some(&normalized)
+            && p["text"].as_str() != Some(new)
         {
             conn.execute("INSERT OR IGNORE INTO sync_conflicts(kind,bucket,old_key,a_text,b_text,op_id,created) VALUES(?,?,?,?,?,?,?)",params![kind,bucket,normalized,fallback(&p,"text","",65536)?,new,text_field(op,"op_id")?,crate::utcnow()])?;
             return Ok(true);
@@ -708,8 +709,7 @@ fn file_entries(cfg: &Config, conn: &Connection, op: &Value, kind: &str) -> Resu
     if action != "remove" && value.is_empty() {
         return Err(Error::InvalidRequest);
     }
-    if kind == "memory"
-        && action == "add"
+    if matches!(action, "add" | "add-conflict")
         && entries
             .iter()
             .any(|entry| entry.to_lowercase() == gate::one_line(&value).to_lowercase())
@@ -2130,10 +2130,38 @@ mod tests {
                 .unwrap(),
             1
         );
+        drop(conn);
+        let mut identical = op(
+            &cfg,
+            "identical-map",
+            5,
+            "filemap",
+            "replace",
+            Some("repo-a"),
+            json!({"old_key":key,"text":"src.rs — first"}),
+        );
+        identical["machine_id"] = json!("third-author");
+        identical["mac"] =
+            json!(
+                store::canonical_mac(&tuple(&identical), cfg.sync.key.as_deref().unwrap()).unwrap()
+            );
+        assert_eq!(apply_ops(&cfg, &[identical]).unwrap()["applied"], 1);
+        assert_eq!(
+            memory::read_entries(&filemap::path(&cfg, "receiver-a").unwrap()).unwrap(),
+            ["src.rs — first", "src.rs — second"]
+        );
+        let conn = store::connect(&cfg).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM sync_conflicts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(conn);
         let remove = op(
             &cfg,
             "remove-alternative",
-            5,
+            6,
             "filemap",
             "remove",
             Some("repo-a"),

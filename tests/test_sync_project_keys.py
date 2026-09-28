@@ -64,6 +64,14 @@ class PortableProjectEntryKeys(unittest.TestCase):
                 pairs = mod.conflict_rows(conn)
             self.assertEqual(len(pairs), 1)
             self.assertEqual(set(pairs[0][2:4]), set(expected))
+        identical = _signed(b, machine_id="third-author", machine_seq=1, lamport=20,
+                            cls="filemap", verb="replace", project_key=project_key,
+                            payload={"old_key":seed[0]["payload"].get("old_key") or b.entry_key("filemap", "third-checkout", "src.rs — original purpose"),
+                                     "text": "src.rs — A purpose"})
+        self.assertEqual(_apply(b, [identical])["applied"], 1)
+        self.assertEqual(_map_entries(b, "receiver-path"), expected)
+        with b.db_connect() as conn:
+            self.assertEqual(len(b.conflict_rows(conn)), 1)
         # A human removes one wording. The sync key must not remove both rows
         # sharing the same path, or fail because the path match is ambiguous.
         a.filemap_remove("author-path", "B purpose")

@@ -633,6 +633,8 @@ def _apply_filemap(conn: sqlite3.Connection, op: dict) -> bool:
         old = _entry_for_key(entries, "filemap", slug, old_key)
         if old is not None:
             return _replace_in_place(conn, op, "filemap", "project", slug, old, text)
+        if any(entry.lower() == text.lower() for entry in entries):
+            return True  # identical rewrite must not overwrite another alternative
         competing = _record_replace_conflict(conn, op, "filemap", slug, old_key, text)
         path, _, purpose = text.partition(SEP)
         err = filemap_add(slug, path.strip(), purpose.strip(),
