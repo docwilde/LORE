@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.62.1 — 2026-09-28
+
+**Codex documentation**
+
+- Clarify shared user/project startup context, local transcript recall and
+  explicit memory proposals in **`README.md`**.
+- Distinguish the full Codex plugin from skill-only recall; document that
+  Claude review and native MCP registration are separate.
+
 ## 0.62.0 — 2026-09-28
 
 **Native plugin runtime**
