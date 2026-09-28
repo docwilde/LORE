@@ -28,7 +28,7 @@ const LINE_CAP: usize = 8 * 1024 * 1024;
 fn crop(text: &str, count: usize) -> String {
     text.chars().take(count).collect()
 }
-use crate::config::disabled;
+
 fn bound_env(name: &str, default: usize, max: usize) -> Result<usize> {
     std::env::var(name)
         .ok()
@@ -660,8 +660,8 @@ pub fn build_review_job(
     authority: &Authority,
 ) -> Result<Option<ReviewJob>> {
     require_derived(authority)?;
-    if disabled("LORE_DISABLE_REVIEW")
-        || std::env::var("LORE_SKIP").is_ok_and(|value| !value.is_empty())
+    if cfg.disabled("LORE_DISABLE_REVIEW")
+        || cfg.var("LORE_SKIP").is_ok_and(|value| !value.is_empty())
     {
         return Ok(None);
     }
@@ -840,8 +840,8 @@ pub fn build_review_job(
     let mut prompt = format_template(
         &template(
             bound_env("LORE_MEMORY_PROPOSAL_CAP", 3, 50)?,
-            !disabled("LORE_DISABLE_SKILLS"),
-            !disabled("LORE_DISABLE_BELIEFS"),
+            !cfg.disabled("LORE_DISABLE_SKILLS"),
+            !cfg.disabled("LORE_DISABLE_BELIEFS"),
         ),
         &values,
     )?;
@@ -856,7 +856,7 @@ pub fn build_review_job(
             ));
         }
     }
-    if !disabled("LORE_DISABLE_BELIEFS") {
+    if !cfg.disabled("LORE_DISABLE_BELIEFS") {
         let beliefs = neighbourhood(cfg, &slug, chosen)?;
         if !beliefs.is_empty() {
             prompt.push_str(&format!("\nExisting beliefs that may already state your conclusion below -- cite the id in \"evidence_for\" instead of restating:\n{beliefs}\n"));
@@ -1043,7 +1043,7 @@ pub fn stage_proposals(
         )?;
         staged += 1;
     }
-    if !disabled("LORE_DISABLE_SKILLS") {
+    if !cfg.disabled("LORE_DISABLE_SKILLS") {
         let learned = skills::learned(cfg)?;
         let usage = skills::load_usage(cfg)?;
         for proposal in data["skills"].as_array().into_iter().flatten().take(1) {
@@ -1129,7 +1129,7 @@ pub fn derive_conclusions(
         return Err(Error::InvalidRequest);
     }
     let mut acct = json!({"extracted":0,"derived":0,"cross_subject":0,"folded":0,"retracted_cited":0,"malformed":0,"relates":0,"relates_dropped":0});
-    if disabled("LORE_DISABLE_BELIEFS") {
+    if cfg.disabled("LORE_DISABLE_BELIEFS") {
         return Ok(acct);
     }
     let threshold = threshold()?;

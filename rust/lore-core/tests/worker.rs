@@ -165,6 +165,39 @@ impl Fixture {
             .stdin(Stdio::piped())
             .stdout(Stdio::from(fs::File::create(&output).unwrap()))
             .stderr(Stdio::from(fs::File::create(&error).unwrap()));
+        if mode == "persisted_preferences" {
+            files::atomic_write(
+                &self.home.join("settings.json"),
+                json!({"env":{
+                    "LORE_CLAUDE_BIN":self.home.join("provider"),
+                    "LORE_DERIVER_MODEL":"owned-model",
+                    "LORE_DREAMER_MODEL":"owned-model"
+                }})
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+            command
+                .env("CLAUDE_CONFIG_DIR", &self.home)
+                .env_remove("LORE_CLAUDE_BIN")
+                .env_remove("LORE_DERIVER_MODEL")
+                .env_remove("LORE_DREAMER_MODEL");
+        }
+        if matches!(mode, "persisted_disabled_review" | "persisted_skip") {
+            let name = if mode == "persisted_disabled_review" {
+                "LORE_DISABLE_REVIEW"
+            } else {
+                "LORE_SKIP"
+            };
+            let mut saved = serde_json::Map::new();
+            saved.insert(name.into(), json!("1"));
+            files::atomic_write(
+                &self.home.join("settings.json"),
+                json!({"env":saved}).to_string().as_bytes(),
+            )
+            .unwrap();
+            command.env("CLAUDE_CONFIG_DIR", &self.home);
+        }
         // The production supervisor creates a fresh session/process group.
         unsafe {
             command.pre_exec(|| {
@@ -576,4 +609,30 @@ fn failed_automatic_dream_preserves_landed_review_and_reports_no_safe_retry() {
     assert_eq!(items[0]["derived_by"], "doxa-deriver");
     assert_eq!(items[0]["source_engine"], "claude");
     fixture.assert_not_curated();
+}
+
+#[test]
+fn persisted_worker_provider_and_model_preferences() {
+    let fixture = Fixture::new("claude", false);
+    let mut worker = fixture.spawn("claude", "persisted_preferences");
+    worker.observe_provider(&fixture.home);
+    assert!(worker.finish(Duration::from_secs(5)).unwrap().success());
+    assert!(worker.stderr().is_empty());
+    assert_eq!(fixture.pending().len(), 1);
+    fixture.assert_not_curated();
+}
+
+#[test]
+fn persisted_disabled_worker_refuses_without_provider_invocation() {
+    for mode in ["persisted_disabled_review", "persisted_skip"] {
+        let fixture = Fixture::new("claude", false);
+        let mut worker = fixture.spawn("claude", mode);
+        assert!(!worker.finish(Duration::from_secs(5)).unwrap().success());
+        assert_eq!(worker.stderr(), "lore-rs: untrusted_write\n");
+        assert!(!fixture.home.join("ready").exists());
+        assert!(!fixture.home.join("calls").exists());
+        assert!(!fixture.home.join("prompt").exists());
+        assert!(fixture.pending().is_empty());
+        fixture.assert_not_curated();
+    }
 }

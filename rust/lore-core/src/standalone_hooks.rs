@@ -75,16 +75,21 @@ fn spawn(args: &[String], defer: bool) -> Result<()> {
         Err(Error::Unsupported)
     }
 }
-pub fn pull_at_start(cfg: &Config, cwd: &str) -> Result<()> {
-    if !cfg.sync.enabled
-        || std::env::var("LORE_SYNC_PULL_AT_START").is_ok_and(|v| matches!(v.as_str(), "" | "0"))
-        || !["LORE_SYNC_URL", "LORE_SYNC_PEER"]
+fn startup_pull_configured(enabled: bool, settings: &config::ResolvedSettings) -> bool {
+    enabled
+        && !settings
+            .get("LORE_SYNC_PULL_AT_START")
+            .is_ok_and(|v| matches!(v.as_str(), "" | "0"))
+        && ["LORE_SYNC_URL", "LORE_SYNC_PEER"]
             .iter()
-            .any(|key| std::env::var(key).is_ok_and(|v| !v.trim().is_empty()))
-    {
+            .any(|key| settings.get(key).is_ok_and(|v| !v.trim().is_empty()))
+}
+pub fn pull_at_start(cfg: &Config, cwd: &str) -> Result<()> {
+    if !startup_pull_configured(cfg.sync.enabled, &cfg.settings()?) {
         return Ok(());
     }
-    let interval = std::env::var("LORE_SYNC_PULL_SECS")
+    let interval = cfg
+        .var("LORE_SYNC_PULL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(120)
@@ -104,10 +109,11 @@ pub fn review_at_prompt(
     session: Option<&str>,
     engine: &str,
 ) -> Result<()> {
-    if config::disabled("LORE_DISABLE_REVIEW") {
+    if cfg.disabled("LORE_DISABLE_REVIEW") {
         return Ok(());
     }
-    let Some(interval) = std::env::var("LORE_REVIEW_SECS")
+    let Some(interval) = cfg
+        .var("LORE_REVIEW_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0 && *v <= 86400 * 30)
@@ -155,4 +161,33 @@ pub fn review_at_prompt(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod persisted_startup_tests {
+    use super::*;
+    #[test]
+    fn saved_destination_triggers_startup_without_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        files::atomic_write(
+            &path,
+            br#"{"env":{"LORE_SYNC_URL":"https://example.invalid"}}"#,
+        )
+        .unwrap();
+        let settings = config::ResolvedSettings::from_file(&path).unwrap();
+        assert!(startup_pull_configured(true, &settings));
+        assert!(!startup_pull_configured(false, &settings));
+        files::atomic_write(
+            &path,
+            br#"{"env":{"LORE_SYNC_PEER":"fixture.invalid","LORE_SYNC_PULL_AT_START":"0"}}"#,
+        )
+        .unwrap();
+        let disabled = config::ResolvedSettings::from_file(&path).unwrap();
+        assert!(!startup_pull_configured(true, &disabled));
+        assert!(!startup_pull_configured(
+            true,
+            &config::ResolvedSettings::default()
+        ));
+    }
 }

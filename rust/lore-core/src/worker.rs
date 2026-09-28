@@ -21,6 +21,16 @@ pub fn run(cfg: &Config, req: &Value, engine: &str) -> Result<()> {
     }
     #[cfg(not(unix))]
     return Err(Error::Unsupported);
+    let settings = cfg.settings()?;
+    if settings
+        .get("LORE_DISABLE_REVIEW")
+        .is_ok_and(|value| !matches!(value.as_str(), "" | "0"))
+        || settings
+            .get("LORE_SKIP")
+            .is_ok_and(|value| !value.is_empty())
+    {
+        return Err(Error::Untrusted);
+    }
     let authority = Authority::Derived {
         agent: "doxa-deriver".into(),
         engine: engine.into(),
@@ -28,12 +38,14 @@ pub fn run(cfg: &Config, req: &Value, engine: &str) -> Result<()> {
     let Some(job) = crate::review::build_review_job(cfg, req, &authority)? else {
         return Ok(());
     };
-    let program = std::env::var("LORE_CLAUDE_BIN")
+    let program = cfg
+        .var("LORE_CLAUDE_BIN")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "claude".into());
     let deadline = Instant::now() + Duration::from_secs(150);
     let response = review_provider(
+        cfg,
         &program,
         "LORE_DERIVER_MODEL",
         "haiku",
@@ -41,8 +53,9 @@ pub fn run(cfg: &Config, req: &Value, engine: &str) -> Result<()> {
         deadline,
     )?;
     let result = crate::review::process_result(cfg, &job, &response)?;
-    let deferred =
-        std::env::var("LORE_DEFER_DREAM").is_ok_and(|value| !matches!(value.as_str(), "" | "0"));
+    let deferred = cfg
+        .var("LORE_DEFER_DREAM")
+        .is_ok_and(|value| !matches!(value.as_str(), "" | "0"));
     if result["beliefs"]["derived"].as_u64().unwrap_or(0) > 0 && !deferred {
         // Earlier review effects have landed. A reconciliation error must not
         // advertise a safe retry of the complete review.
@@ -50,6 +63,7 @@ pub fn run(cfg: &Config, req: &Value, engine: &str) -> Result<()> {
             let cwd = crate::gate::cwd(req)?;
             if let Some(dream) = crate::dream::build(cfg, cwd, &authority)? {
                 let response = review_provider(
+                    cfg,
                     &program,
                     "LORE_DREAMER_MODEL",
                     "sonnet",
@@ -66,20 +80,18 @@ pub fn run(cfg: &Config, req: &Value, engine: &str) -> Result<()> {
 }
 
 pub(crate) fn review_provider(
+    cfg: &Config,
     program: &str,
     model_env: &str,
     fallback: &str,
     prompt: &str,
     deadline: Instant,
 ) -> Result<String> {
-    let model = std::env::var(model_env)
+    let model = cfg
+        .var(model_env)
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var("LORE_REVIEW_MODEL")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
+        .or_else(|| cfg.var("LORE_REVIEW_MODEL").ok().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| fallback.into());
     review_with_model(program, &model, prompt, deadline)
 }

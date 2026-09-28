@@ -20,12 +20,20 @@ pub struct RefreshPolicy {
 }
 impl RefreshPolicy {
     pub fn from_env() -> Self {
+        Self::from_settings(&crate::config::ResolvedSettings::from_env().unwrap_or_default())
+    }
+    pub fn from_config(cfg: &Config) -> Self {
+        Self::from_settings(&cfg.settings().unwrap_or_default())
+    }
+    fn from_settings(settings: &crate::config::ResolvedSettings) -> Self {
         Self {
-            interval_secs: std::env::var("LORE_REFRESH_SECS")
+            interval_secs: settings
+                .get("LORE_REFRESH_SECS")
                 .ok()
                 .and_then(|value| value.trim().parse().ok())
                 .filter(|value| *value > 0),
-            on_change: std::env::var("LORE_REFRESH_ON_CHANGE")
+            on_change: settings
+                .get("LORE_REFRESH_ON_CHANGE")
                 .map_or(true, |value| value.trim() != "0"),
         }
     }
@@ -61,8 +69,8 @@ pub enum RefreshDecision {
     RecordOnly,
     Inject,
 }
-pub fn refresh_interval(_cfg: &Config, _req: &Value) -> Result<Value> {
-    Ok(json!(RefreshPolicy::from_env().interval_secs))
+pub fn refresh_interval(cfg: &Config, _req: &Value) -> Result<Value> {
+    Ok(json!(RefreshPolicy::from_config(cfg).interval_secs))
 }
 pub fn interaction_model_lines(cfg: &Config) -> Result<Vec<String>> {
     let mut conn = crate::store::connect(cfg)?;
@@ -259,7 +267,7 @@ pub fn snapshot(cfg: &Config, req: &Value) -> Result<Value> {
         gate::cwd(req)?,
         &requested_scope,
         &engine,
-        RefreshPolicy::from_env()
+        RefreshPolicy::from_config(cfg)
     )?))
 }
 fn prune_stamps(dir: &Path, now: f64) {
@@ -463,9 +471,9 @@ pub fn render_graph_context(rows: &[Value], skills: &[Value], cap: usize) -> Res
     Ok(measured_graph(cap, count, matched, reached, &body))
 }
 pub fn graph_context_block(cfg: &Config, req: &Value, skills: &[Value]) -> Result<String> {
-    if std::env::var("LORE_GRAPH_CONTEXT").map_or(true, |value| {
+    if cfg.var("LORE_GRAPH_CONTEXT").map_or(true, |value| {
         matches!(value.as_str(), "" | "0" | "off" | "false")
-    }) || disabled("LORE_DISABLE_BELIEFS")
+    }) || cfg.disabled("LORE_DISABLE_BELIEFS")
     {
         return Ok(String::new());
     }
@@ -477,12 +485,14 @@ pub fn graph_context_block(cfg: &Config, req: &Value, skills: &[Value]) -> Resul
     if prompt.chars().count() > 8192 {
         return Err(Error::TooLarge);
     }
-    let cap = std::env::var("LORE_GRAPH_CONTEXT_CAP")
+    let cap = cfg
+        .var("LORE_GRAPH_CONTEXT_CAP")
         .ok()
         .map_or(Some(1200), |value| value.parse::<usize>().ok())
         .filter(|value| *value <= 65536)
         .ok_or(Error::InvalidRequest)?;
-    let hops = std::env::var("LORE_GRAPH_CONTEXT_HOPS")
+    let hops = cfg
+        .var("LORE_GRAPH_CONTEXT_HOPS")
         .ok()
         .map_or(Some(1), |value| value.parse::<usize>().ok())
         .filter(|value| *value <= 4)
@@ -497,7 +507,7 @@ pub fn graph_context_block(cfg: &Config, req: &Value, skills: &[Value]) -> Resul
     render_graph_context(&rows, skills, cap)
 }
 pub fn graph_context_op(cfg: &Config, req: &Value) -> Result<Value> {
-    let skills = if disabled("LORE_DISABLE_SKILLS") {
+    let skills = if cfg.disabled("LORE_DISABLE_SKILLS") {
         Vec::new()
     } else {
         crate::skills::candidates(cfg, req["prompt"].as_str().unwrap_or(""), 4)?
@@ -513,12 +523,12 @@ pub fn graph_awareness_op(cfg: &Config, _req: &Value) -> Result<Value> {
         Value::Null
     })
 }
-use crate::config::disabled;
+
 fn refresh_frame(text: &str, message: &str) -> Value {
     json!({"suppressOutput":true,"systemMessage":message,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":text}})
 }
 pub fn refresh(cfg: &Config, req: &Value) -> Result<Value> {
-    let skills = if disabled("LORE_DISABLE_SKILLS") {
+    let skills = if cfg.disabled("LORE_DISABLE_SKILLS") {
         Vec::new()
     } else {
         crate::skills::candidates(cfg, req["prompt"].as_str().unwrap_or(""), 4).unwrap_or_default()
@@ -526,8 +536,8 @@ pub fn refresh(cfg: &Config, req: &Value) -> Result<Value> {
     refresh_with_skills(cfg, req, &skills)
 }
 pub fn refresh_with_skills(cfg: &Config, req: &Value, skills: &[Value]) -> Result<Value> {
-    if std::env::var("LORE_SKIP").is_ok_and(|value| !value.is_empty())
-        || disabled("LORE_DISABLE_INJECT")
+    if cfg.var("LORE_SKIP").is_ok_and(|value| !value.is_empty())
+        || cfg.disabled("LORE_DISABLE_INJECT")
     {
         return Ok(Value::Null);
     }
@@ -536,7 +546,7 @@ pub fn refresh_with_skills(cfg: &Config, req: &Value, skills: &[Value]) -> Resul
         .as_str()
         .filter(|id| valid_id(id))
         .ok_or(Error::InvalidRequest)?;
-    let policy = RefreshPolicy::from_env();
+    let policy = RefreshPolicy::from_config(cfg);
     if policy.interval_secs.is_none() && !policy.on_change {
         return Ok(if graph.is_empty() {
             Value::Null

@@ -16,5 +16,5 @@ EOF
 # Even with no toolchain or scripting interpreter on PATH the installed
 # carrier must execute; missing hooks must refuse before attempting a build.
 mkdir "$scratch/tools"
-for name in dirname sed head; do ln -s "$(command -v "$name")" "$scratch/tools/$name"; done
+for name in dirname sed head awk; do ln -s "$(command -v "$name")" "$scratch/tools/$name"; done
 HOME="$scratch/home" LORE_ROOT="$scratch/store" PATH="$scratch/tools" "$root/bin/lore" --version
