@@ -18,15 +18,37 @@ case "$mode" in
     case "$bin" in /*) : ;; *) exit 1 ;; esac
     mkdir -p "$bin"
     stage=$(mktemp -d "$bin/.lore-install.XXXXXXXX")
-    trap 'rm -rf "$stage"' EXIT HUP INT TERM
+    installing=0
+    cleanup() {
+      trap - EXIT HUP INT TERM
+      if [ "$installing" -eq 1 ]; then
+        failed=0
+        for name in lore-rs lore; do
+          rm -f "$bin/$name" || { failed=1; continue; }
+          if [ -e "$stage/backup/$name" ] || [ -L "$stage/backup/$name" ]; then
+            mv "$stage/backup/$name" "$bin/$name" || failed=1
+          fi
+        done
+        [ "$failed" -eq 0 ] || { printf 'Rollback incomplete; backups remain in %s/backup\n' "$stage" >&2; exit 1; }
+      fi
+      rm -rf "$stage"
+    }
+    trap 'cleanup' EXIT
+    trap 'exit 1' HUP INT TERM
     cp "$cache/release/lore-rs" "$stage/lore-rs"
     chmod 755 "$stage/lore-rs"
     ln -s lore-rs "$stage/lore"
+    mkdir "$stage/backup"
     for name in lore-rs lore; do
       [ ! -d "$bin/$name" ] || [ -L "$bin/$name" ] || exit 1
+      if [ -e "$bin/$name" ] || [ -L "$bin/$name" ]; then cp -Pp "$bin/$name" "$stage/backup/$name"; fi
+    done
+    installing=1
+    for name in lore-rs lore; do
       if [ -L "$bin/$name" ]; then rm "$bin/$name"; fi
       mv -f "$stage/$name" "$bin/$name"
     done
+    installing=0
     printf 'Installed native LORE at %s/lore\n' "$bin"
     ;;
   run) cargo build --locked --manifest-path "$root/Cargo.toml" --package lore-core --bin lore-rs; exec "$cache/debug/lore-rs" "$@" ;;
