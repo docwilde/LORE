@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.62.3 — 2026-09-28
+
+**Shared native settings**
+
+- Fix **`Config::from_env_with_root`** to read saved caps, signing keys,
+  stage switches and transport settings across CLI, hooks, MCP and DOXA.
+- Preserve explicit environment overrides and isolate custom stores from
+  host credentials. Reject malformed, oversized and unsafe settings files.
+
+**Plugin compatibility**
+
+- Fix **`bin/lore`** to accept newer carrier patch releases within the same
+  major/minor version. Preview versions still require an exact match.
+- Add isolated settings and carrier regressions; startup hooks continue
+  to use installed binaries without compiling.
+
 ## 0.62.2 — 2026-09-28
 
 **Native sync recovery**

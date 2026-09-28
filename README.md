@@ -57,6 +57,14 @@ The plugin uses the native Rust CLI. Install Rust with [rustup](https://rustup.r
 if `lore-rs` is not already installed; the first `/lore:setup` builds it once
 in a private disk cache. Hooks use the installed carrier and never build during
 startup. From a checkout, use `./task build` or `./task install`.
+The carrier may use a newer patch release within the plugin’s major/minor
+version; preview versions require an exact match.
+
+Native CLI, hooks, MCP and DOXA read saved `LORE_*` settings from
+`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json`. Process environment
+overrides saved values, including explicit empty values. A custom store
+uses only process overrides unless it belongs to the chosen settings
+directory. Saved credentials require a private, owned settings file.
 
 `/lore:setup` walks each `/lore:doctor` finding behind its own confirmation: disabling Claude Code's built-in auto-memory, adding the permission allowlist, porting existing entries, priming the session index.
 
