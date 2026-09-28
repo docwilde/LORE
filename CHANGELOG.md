@@ -22,6 +22,8 @@
 
 - Bind hub/peer cursors to canonical endpoint and configured credential.
   Preserve legacy rows and safely replay instead of inheriting ambiguous cursors.
+- Calculate backlog and freshness from active streams only.
+  Keep missing-store status lazy and unavailable measurements unknown.
 
 ## 0.62.1 — 2026-09-28
 

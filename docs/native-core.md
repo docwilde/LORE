@@ -124,6 +124,11 @@ rows remain intact, but a newly identified endpoint starts at zero and replays
 through normal duplicate handling. A changed URL, port or token cannot inherit
 another stream's settled cursor.
 
+Sync status measures backlog and pull freshness only for currently configured
+stream identities. Legacy rows cannot make a new hub appear settled or fresh.
+Missing stores and unavailable configuration remain unknown; status opens no
+network connection and does not create a store.
+
 Push respects advertised body/count limits and splits rejected HTTP 413 batches
 without advancing their cursor. A rejected single operation produces a refusal.
 Receivers split drained operations within the canonical count and byte bounds;
