@@ -81,7 +81,7 @@ fn custom_settings_directory_preserves_default_root_consistency() {
     let home = tempfile::tempdir().unwrap();
     let directory = home.path().join("custom-claude");
     lore_core::files::atomic_write(&directory.join("settings.json"),json!({"env":{
-        "LORE_MEMORY_CAP":"17600","LORE_DISABLE_REVIEW":"1","LORE_SYNC_URL":"https://example.invalid"
+        "LORE_MEMORY_CAP":"17600","LORE_DISABLE_REVIEW":"1","LORE_SYNC_URL":"https://example.invalid","LORE_SYNC_AUTH":"none"
     }}).to_string().as_bytes()).unwrap();
     let shown = show(
         home.path(),
