@@ -391,8 +391,11 @@ pub fn mutate_locked(
         }
         "replace" | "remove" => {
             let hits = if exact {
-                entries.iter().enumerate().filter_map(|(index, entry)|
-                    (entry == needle).then_some(index)).collect::<Vec<_>>()
+                entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| (entry == needle).then_some(index))
+                    .collect::<Vec<_>>()
             } else {
                 match_entries(&entries, needle)
             };
@@ -733,14 +736,53 @@ mod tests {
         let cfg = Config::for_root(temp.path().join("lore"));
         let path = cfg.root.join("USER.md");
         files::atomic_write(&path, b"- shared fact extended\n- shared fact\n").unwrap();
-        mutate(&cfg, Scope::User, "", "replace-exact", "shared fact", "Alpha replacement",
-               "direct", None, Some("codex"), &auth()).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"- Alpha replacement\n- shared fact extended\n");
-        mutate(&cfg, Scope::User, "", "add", "", "shared fact",
-               "direct", None, Some("codex"), &auth()).unwrap();
-        mutate(&cfg, Scope::User, "", "remove-exact", "shared fact", "",
-               "direct", None, None, &auth()).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"- Alpha replacement\n- shared fact extended\n");
+        mutate(
+            &cfg,
+            Scope::User,
+            "",
+            "replace-exact",
+            "shared fact",
+            "Alpha replacement",
+            "direct",
+            None,
+            Some("codex"),
+            &auth(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"- Alpha replacement\n- shared fact extended\n"
+        );
+        mutate(
+            &cfg,
+            Scope::User,
+            "",
+            "add",
+            "",
+            "shared fact",
+            "direct",
+            None,
+            Some("codex"),
+            &auth(),
+        )
+        .unwrap();
+        mutate(
+            &cfg,
+            Scope::User,
+            "",
+            "remove-exact",
+            "shared fact",
+            "",
+            "direct",
+            None,
+            None,
+            &auth(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"- Alpha replacement\n- shared fact extended\n"
+        );
     }
 
     #[test]

@@ -616,7 +616,11 @@ fn conflict(
     let normalized = portable_key(key, kind, bucket)?;
     let mut stmt=conn.prepare("SELECT machine_id,payload FROM sync_ops WHERE class=? AND op='replace' AND applied=1 AND op_id!=? AND project_key IS ? LIMIT 10001")?;
     let mut budget = MAX_PAGE_BYTES;
-    let mut query = stmt.query(params![op["class"].as_str(), op["op_id"].as_str(), optional(op, "project_key", 2048)?])?;
+    let mut query = stmt.query(params![
+        op["class"].as_str(),
+        op["op_id"].as_str(),
+        optional(op, "project_key", 2048)?
+    ])?;
     let mut rows = Vec::new();
     while let Some(row) = query.next()? {
         if rows.len() == 10000 {
@@ -2061,29 +2065,95 @@ mod tests {
         drop(conn);
         let original = "src.rs — shared";
         let key = gate::entry_key("filemap", "sender-checkout", original);
-        let seed = op(&cfg,"seed-map",1,"filemap","add",Some("repo-a"),json!({"text":original}));
-        let first = op(&cfg,"first-map",2,"filemap","replace",Some("repo-a"),json!({"old_key":key,"text":"src.rs — first"}));
-        let mut second = op(&cfg,"second-map",3,"filemap","replace",Some("repo-a"),json!({"old_key":key,"text":"src.rs — second"}));
+        let seed = op(
+            &cfg,
+            "seed-map",
+            1,
+            "filemap",
+            "add",
+            Some("repo-a"),
+            json!({"text":original}),
+        );
+        let first = op(
+            &cfg,
+            "first-map",
+            2,
+            "filemap",
+            "replace",
+            Some("repo-a"),
+            json!({"old_key":key,"text":"src.rs — first"}),
+        );
+        let mut second = op(
+            &cfg,
+            "second-map",
+            3,
+            "filemap",
+            "replace",
+            Some("repo-a"),
+            json!({"old_key":key,"text":"src.rs — second"}),
+        );
         second["machine_id"] = json!("other-author");
         let raw = store::canonical_bytes(&tuple(&second)).unwrap();
-        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(cfg.sync.key.as_ref().unwrap().as_bytes()).unwrap();
+        let mut mac =
+            Hmac::<sha2::Sha256>::new_from_slice(cfg.sync.key.as_ref().unwrap().as_bytes())
+                .unwrap();
         mac.update(&raw);
-        second["mac"] = json!(mac.finalize().into_bytes().iter().map(|b|format!("{b:02x}")).collect::<String>());
-        assert_eq!(apply_ops(&cfg,&[seed,first,second]).unwrap()["applied"],3);
-        let entries = memory::read_entries(&filemap::path(&cfg,"receiver-a").unwrap()).unwrap();
-        assert!(entries.contains(&"src.rs — first".into()) && entries.contains(&"src.rs — second".into()));
-        let other = op(&cfg,"other-project",4,"filemap","replace",Some("repo-b"),json!({"old_key":key,"text":"src.rs — isolated"}));
-        assert_eq!(apply_ops(&cfg,&[other]).unwrap()["applied"],1);
+        second["mac"] = json!(mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>());
+        assert_eq!(
+            apply_ops(&cfg, &[seed, first, second]).unwrap()["applied"],
+            3
+        );
+        let entries = memory::read_entries(&filemap::path(&cfg, "receiver-a").unwrap()).unwrap();
+        assert!(
+            entries.contains(&"src.rs — first".into())
+                && entries.contains(&"src.rs — second".into())
+        );
+        let other = op(
+            &cfg,
+            "other-project",
+            4,
+            "filemap",
+            "replace",
+            Some("repo-b"),
+            json!({"old_key":key,"text":"src.rs — isolated"}),
+        );
+        assert_eq!(apply_ops(&cfg, &[other]).unwrap()["applied"], 1);
         let conn = store::connect(&cfg).unwrap();
-        assert_eq!(conn.query_row("SELECT count(*) FROM sync_conflicts",[],|r|r.get::<_,i64>(0)).unwrap(),1);
-        let remove = op(&cfg,"remove-alternative",5,"filemap","remove",Some("repo-a"),json!({"key":gate::entry_key("filemap","sender-checkout","src.rs — first")}));
-        assert_eq!(apply_ops(&cfg,&[remove]).unwrap()["applied"],1);
-        assert_eq!(memory::read_entries(&filemap::path(&cfg,"receiver-a").unwrap()).unwrap(),["src.rs — second"]);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM sync_conflicts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let remove = op(
+            &cfg,
+            "remove-alternative",
+            5,
+            "filemap",
+            "remove",
+            Some("repo-a"),
+            json!({"key":gate::entry_key("filemap","sender-checkout","src.rs — first")}),
+        );
+        assert_eq!(apply_ops(&cfg, &[remove]).unwrap()["applied"], 1);
+        assert_eq!(
+            memory::read_entries(&filemap::path(&cfg, "receiver-a").unwrap()).unwrap(),
+            ["src.rs — second"]
+        );
     }
 
     #[test]
     fn portable_entry_key_translation_preserves_scope_boundaries() {
-        for bad in ["filemap::0123456789abcdefabcd", "memory:user:0123456789abcdefabcD", "memory:user:0123456789abcdefabc", "belief:user:0123456789abcdefabcd"] {
+        for bad in [
+            "filemap::0123456789abcdefabcd",
+            "memory:user:0123456789abcdefabcD",
+            "memory:user:0123456789abcdefabc",
+            "belief:user:0123456789abcdefabcd",
+        ] {
             assert!(portable_key(bad, "filemap", "receiver").is_err());
         }
         let (_temp, cfg) = fixture();

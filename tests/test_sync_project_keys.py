@@ -45,6 +45,7 @@ class PortableProjectEntryKeys(unittest.TestCase):
 
     def test_concurrent_same_path_rewrites_keep_both_and_resolve_exactly(self):
         _, a = _machine("portable-conflict-a", MACHINE_A)
+        _align_project(a, "portable-repo", "author-path")
         a.filemap_add("author-path", "src.rs", "original purpose")
         seed = _read_ops(a)
         project_key = seed[0]["project_key"]

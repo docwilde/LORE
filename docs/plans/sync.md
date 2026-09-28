@@ -286,7 +286,13 @@ key is a no-op. `replace` is `remove old_key` then `add text`. Provenance
 is recorded from the op's `via`/`writer`, so the ledger on the receiver
 says what the author's ledger said.
 
-Curated `USER.md` and project `MEMORY.md` files are persisted in ascending
+The `entry_key` digest covers normalized text; its prefix contains a local
+bucket. A receiver translates that prefix into its own bucket for the signed
+`project_key`, retaining the digest and the original signed operation. User,
+project and file-map namespaces remain distinct. Conflict lookup also uses
+`project_key`, so identical wording in different repositories is unrelated.
+
+Curated `USER.md`, project `MEMORY.md` and file-map files are persisted in ascending
 Unicode code point order of the complete entry text (equivalently UTF-8 byte
 order). This applies to local writes as well as received operations, so two
 concurrent authors converge to identical file bytes once they share the same
@@ -294,8 +300,6 @@ entry set. Existing files are reordered on their next successful mutation;
 entries and text-keyed provenance are preserved. Review snapshots continue
 to reflect the stored order. This ordering does not change cap admission or
 resolve competing case variants and concurrent replacements.
-
-
 Conflicts:
 
 1. *Same entry replaced on two machines with different wording.* Both
@@ -311,11 +315,11 @@ Conflicts:
 3. *Over cap after merge.* Each incoming mutation is admitted against the
    current local cap; existing entries are never evicted. An entry that
    does not fit is staged as a pending proposal (`kind: memory, action: add, origin:
-   sync-overflow`) with a **deterministic** uid (`sha256(op_id)`), so
-   every node stages the same proposals and one approval, anywhere,
-   resolves them everywhere. The file never exceeds the cap and
-   `write_entries`'s refusal path (`memory.py:81-94`) is never hit by
-   sync.
+   sync-overflow`) with a **deterministic** uid (`sha256(op_id)`). Existing
+   local contents and configured caps can differ, so concurrent overflow can
+   retain different subsets and stage different proposals. Ordering alone
+   does not resolve that admission decision; it requires human review. The
+   stored file never exceeds its cap after a successful mutation.
 
 **belief** (`insert {uid, subject, claim, confidence, via, writer,
 created, evidence{session_id, project_key, note}}`, `reinforce {uid,

@@ -422,15 +422,10 @@ def _stage_unverified(op: dict, reason: str) -> None:
 # Case 3 (over cap after merge) is handled at the bottom: the production
 # writer's own refusal is the signal.
 #
-# DEVIATION FROM THE PROSE, stated plainly. sync.md says "`replace` is
-# `remove old_key` then `add text`". Implemented literally, a replace would
-# move the entry to the END of the file, so a target replaying a source's log
-# would produce the same SET of entries in a different ORDER -- and
-# test_store_is_a_function_of_its_log asserts USER.md is BYTE-identical, not
-# set-identical. In-place-when-present is byte-faithful to memory_replace
-# (which is what authored the op) and produces the identical outcome in all
-# three conflict cases, because those are exactly the cases where the old_key
-# is absent and the code does fall back to an add.
+# Writers persist complete entry text in canonical Unicode order. Reuse their
+# replace operation for exact removal and provenance, then use add when the
+# old wording is gone; a competing file-map rewrite retains both alternatives.
+# Key translation changes only the receiver's lookup, never signed log bytes.
 
 def _memory_scope(conn: sqlite3.Connection, project_key: "str | None") -> "tuple[str, str]":
     if project_key is None:
@@ -583,7 +578,7 @@ def _apply_memory(conn: sqlite3.Connection, op: dict) -> bool:
 
 def _replace_in_place(conn: sqlite3.Connection, op: dict, kind: str, scope: str,
                       slug: str, old: str, text: str) -> bool:
-    """Rewrite one entry WITHOUT moving it, then re-record provenance from the
+    """Rewrite one exact entry, then re-record provenance from the
     op's own `via`/`writer` -- sync.md: "the ledger on the receiver says what
     the author's ledger said".
 
