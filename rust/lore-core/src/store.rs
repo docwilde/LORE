@@ -244,7 +244,17 @@ pub fn canonical_mac(tuple: &serde_json::Value, key: &str) -> Result<String> {
 /// Protocol S2 uses Python shortest-round-trip float spelling, including
 /// signed/padded exponents. Ordinary serde JSON is not byte-identical here.
 pub fn canonical_bytes(value: &serde_json::Value) -> Result<Vec<u8>> {
-    fn write(value: &serde_json::Value, out: &mut Vec<u8>, depth: usize) -> Result<()> {
+    canonical_bytes_bounded(value, crate::MAX_FRAME_BYTES)
+}
+/// Use the same canonical wire encoding for bounded aggregate digests. Op
+/// signing retains the ordinary frame cap through `canonical_bytes` above.
+pub fn canonical_bytes_bounded(value: &serde_json::Value, max_bytes: usize) -> Result<Vec<u8>> {
+    fn write(
+        value: &serde_json::Value,
+        out: &mut Vec<u8>,
+        depth: usize,
+        max_bytes: usize,
+    ) -> Result<()> {
         use serde_json::Value;
         if depth > 32 {
             return Err(Error::TooLarge);
@@ -274,7 +284,7 @@ pub fn canonical_bytes(value: &serde_json::Value) -> Result<Vec<u8>> {
                     if index > 0 {
                         out.push(b',');
                     }
-                    write(row, out, depth + 1)?;
+                    write(row, out, depth + 1, max_bytes)?;
                 }
                 out.push(b']');
             }
@@ -288,19 +298,19 @@ pub fn canonical_bytes(value: &serde_json::Value) -> Result<Vec<u8>> {
                     }
                     serde_json::to_writer(&mut *out, key).map_err(|_| Error::InvalidRequest)?;
                     out.push(b':');
-                    write(&rows[*key], out, depth + 1)?;
+                    write(&rows[*key], out, depth + 1, max_bytes)?;
                 }
                 out.push(b'}');
             }
             _ => serde_json::to_writer(&mut *out, value).map_err(|_| Error::InvalidRequest)?,
         }
-        if out.len() > crate::MAX_FRAME_BYTES {
+        if out.len() > max_bytes {
             return Err(Error::TooLarge);
         }
         Ok(())
     }
     let mut output = Vec::new();
-    write(value, &mut output, 0)?;
+    write(value, &mut output, 0, max_bytes)?;
     Ok(output)
 }
 #[cfg(test)]
