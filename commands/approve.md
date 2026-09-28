@@ -1,11 +1,22 @@
 ---
-description: Approve staged lore proposals (ids or "all")
-argument-hint: [id ...|all] | <id> --text "..." [--match "..."]
+description: Review and approve one exact staged LORE proposal
+argument-hint: <id>
 allowed-tools: Bash
 ---
 
-Before approving anything that asserts a checkable fact — a schema or vocabulary, a migration or version number, a count, a path — verify it against the source of truth first (read the tree, query the database, open the file). Staged text is a cheap model's summary of a transcript: invented node-type lists and wrong migration numbers have arrived as confident, well-formed prose. A wrong entry is far cheaper to catch here than once it is injected into every future session. Say what you checked when you report.
+Read `"${CLAUDE_PLUGIN_ROOT}/bin/lore" pending show <id>` and show the complete
+proposal, destination and resulting memory usage. Verify checkable claims against
+their source before recommending acceptance. Explain any conflict or provenance
+warning. Approval must bind the proposal's current SHA-256 and inode; changed
+proposals require another review.
 
-A verdict of "keep, reworded" or "merge with an existing entry" is one command, not a reject plus a hand-written add: `approve <id> --text "<final text>"` applies the proposal with that text, and `--match "<substring of the existing entry>"` makes it replace that entry instead of adding (refused, not added, when nothing matches). One memory add/replace proposal per call; the archive keeps the staged text beside the one that landed. Show the user the exact final text before running it.
+Ask the user for the exact decision. DOXA's pending submenu applies the reviewed
+snapshot with A or Enter. A human using the native CLI can approve the reviewed
+ID from a terminal. Detached/model callers cannot grant themselves human-review
+authority. For an already reviewed terminal request, the explicit form is
+`lore approve <id> --expected '{"sha256":"...","inode":...}'`.
 
-Then run `"${CLAUDE_PLUGIN_ROOT}/bin/lore" approve $ARGUMENTS` and report what was applied, including the resulting cap usage. Past ~50% of a scope's cap, treat approval as a budget decision: approve what will change a future decision, reject what merely records that something happened, and prefer consolidating an overlapping pair into one dense line over storing both. If a memory write fails on the cap, the error lists all entries — propose a consolidation (`memory replace` merging overlapping entries), get the user's OK, apply it, then retry the approve.
+The native CLI refuses blind `all` approval and legacy `--text`, `--match` or
+`--force` shortcuts. For changed wording, reject the old proposal and submit the
+replacement through the normal staged memory workflow, then review that exact
+replacement. Do not silently substitute a direct curated write.

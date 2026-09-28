@@ -11,7 +11,7 @@ Run these three via Bash and report one line per check with the exact fix for an
 
 Additionally check, still read-only:
 
-- Does `~/.claude/settings.json` have a `permissions.allow` entry covering `Bash(*/plugins/lore/bin/lore *)` (or an equivalent broader rule)? Without it every memory write costs a permission prompt.
+- Does `~/.claude/settings.json` have a `permissions.allow` entry covering `Bash(*/plugins/*/bin/lore *)` (or an equivalent broader rule)? Without it every memory write costs a permission prompt.
 - Does the built-in auto-memory directory for this project (`~/.claude/projects/<slug>/memory/`) contain entries that were never ported into lore?
 - **Is there an unreviewed session backlog?** `review` only ever fires on SessionEnd and PreCompact, so sessions that ended before lore was installed were never reviewed and never will be. A large session index next to a belief store at `0 total` and near-empty memory is that gap, not a healthy install. Count the transcripts per project and report the total, top-level only — the `subagents/` subdirectories are not sessions:
 

@@ -108,7 +108,7 @@ Hub and peer clients use Reqwest with TLS validation, bounded pages and no
 redirects. Peer serving uses Hyper with connection, header and body bounds.
 Pull-only peer service requires a configured shared secret by default, even
 on loopback; forwarding a Tailscale login header is not authentication.
-`--auth none` is an explicit unauthenticated pull-only choice. Full pulls are
+`LORE_SYNC_PEER_AUTH=none` is an explicit unauthenticated pull-only choice. Full pulls are
 validated before application; push acknowledgements advance only the settled
 prefix. Offline bundles retain original signed bytes and refuse overwriting
 an existing destination.

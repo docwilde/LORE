@@ -806,7 +806,7 @@ impl PeerServer {
         match (method, path) {
             ("GET", "/v1/whoami") => Ok((
                 200,
-                json!({"account":"peer","machine_id":self.machine_id,"auth":self.auth,"trust":if self.loopback{"same-user (loopback identity headers)"}else{"public listener"},"shared_secret":self.secret.is_some()}),
+                json!({"account":"peer","machine_id":self.machine_id,"auth":self.auth,"trust":if self.loopback{"shared secret + asserted identity"}else{"public listener"},"shared_secret":self.secret.is_some()}),
             )),
             (_, "/v1/snapshot") => Ok((501, json!({"error":"not_implemented"}))),
             ("GET", "/v1/ops") => {

@@ -256,8 +256,8 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_SYNC_PUSH_AFTER_REVIEW` | `1` | push when the review worker finishes; `0` turns it off |
 | `LORE_SYNC_PEER` | unset | Transport B: a comma list of tailnet nodes to pull from directly. A bare name (`workstation`) means `http://workstation:<port>`; a full URL is used as written, which is the `tailscale serve` form |
 | `LORE_SYNC_PEER_PORT` | 8765 | port `lore sync serve` binds and a bare peer name dials |
-| `LORE_SYNC_PEER_AUTH` | `tailscale` | how `lore sync serve` authenticates: the Tailscale identity header, or `none` — which is required, and must be typed, before it will bind anything but loopback |
-| `LORE_SYNC_PEER_ALLOW` | unset | comma list of tailnet logins `lore sync serve` will answer; unset means any identity `tailscale serve` vouched for. Not enforced at all under `LORE_SYNC_PEER_AUTH=none`, and the banner says so |
+| `LORE_SYNC_PEER_AUTH` | `tailscale` | authenticated native serving requires a configured shared secret plus an identity header; `none` explicitly enables unauthenticated serving and is required before binding outside loopback |
+| `LORE_SYNC_PEER_ALLOW` | unset | comma list of tailnet logins `lore sync serve` will answer; unset means any asserted identity with the configured shared secret. Not enforced at all under `LORE_SYNC_PEER_AUTH=none`, and the banner says so |
 | `LORE_SYNC_PEER_SECRET` | unset | shared string required as `Authorization: Bearer <secret>` on every authenticated request, in addition to the identity header. Set it on the listener and on every machine that pulls from it. Never printed or logged |
 | `LORE_SYNC_PEER_LOG` | unset | `1` logs one line per served request to stderr |
 | `LORE_DISABLE_SYNC` | unset | stage kill switch: no op is appended and nothing syncs |
