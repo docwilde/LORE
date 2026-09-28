@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.62.0 — 2026-09-28
+
+**Native plugin runtime**
+
+- Route **`bin/lore`**, Claude/Codex hooks and MCP through the Rust core.
+  Setup builds a version-matched carrier once; startup hooks never compile.
+- Port standalone memory, belief, graph, review, skills and administrative
+  commands; keep exact review, provenance and capacity gates.
+- Preserve existing files and SQLite stores. Python remains a development
+  compatibility library and interoperability oracle.
+
+**Sync and administration**
+
+- Serve pull-only peers with Hyper; use bounded Reqwest hub/peer clients.
+  Require configured authentication by default and preserve signed bytes.
+- Add native offline bundles, seed/resign and project relocation.
+  Report partial effects and retain failed receipt cursors for retry.
+- Stage setup memory imports for review; preserve curated user facts.
+  Native hook cancellation terminates and reaps owned reviewer descendants.
+
+**Validation and authority**
+
+- Apply caller authority to the public bridge; reject untrusted reviewer files.
+  MCP reports refused calls without terminating the request stream.
+- Invalidate cached builds when embedded schemas/templates change.
+  Restore both native launchers when installation fails partway through.
+
 ## 0.61.1 — 2026-09-28
 
 **Sync replay**
