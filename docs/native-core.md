@@ -94,9 +94,18 @@ operations. Local edits and pending proposals are not reset automatically.
 ## Native command and network runtime
 
 `./task install` builds and installs `lore-rs` and a `lore` launcher. Plugin
-`bin/lore` accepts a matching installed carrier or builds one in a private disk
-cache on a non-hook command. Hooks never compile; run setup before enabling them.
-`LORE_RS` selects an explicit version-matched carrier.
+`bin/lore` accepts an installed stable carrier with the same major and minor
+version and a patch version at least as new as the plugin, or builds one in a
+private disk cache on a non-hook command. Prerelease and build-metadata versions
+require an exact match. Hooks never compile; run setup before enabling them.
+`LORE_RS` selects an explicit compatible carrier and fails closed if that carrier
+is missing, reports a malformed version, or is incompatible; it never falls back.
+
+Patch releases must preserve the plugin CLI and hook arguments, MCP contract
+(currently protocol `2024-11-05`), and shared store formats. Breaking those
+contracts requires a new minor version (or major version), which older plugins
+will reject. This policy allows a shared carrier to serve older plugins within
+the same release line without accepting arbitrary newer releases.
 
 The native CLI includes setup/teardown, scoped memory/file maps, beliefs,
 evidence and graph operations, session search/indexing, review/backfill,

@@ -6,10 +6,37 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$root/rust/lore-core/Cargo.toml" | head -1)
 matches() {
   [ -x "$1" ] || return 1
-  case $("$1" --version 2>/dev/null) in "$version"|*" $version") return 0 ;; *) return 1 ;; esac
+  reported=$("$1" --version 2>/dev/null) || return 1
+  # Only the carrier's documented version output is accepted. Stable patch
+  # releases preserve the CLI, hook, MCP and shared-store contracts.
+  case "$reported" in
+    "lore-rs "*) reported=${reported#lore-rs } ;;
+  esac
+  LC_ALL=C awk -v required="$version" -v actual="$reported" 'function valid(v, pre, ids, n, i) {
+    if (v !~ ("^" stable suffix "$")) return 0
+    pre = v
+    sub(/\+.*/, "", pre)
+    if (sub(/^[^-]*-/, "", pre)) {
+      n = split(pre, ids, ".")
+      for (i = 1; i <= n; i++)
+        if (ids[i] ~ /^0[0-9]+$/) return 0
+    }
+    return 1
+  }
+  BEGIN {
+    stable = "(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)"
+    suffix = "(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?"
+    if (!valid(required) || !valid(actual)) exit 1
+    if (required !~ ("^" stable "$") || actual !~ ("^" stable "$")) exit (actual != required)
+    split(required, r, "."); split(actual, a, ".")
+    # Compare decimal strings without awk floating-point rounding.
+    exit !(("x" a[1]) == ("x" r[1]) && ("x" a[2]) == ("x" r[2]) &&
+      (length(a[3]) > length(r[3]) ||
+       (length(a[3]) == length(r[3]) && ("x" a[3]) >= ("x" r[3]))))
+  }'
 }
 if [ -n "${LORE_RS:-}" ]; then
-  matches "$LORE_RS" || { printf 'LORE_RS must name native LORE %s.\n' "$version" >&2; exit 1; }
+  matches "$LORE_RS" || { printf 'LORE_RS must name a compatible native LORE carrier (required %s).\n' "$version" >&2; exit 1; }
   exec "$LORE_RS" "$@"
 fi
 candidate=$(command -v lore-rs || :)
