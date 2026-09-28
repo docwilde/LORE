@@ -16,7 +16,6 @@ const MAX_OPS: usize = 100_000;
 const BUNDLE_BYTES: usize = 128 * 1024 * 1024;
 const PORTABLE: &[&str] = &["memory", "filemap", "belief", "pending", "skill"];
 
-#[derive(Debug)]
 pub struct TransportError {
     pub status: u16,
     pub code: String,
@@ -35,6 +34,14 @@ impl TransportError {
 impl std::fmt::Display for TransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "sync {} ({})", self.code, self.status)
+    }
+}
+impl std::fmt::Debug for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransportError")
+            .field("status", &self.status)
+            .field("code", &self.code)
+            .finish()
     }
 }
 impl std::error::Error for TransportError {}
@@ -241,7 +248,22 @@ impl Transport {
             }
             let code = answer["error"]
                 .as_str()
-                .filter(|s| s.len() <= 64 && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+                .filter(|s| {
+                    matches!(
+                        *s,
+                        "bad_request"
+                            | "unauthenticated"
+                            | "forbidden"
+                            | "machine_seq_gap"
+                            | "machine_seq_conflict"
+                            | "op_id_conflict"
+                            | "payload_too_large"
+                            | "busy"
+                            | "not_implemented"
+                            | "not_found"
+                            | "method_not_allowed"
+                    )
+                })
                 .unwrap_or("protocol_error")
                 .to_owned();
             if status == 503 && code == "busy" && attempt < 3 {

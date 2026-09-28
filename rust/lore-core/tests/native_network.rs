@@ -791,3 +791,20 @@ fn proxy_html_413_splits_without_advancing_rejected_prefix() {
     assert_eq!(batch(2)["ops"].as_array().unwrap().len(), 1);
     assert_eq!(batch(3)["ops"].as_array().unwrap().len(), 1);
 }
+
+#[test]
+fn remote_error_code_cannot_echo_credentials_into_diagnostics() {
+    let (url, h) = fixture(vec![(
+        401,
+        json!({"error":"fixture_secret","message":"Bearer fixture_secret"}),
+    )]);
+    let error = Transport::new(&url, Some("fixture_secret".into()), "hub".into())
+        .unwrap()
+        .request("GET", "whoami", &[], None)
+        .unwrap_err();
+    assert_eq!(error.status, 401);
+    assert_eq!(error.code, "protocol_error");
+    assert_eq!(error.to_string(), "sync protocol_error (401)");
+    assert!(!format!("{error:?}").contains("fixture_secret"));
+    h.join().unwrap();
+}
