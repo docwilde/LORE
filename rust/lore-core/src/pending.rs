@@ -463,6 +463,7 @@ fn private_claim_dir(cfg: &Config) -> Result<PathBuf> {
     files::private_dir(&dir)?;
     Ok(dir)
 }
+#[cfg(test)]
 fn restore_claim(source: &Path, claimed: &Path, id: &str) -> Result<()> {
     let source_dir = files::open_directory(source.parent().ok_or(Error::UnsafePath)?)?;
     let claim_dir = files::open_directory(claimed.parent().ok_or(Error::UnsafePath)?)?;

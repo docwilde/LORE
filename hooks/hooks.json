@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/bin/lore.py inject",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/lore\" hook --engine claude --event session-start",
             "timeout": 30,
             "statusMessage": "Loading lore memory"
           }
@@ -18,15 +18,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/bin/lore.py refresh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/lore\" hook --engine claude --event prompt",
             "timeout": 15,
             "statusMessage": "Refreshing lore memory"
-          },
-          {
-            "type": "command",
-            "command": "[ \"$LORE_STREAM_INDEX\" = \"1\" ] && python3 \"${CLAUDE_PLUGIN_ROOT}\"/bin/lore.py index --live \"$TRANSCRIPT_PATH\" || true",
-            "timeout": 15,
-            "statusMessage": "Streaming session into lore index"
           }
         ]
       }
@@ -36,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/bin/lore.py review",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/lore\" hook --engine claude --event pre-compact",
             "timeout": 30,
             "statusMessage": "Deriving lore beliefs before compaction"
           }
@@ -48,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/bin/lore.py review",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/lore\" hook --engine claude --event session-end",
             "timeout": 60
           }
         ]

@@ -20,6 +20,10 @@ pub mod skills;
 pub mod store;
 pub mod sync;
 pub mod sync_apply;
+pub mod sync_network;
+pub mod sync_admin;
+pub mod standalone;
+pub mod standalone_ops;
 pub mod worker;
 pub use core::Core;
 
@@ -91,3 +95,9 @@ pub fn utcnow() -> String {
         ))
         .unwrap_or_default()
 }
+
+pub mod standalone_graph;
+
+pub mod supervisor;
+
+pub mod standalone_hooks;

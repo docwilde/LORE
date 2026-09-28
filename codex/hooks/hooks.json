@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${PLUGIN_ROOT}/codex/hooks/session_start.py\"",
+            "command": "\"${PLUGIN_ROOT}/bin/lore\" hook --engine codex --event session-start",
             "timeout": 10,
             "statusMessage": "Loading LORE memory",
             "additionalContextLimit": 16000

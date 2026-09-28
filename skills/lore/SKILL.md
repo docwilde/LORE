@@ -6,7 +6,7 @@ description: Maintain and recall persistent memory (Hermes-pattern). Use when th
 # lore — curated memory + session recall
 
 CLI (always via Bash): use the `lore()` function printed in the injected
-snapshot. Claude Code can also run `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py"
+snapshot. Claude Code can also run `"${CLAUDE_PLUGIN_ROOT}/bin/lore"
 <cmd>`; standalone Codex can run `bash codex/skills/lore/scripts/lore.sh
 <cmd>` from a LORE checkout.
 

@@ -109,15 +109,25 @@ jobs:
     env:
       CARGO_BUILD_JOBS: 2
       RUST_TEST_THREADS: 1
+      TMPDIR: /home/runner/.lore-tests
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Install Rust
-        run: rustup toolchain install stable --profile minimal
+        run: |
+          mkdir -p "$TMPDIR"
+          chmod 700 "$TMPDIR"
+          rustup toolchain install stable --profile minimal
       - name: Native contracts, storage and owned reviewer fixtures
         run: cargo +stable test --locked
+      - name: Native plugin launcher and hooks
+        env:
+          LORE_RS: ${{ github.workspace }}/target/debug/lore-rs
+        run: |
+          sh -n bin/lore task scripts/test-native-launcher.sh
+          sh scripts/test-native-launcher.sh
       - name: Python and native store interoperability
         env:
           LORE_TEST_NATIVE_BINARY: ${{ github.workspace }}/target/debug/lore-rs

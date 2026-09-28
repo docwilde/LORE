@@ -15,8 +15,8 @@ decisions were made, see [`user-model-channel-separation.md`](user-model-channel
 | `/lore:context` | The exact entries in context right now, verbatim, as one table per scope. |
 | `/lore:filemap [path "purpose"]` | No args prints the file map; args add or update a row. |
 | `/lore:pending` | Lists staged proposals grouped by kind, each with its origin session and a keep/reject/merge judgment — a staged skill shows its body, truncated, not only its description. Decides nothing. Clusters piles over ~50. |
-| `/lore:approve <id\|all>` | Applies proposals: memory writes cap-enforced, every skill install diffed first (a first install against nothing), retires moved to `skills-retired/`. A proposal whose file changed since it was listed is refused and re-shown — approval is consent to a text, not to an id. `<id> --text "…"` applies one memory proposal reworded; `--match "…"` makes it replace the existing entry that substring names (refused, never added, when nothing matches). The archive keeps both texts under `edited_from`. |
-| `/lore:reject <id\|all>` | Archives proposals unapplied, verdict recorded in `pending/archive/`. |
+| `/lore:approve <id>` | Review one complete proposal and approve its exact current snapshot in DOXA or a human terminal. Changed proposals require a fresh review; native CLI refuses blind `all`, `--text`, `--match` and `--force` approval shortcuts. |
+| `/lore:reject <id>` | Review one complete proposal and archive that exact snapshot unapplied. The verdict remains in `pending/archive/`. |
 | `/lore:review` | Reviews the current session now instead of waiting for session end. Runs as a TUI-visible background task. `--dry-run` prints the prompt and spends nothing. |
 | `/lore:backfill [full\|project\|<path>]` | Pages a *whole* transcript through the deriver window by window, not just the newest window. Empty or `full` takes the current session, `project` every transcript of this project, or name a path. Reports the window count before spending. |
 | `/lore:status` | Memory fill per scope, index and belief-store sizes, pending count, per-role models, learned skills with their records. |
@@ -26,7 +26,8 @@ decisions were made, see [`user-model-channel-separation.md`](user-model-channel
 | `/lore:config` | Prints the stage table and toggles stages by multi-select; writes `settings.json` → `"env"`. |
 | `/lore:help` | One-screen reference card: commands plus the memory model. |
 
-Everything runs as a plain CLI too — `python3 <plugin>/bin/lore.py --help`, stdlib only:
+Everything runs through the native CLI too — `<plugin>/bin/lore --help`
+or the installed `lore` command:
 
 `inject` · `snapshot` · `memory` · `filemap` · `search` · `session` · `index` · `review` · `backfill` · `pending` · `approve` · `reject` · `belief` · `ask` · `outcome` · `audit` · `consult` · `stats` · `dream` · `crosscheck` · `status` · `motd` · `statusline` · `provenance` · `config` · `doctor` · `sync` · `teardown` · `reset`
 
@@ -255,8 +256,8 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_SYNC_PUSH_AFTER_REVIEW` | `1` | push when the review worker finishes; `0` turns it off |
 | `LORE_SYNC_PEER` | unset | Transport B: a comma list of tailnet nodes to pull from directly. A bare name (`workstation`) means `http://workstation:<port>`; a full URL is used as written, which is the `tailscale serve` form |
 | `LORE_SYNC_PEER_PORT` | 8765 | port `lore sync serve` binds and a bare peer name dials |
-| `LORE_SYNC_PEER_AUTH` | `tailscale` | how `lore sync serve` authenticates: the Tailscale identity header, or `none` — which is required, and must be typed, before it will bind anything but loopback |
-| `LORE_SYNC_PEER_ALLOW` | unset | comma list of tailnet logins `lore sync serve` will answer; unset means any identity `tailscale serve` vouched for. Not enforced at all under `LORE_SYNC_PEER_AUTH=none`, and the banner says so |
+| `LORE_SYNC_PEER_AUTH` | `tailscale` | authenticated native serving requires a configured shared secret plus an identity header; `none` explicitly enables unauthenticated serving and is required before binding outside loopback |
+| `LORE_SYNC_PEER_ALLOW` | unset | comma list of tailnet logins `lore sync serve` will answer; unset means any asserted identity with the configured shared secret. Not enforced at all under `LORE_SYNC_PEER_AUTH=none`, and the banner says so |
 | `LORE_SYNC_PEER_SECRET` | unset | shared string required as `Authorization: Bearer <secret>` on every authenticated request, in addition to the identity header. Set it on the listener and on every machine that pulls from it. Never printed or logged |
 | `LORE_SYNC_PEER_LOG` | unset | `1` logs one line per served request to stderr |
 | `LORE_DISABLE_SYNC` | unset | stage kill switch: no op is appended and nothing syncs |
@@ -338,4 +339,6 @@ Only `lore_core/` is packaged — `bin/`, `hooks/`, `commands/` and `skills/` ar
 
 `.claude-plugin/plugin.json` stays the one place the version is written. The build reads it, `lore_core.__version__` reads it, and an installed wheel — which carries no manifest — falls back to its own metadata, built from that same file.
 
-**This changes nothing for plugin users.** `/plugin install lore` copies the same tree and runs the same `bin/lore.py`; nothing on the plugin path reads `pyproject.toml`.
+The plugin runs native `bin/lore`; Python packaging is retained for compatibility
+library consumers and interoperability tests. Plugin operation does not use
+`pyproject.toml` or a Python interpreter.

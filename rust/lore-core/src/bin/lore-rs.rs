@@ -9,6 +9,22 @@ const AGENT_CAPABILITIES: &[&str] = &["agent_catalog_v1", "agent_tool_v1", "agen
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if lore_core::supervisor::required(&args) {
+        match lore_core::supervisor::enter_worker() {
+            Ok(true) => {}
+            Ok(false) => match lore_core::supervisor::run(&args) {
+                Ok(code) => std::process::exit(code),
+                Err(error) => {
+                    eprintln!("lore-rs: {}", error.code());
+                    std::process::exit(1)
+                }
+            },
+            Err(error) => {
+                eprintln!("lore-rs: {}", error.code());
+                std::process::exit(1)
+            }
+        }
+    }
     // Root's native review/worker commands extend this dispatch boundary.
     let outcome = match args.as_slice() {
         [command] if command == "bridge" => bridge(false),
@@ -20,7 +36,7 @@ fn main() {
             memory_show(options)
         }
         [group, command] if group == "filemap" && command == "show" => filemap_show(),
-        _ => Err(Error::InvalidRequest),
+        _ => lore_core::standalone::run(&args),
     };
     if let Err(error) = outcome {
         eprintln!("lore-rs: {}", error.code());
@@ -55,10 +71,8 @@ fn bridge(agent: bool) -> lore_core::Result<()> {
             session_id: String::new(),
         }
     } else {
-        Authority::HumanReview {
-            agent: "doxa-ui".into(),
-            engine: "human".into(),
-        }
+        // Public CLI pipes do not attest a completed human review.
+        lore_core::standalone::authority()
     };
     let mut core = Core::new(config, authority);
     let limit = if agent {
@@ -156,11 +170,15 @@ fn memory_show(options: &[String]) -> lore_core::Result<()> {
     };
     let mut scope = None;
     let mut host = None;
+    let mut specified_cwd = None;
     let mut at = 0;
     while at < options.len() {
         let value = options.get(at + 1).ok_or(Error::InvalidRequest)?;
         match options[at].as_str() {
             "--scope" if scope.is_none() => scope = Some(Scope::parse(value)?),
+            "--cwd" if specified_cwd.is_none() => {
+                specified_cwd = Some(std::path::PathBuf::from(value))
+            }
             "--host"
                 if host.is_none()
                     && !value.is_empty()
@@ -177,7 +195,10 @@ fn memory_show(options: &[String]) -> lore_core::Result<()> {
         return Err(Error::InvalidRequest);
     }
     let cfg = Config::from_env(Duration::from_secs(3))?;
-    let cwd = std::env::current_dir()?;
+    let cwd = specified_cwd.unwrap_or(std::env::current_dir()?);
+    if !cwd.is_absolute() {
+        return Err(Error::InvalidRequest);
+    }
     let slug = config::project_slug(&cwd);
     let mut out = String::new();
     for tier in [Scope::User, Scope::Project, Scope::Machine] {
@@ -235,6 +256,9 @@ fn filemap_show() -> lore_core::Result<()> {
     use lore_core::{config, filemap, gate, memory};
     let cfg = Config::from_env(Duration::from_secs(3))?;
     let cwd = std::env::current_dir()?;
+    if !cwd.is_absolute() {
+        return Err(Error::InvalidRequest);
+    }
     let slug = config::project_slug(&cwd);
     let entries = memory::read_entries(&filemap::path(&cfg, &slug)?)?;
     let out = format!(

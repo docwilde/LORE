@@ -51,6 +51,11 @@ Use `/lore:filemap` to inspect file maps; `LORE_FILEMAP_CAP` and
 /lore:setup
 ```
 
+The plugin uses the native Rust CLI. Install Rust with [rustup](https://rustup.rs)
+if `lore-rs` is not already installed; the first `/lore:setup` builds it once
+in a private disk cache. Hooks use the installed carrier and never build during
+startup. From a checkout, use `./task build` or `./task install`.
+
 `/lore:setup` walks each `/lore:doctor` finding behind its own confirmation: disabling Claude Code's built-in auto-memory, adding the permission allowlist, porting existing entries, priming the session index.
 
 **First run:** review only looks forward, so run `/lore:backfill project` once to derive existing sessions into the belief store.
@@ -109,13 +114,14 @@ for setup and the [protocol](docs/sync-protocol.md) for the wire format.
 
 ## DOXA — the native terminal
 
-LORE 0.61.0 provides a canonical **Rust module** for
+LORE provides a canonical **Rust module** for
 [DOXA](https://github.com/docwilde/doxa): memory, beliefs, review, context and
 session search share the existing files, SQLite store and signed sync log.
 See the [native core guide](docs/native-core.md) for build commands and contracts.
-The Python plugin and administrative CLI remain available for Claude Code and
-Codex; `lore_core` remains an installable
-[library](docs/manual.md#lore_core-as-a-library).
+Claude Code and Codex hooks, the standalone CLI, MCP, review and sync transports
+use this native core. The Python `lore_core`
+[library](docs/manual.md#lore_core-as-a-library) remains a compatibility reference
+and interoperability test oracle.
 
 ## Reference
 
