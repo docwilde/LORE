@@ -1,0 +1,36 @@
+#!/bin/sh
+# Native plugin entrypoint. Startup hooks only use an already installed binary.
+set -eu
+umask 077
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$root/rust/lore-core/Cargo.toml" | head -1)
+matches() {
+  [ -x "$1" ] || return 1
+  case $("$1" --version 2>/dev/null) in *" $version") return 0 ;; *) return 1 ;; esac
+}
+if [ -n "${LORE_RS:-}" ]; then
+  matches "$LORE_RS" || { printf 'LORE_RS must name native LORE %s.\n' "$version" >&2; exit 1; }
+  exec "$LORE_RS" "$@"
+fi
+for candidate in "$root/target/release/lore-rs" "$root/target/debug/lore-rs" "$(command -v lore-rs || :)"; do
+  if [ -n "$candidate" ] && matches "$candidate"; then exec "$candidate" "$@"; fi
+done
+cache=${LORE_NATIVE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/lore/native}
+case "$cache" in /*) : ;; *) printf 'LORE native cache must be absolute.\n' >&2; exit 1 ;; esac
+[ ! -L "$cache" ] || { printf 'LORE native cache must not be a symlink.\n' >&2; exit 1; }
+# Source changes invalidate the carrier even in unpacked plugin installations.
+fingerprint=$({ find "$root/rust/lore-core" -type f -name '*.rs' -exec sha256sum {} +; sha256sum "$root/rust/lore-core/Cargo.toml" "$root/Cargo.lock"; } | LC_ALL=C sort | sha256sum | cut -d' ' -f1)
+target=$cache/$fingerprint
+binary=$target/release/lore-rs
+if matches "$binary"; then exec "$binary" "$@"; fi
+if [ "${1:-}" = hook ]; then
+  printf 'LORE native carrier is not installed; run the LORE setup command once.\n' >&2
+  exit 1
+fi
+command -v cargo >/dev/null 2>&1 || { printf 'LORE requires Rust: install it from https://rustup.rs, then run LORE setup.\n' >&2; exit 1; }
+mkdir -p "$target/tmp"
+chmod 700 "$cache" "$target" "$target/tmp"
+printf 'Building native LORE %s…\n' "$version" >&2
+TMPDIR=$target/tmp CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2} CARGO_TARGET_DIR=$target cargo build --release --locked --manifest-path "$root/Cargo.toml" --package lore-core --bin lore-rs >&2
+matches "$binary" || { printf 'Native LORE build/version check failed.\n' >&2; exit 1; }
+exec "$binary" "$@"

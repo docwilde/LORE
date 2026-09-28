@@ -3,7 +3,7 @@ description: Belief graph — backfill the edges the store implies, then inspect
 allowed-tools: Bash
 ---
 
-`lore` = `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py"`.
+`lore` = `"${CLAUDE_PLUGIN_ROOT}/bin/lore"`.
 
 Read `$ARGUMENTS`. With no argument, run the **backfill** flow. Otherwise: `view` runs the viewer flow, an integer runs the viewer centred on that belief, anything else is a request to interpret against the subcommands below.
 

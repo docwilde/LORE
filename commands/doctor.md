@@ -5,9 +5,9 @@ allowed-tools: Bash
 
 Run these three via Bash and report one line per check with the exact fix for anything not ok — change nothing:
 
-1. `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" doctor`
-2. `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" config`
-3. `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" status`
+1. `"${CLAUDE_PLUGIN_ROOT}/bin/lore" doctor`
+2. `"${CLAUDE_PLUGIN_ROOT}/bin/lore" config`
+3. `"${CLAUDE_PLUGIN_ROOT}/bin/lore" status`
 
 Additionally check, still read-only:
 

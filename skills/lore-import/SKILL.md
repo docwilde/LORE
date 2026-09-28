@@ -8,8 +8,8 @@ description: Import a signed LORE offline transfer bundle from another machine, 
 When the user asks to import a bundle, use the installed plugin CLI:
 
 ```sh
-python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" sync import /path/to/lore-transfer.json
-python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" sync status
+"${CLAUDE_PLUGIN_ROOT}/bin/lore" sync import /path/to/lore-transfer.json
+"${CLAUDE_PLUGIN_ROOT}/bin/lore" sync status
 ```
 
 `LORE_SYNC_HMAC_KEY` must match the key used to sign the exported ops. Do not print or copy it into the bundle. Import checks the complete bundle's count and digest before applying anything, then uses LORE's normal sync receiver. The receiver respects this machine's `LORE_SYNC_CLASSES`, deduplicates repeat imports, and stages conflicts or unverified ops for review. An import with unverified or failed ops exits nonzero; inspect `lore pending` and the printed counts, then report the result without approving proposals on the user's behalf.

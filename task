@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+cache=${LORE_BUILD_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/lore/build}
+case "$cache" in /*) : ;; *) printf 'LORE build cache must be absolute.\n' >&2; exit 1 ;; esac
+[ ! -L "$cache" ] || exit 1
+mkdir -p "$cache/tmp"
+chmod 700 "$cache" "$cache/tmp"
+export TMPDIR=$cache/tmp CARGO_TARGET_DIR=$cache
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
+mode=${1:-help}
+[ "$#" -eq 0 ] || shift
+case "$mode" in
+  build) cargo build --release --locked --manifest-path "$root/Cargo.toml" --package lore-core --bin lore-rs ;;
+  install)
+    cargo build --release --locked --manifest-path "$root/Cargo.toml" --package lore-core --bin lore-rs
+    bin=${LORE_BIN_DIR:-$HOME/.local/bin}
+    case "$bin" in /*) : ;; *) exit 1 ;; esac
+    mkdir -p "$bin"
+    stage=$(mktemp -d "$bin/.lore-install.XXXXXXXX")
+    trap 'rm -rf "$stage"' EXIT HUP INT TERM
+    cp "$cache/release/lore-rs" "$stage/lore-rs"
+    chmod 755 "$stage/lore-rs"
+    ln -s lore-rs "$stage/lore"
+    for name in lore-rs lore; do
+      [ ! -d "$bin/$name" ] || [ -L "$bin/$name" ] || exit 1
+      if [ -L "$bin/$name" ]; then rm "$bin/$name"; fi
+      mv -f "$stage/$name" "$bin/$name"
+    done
+    printf 'Installed native LORE at %s/lore\n' "$bin"
+    ;;
+  run) cargo build --locked --manifest-path "$root/Cargo.toml" --package lore-core --bin lore-rs; exec "$cache/debug/lore-rs" "$@" ;;
+  setup) exec "$root/bin/lore" setup "$@" ;;
+  test) cargo test --locked --manifest-path "$root/Cargo.toml" ;;
+  help|-h|--help) printf '%s\n' './task build | install | run [LORE arguments] | setup | test' ;;
+  *) printf 'Unknown task: %s\n' "$mode" >&2; exit 1 ;;
+esac

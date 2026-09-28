@@ -4,4 +4,4 @@ argument-hint: [id ...|all]
 allowed-tools: Bash
 ---
 
-Run `python3 "${CLAUDE_PLUGIN_ROOT}/bin/lore.py" reject $ARGUMENTS` and confirm what was rejected.
+Run `"${CLAUDE_PLUGIN_ROOT}/bin/lore" reject $ARGUMENTS` and confirm what was rejected.
