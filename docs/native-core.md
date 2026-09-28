@@ -112,3 +112,31 @@ on loopback; forwarding a Tailscale login header is not authentication.
 validated before application; push acknowledgements advance only the settled
 prefix. Offline bundles retain original signed bytes and refuse overwriting
 an existing destination.
+
+Pull visits every distinct configured source and retains each result when another
+source fails. The CLI returns a failing exit status for incomplete exchanges.
+Bootstrap requires one source; use `--peer` to select explicitly when both a hub
+and peers are configured. Endpoint aliases share a cursor, while different paths
+or ports retain separate cursors.
+
+Cursors bind the canonical endpoint and configured credential. Legacy cursor
+rows remain intact, but a newly identified endpoint starts at zero and replays
+through normal duplicate handling. A changed URL, port or token cannot inherit
+another stream's settled cursor.
+
+Sync status measures backlog and pull freshness only for currently configured
+stream identities. Legacy rows cannot make a new hub appear settled or fresh.
+Missing stores and unavailable configuration remain unknown; status opens no
+network connection and does not create a store.
+
+Push respects advertised body/count limits and splits rejected HTTP 413 batches
+without advancing their cursor. A rejected single operation produces a refusal.
+Receivers split drained operations within the canonical count and byte bounds;
+offline bundle digests use the same canonical encoder with the bundle's explicit
+size limit. These are local socket and signed-store fixture guarantees, rather
+than a live deployment check of a remote hub.
+
+An import containing unverified operations reports them and exits unsuccessfully;
+their text cannot become curated memory through that import. A failure after
+application begins reports `may_have_applied`, including the first chunk, so
+callers cannot assume a failed command left its store unchanged.

@@ -33,8 +33,8 @@ const CLASSES: &[&str] = &[
     "tabset",
     "worktree",
 ];
-const MAX_PAGE: usize = 512;
-const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_PAGE: usize = 512;
+pub const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DIRECTORY: usize = 10000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Applied {
@@ -84,7 +84,7 @@ fn integer(v: &Value, key: &str, default: i64) -> Result<i64> {
         .filter(|n| *n >= 0)
         .ok_or(Error::InvalidRequest)
 }
-fn envelope(op: &Value) -> Result<()> {
+pub fn validate_envelope(op: &Value) -> Result<()> {
     if !op.is_object() {
         return Err(Error::InvalidRequest);
     }
@@ -132,7 +132,7 @@ pub fn verify_mac(op: &Value, key: Option<&str>) -> bool {
     let Some(key) = key.filter(|s| !s.is_empty()) else {
         return false;
     };
-    if envelope(op).is_err() {
+    if validate_envelope(op).is_err() {
         return false;
     }
     let Some(mac) = op["mac"].as_str().filter(|s| {
@@ -1195,7 +1195,7 @@ pub fn apply_ops(cfg: &Config, ops: &[Value]) -> Result<Value> {
     let mut report = Report::default();
     let mut deferred = BTreeSet::new();
     for op in canonical_order(ops) {
-        if envelope(&op).is_err() {
+        if validate_envelope(&op).is_err() {
             report.unknown += 1;
             continue;
         }
@@ -1297,7 +1297,7 @@ fn retry_with_connection(cfg: &Config, conn: &mut Connection) -> Result<usize> {
             if state(conn, &op)? != Some(APPLIED_NO) {
                 continue;
             }
-            if envelope(&op).is_err() || !CLASSES.contains(&text(&op, "class", 64)?) {
+            if validate_envelope(&op).is_err() || !CLASSES.contains(&text(&op, "class", 64)?) {
                 mark(conn, &op, APPLIED_FAILED)?;
                 progress = true;
                 continue;
@@ -1333,7 +1333,7 @@ pub fn retry_deferred(cfg: &Config) -> Result<usize> {
 }
 pub fn approve(cfg: &Config, op: &Value, authority: &Authority) -> Result<()> {
     authority.require_review()?;
-    envelope(op)?;
+    validate_envelope(op)?;
     if disabled(cfg, text(op, "class", 64)?) {
         return Err(Error::Untrusted);
     }
@@ -1979,10 +1979,10 @@ mod tests {
         golden["mac"] = json!(golden["mac"].as_str().unwrap().to_uppercase());
         assert!(!verify_mac(&golden, cfg.sync.key.as_deref()));
         golden["machine_seq"] = json!(true);
-        assert!(envelope(&golden).is_err());
+        assert!(validate_envelope(&golden).is_err());
         golden["machine_seq"] = json!(1);
         golden["payload"] = json!({"text":"x".repeat(crate::MAX_FRAME_BYTES)});
-        assert!(envelope(&golden).is_err());
+        assert!(validate_envelope(&golden).is_err());
     }
     #[test]
     fn overcap_is_staged_and_partial_file_failure_never_claims_approval_success() {

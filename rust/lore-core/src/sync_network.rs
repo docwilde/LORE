@@ -16,7 +16,6 @@ const MAX_OPS: usize = 100_000;
 const BUNDLE_BYTES: usize = 128 * 1024 * 1024;
 const PORTABLE: &[&str] = &["memory", "filemap", "belief", "pending", "skill"];
 
-#[derive(Debug)]
 pub struct TransportError {
     pub status: u16,
     pub code: String,
@@ -37,11 +36,20 @@ impl std::fmt::Display for TransportError {
         write!(f, "sync {} ({})", self.code, self.status)
     }
 }
+impl std::fmt::Debug for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransportError")
+            .field("status", &self.status)
+            .field("code", &self.code)
+            .finish()
+    }
+}
 impl std::error::Error for TransportError {}
 pub struct Transport {
     client: Client,
     base: Url,
     credential: Option<String>,
+    cursor_key: String,
     pub peer: String,
 }
 fn timeout() -> Duration {
@@ -61,25 +69,137 @@ fn port() -> u16 {
         .filter(|n| *n > 0)
         .unwrap_or(8765)
 }
+fn normalized_base(base: &str) -> Result<Url> {
+    let mut base = Url::parse(base.trim()).map_err(|_| Error::InvalidRequest)?;
+    if !matches!(base.scheme(), "http" | "https")
+        || base.host_str().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+    {
+        return Err(Error::InvalidRequest);
+    }
+    let path = base.path().trim_end_matches('/');
+    let path = if path.ends_with("/v1") {
+        path.to_owned()
+    } else {
+        format!("{path}/v1")
+    };
+    base.set_path(&format!("{path}/"));
+    Ok(base)
+}
+fn cursor_identity(base: &Url, credential: Option<&str>, peer: &str) -> Result<String> {
+    let owner = store::canonical_bytes(&json!([base.as_str(), credential]))?;
+    let cursor_key = format!(
+        "transport:v1:{}:{}",
+        if peer == "hub" { "hub" } else { "peer" },
+        crate::digest(&owner)
+    );
+    Ok(cursor_key)
+}
+fn hub_settings() -> Result<(String, Option<String>)> {
+    let url = std::env::var("LORE_SYNC_URL").map_err(|_| Error::InvalidRequest)?;
+    let auth = std::env::var("LORE_SYNC_AUTH")
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let auth = if auth.is_empty() { "token" } else { &auth };
+    let token = if auth == "token" {
+        Some(
+            std::env::var("LORE_SYNC_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .ok_or(Error::Untrusted)?,
+        )
+    } else if auth == "tailscale" {
+        None
+    } else {
+        return Err(Error::InvalidRequest);
+    };
+    Ok((url, token))
+}
+fn peer_settings(spec: &str) -> Result<(String, Option<String>, String)> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err(Error::InvalidRequest);
+    }
+    let raw = if spec.contains("://") {
+        spec.to_owned()
+    } else if spec.starts_with('[') {
+        if spec.contains("]:") {
+            format!("http://{spec}")
+        } else {
+            format!("http://{spec}:{}", port())
+        }
+    } else if spec.matches(':').count() > 1 {
+        format!("http://[{spec}]:{}", port())
+    } else if spec
+        .rsplit_once(':')
+        .is_some_and(|(_, p)| p.parse::<u16>().is_ok())
+    {
+        format!("http://{spec}")
+    } else {
+        format!("http://{spec}:{}", port())
+    };
+    let url = Url::parse(&raw).map_err(|_| Error::InvalidRequest)?;
+    let host = url
+        .host_str()
+        .ok_or(Error::InvalidRequest)?
+        .trim_matches(['[', ']'])
+        .to_lowercase();
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    let p = url.port_or_known_default().ok_or(Error::InvalidRequest)?;
+    // Legacy host keys depend on mutable default-port configuration and
+    // cannot prove which endpoint owns their opaque cursor. Leave those
+    // rows intact and replay into an unambiguous endpoint namespace.
+    let path = url.path().trim_end_matches('/');
+    let path = path.strip_suffix("/v1").unwrap_or(path);
+    let key = format!("peer:v1:{}://{host}:{p}{path}/v1", url.scheme());
+    Ok((
+        raw,
+        std::env::var("LORE_SYNC_PEER_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty()),
+        key,
+    ))
+}
+/// Local status identity lookup: no HTTP clients, network calls or store writes.
+pub fn configured_cursor_keys() -> Result<(Option<String>, BTreeSet<String>)> {
+    let mut hub = None;
+    let mut pull = BTreeSet::new();
+    if std::env::var("LORE_SYNC_URL").is_ok_and(|s| !s.trim().is_empty()) {
+        let (url, credential) = hub_settings()?;
+        let key = cursor_identity(&normalized_base(&url)?, credential.as_deref(), "hub")?;
+        pull.insert(key.clone());
+        hub = Some(key);
+    }
+    for peer in std::env::var("LORE_SYNC_PEER")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let (url, credential, label) = peer_settings(peer)?;
+        pull.insert(cursor_identity(
+            &normalized_base(&url)?,
+            credential.as_deref(),
+            &label,
+        )?);
+    }
+    if pull.is_empty() {
+        return Err(Error::InvalidRequest);
+    }
+    Ok((hub, pull))
+}
 impl Transport {
     pub fn new(base: &str, credential: Option<String>, peer: String) -> Result<Self> {
-        let mut base = Url::parse(base).map_err(|_| Error::InvalidRequest)?;
-        if !matches!(base.scheme(), "http" | "https")
-            || base.host_str().is_none()
-            || !base.username().is_empty()
-            || base.password().is_some()
-            || base.query().is_some()
-            || base.fragment().is_some()
-        {
-            return Err(Error::InvalidRequest);
-        }
-        let path = base.path().trim_end_matches('/');
-        let path = if path.ends_with("/v1") {
-            path.to_owned()
-        } else {
-            format!("{path}/v1")
-        };
-        base.set_path(&format!("{path}/"));
+        let base = normalized_base(base)?;
+        let cursor_key = cursor_identity(&base, credential.as_deref(), &peer)?;
         let client = Client::builder()
             .timeout(timeout())
             .connect_timeout(timeout())
@@ -90,80 +210,21 @@ impl Transport {
             client,
             base,
             credential,
+            cursor_key,
             peer,
         })
     }
+    /// Private persistence identity; `peer` remains the report/transport role.
+    pub fn cursor_key(&self) -> &str {
+        &self.cursor_key
+    }
     pub fn hub() -> Result<Self> {
-        let url = std::env::var("LORE_SYNC_URL").map_err(|_| Error::InvalidRequest)?;
-        let auth = std::env::var("LORE_SYNC_AUTH").unwrap_or_else(|_| "token".into());
-        let token = if auth == "token" {
-            Some(
-                std::env::var("LORE_SYNC_TOKEN")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .ok_or(Error::Untrusted)?,
-            )
-        } else if auth == "tailscale" {
-            None
-        } else {
-            return Err(Error::InvalidRequest);
-        };
+        let (url, token) = hub_settings()?;
         Self::new(&url, token, "hub".into())
     }
     pub fn peer(spec: &str) -> Result<Self> {
-        let raw = if spec.contains("://") {
-            spec.to_owned()
-        } else if spec.starts_with('[') {
-            if spec.contains("]:") {
-                format!("http://{spec}")
-            } else {
-                format!("http://{spec}:{}", port())
-            }
-        } else if spec.matches(':').count() > 1 {
-            format!("http://[{spec}]:{}", port())
-        } else if spec
-            .rsplit_once(':')
-            .is_some_and(|(_, p)| p.parse::<u16>().is_ok())
-        {
-            format!("http://{spec}")
-        } else {
-            format!("http://{spec}:{}", port())
-        };
-        let url = Url::parse(&raw).map_err(|_| Error::InvalidRequest)?;
-        let host = url
-            .host_str()
-            .ok_or(Error::InvalidRequest)?
-            .trim_matches(['[', ']'])
-            .to_lowercase();
-        let host = if host.contains(':') {
-            format!("[{host}]")
-        } else {
-            host
-        };
-        let p = url.port_or_known_default().ok_or(Error::InvalidRequest)?;
-        let key = if url.scheme() == "https" {
-            format!(
-                "peer:https://{host}{}",
-                if p == 443 {
-                    String::new()
-                } else {
-                    format!(":{p}")
-                }
-            )
-        } else if p == port() {
-            format!("peer:{host}")
-        } else if p == 80 {
-            format!("peer:http://{host}")
-        } else {
-            format!("peer:{host}:{p}")
-        };
-        Self::new(
-            &raw,
-            std::env::var("LORE_SYNC_PEER_SECRET")
-                .ok()
-                .filter(|s| !s.is_empty()),
-            key,
-        )
+        let (url, credential, key) = peer_settings(spec)?;
+        Self::new(&url, credential, key)
     }
     pub fn request(
         &self,
@@ -224,7 +285,22 @@ impl Transport {
             }
             let code = answer["error"]
                 .as_str()
-                .filter(|s| s.len() <= 64 && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+                .filter(|s| {
+                    matches!(
+                        *s,
+                        "bad_request"
+                            | "unauthenticated"
+                            | "forbidden"
+                            | "machine_seq_gap"
+                            | "machine_seq_conflict"
+                            | "op_id_conflict"
+                            | "payload_too_large"
+                            | "busy"
+                            | "not_implemented"
+                            | "not_found"
+                            | "method_not_allowed"
+                    )
+                })
                 .unwrap_or("protocol_error")
                 .to_owned();
             if status == 503 && code == "busy" && attempt < 3 {
@@ -239,6 +315,131 @@ impl Transport {
         }
         unreachable!()
     }
+}
+/// Discover transports in configured order and collapse aliases of one stream.
+/// Explicit `only_peer` is usable without changing saved configuration.
+pub fn configured_targets(only_peer: Option<&str>) -> Result<Vec<Transport>> {
+    let mut targets = Vec::new();
+    let mut seen = BTreeSet::new();
+    if let Some(peer) = only_peer {
+        targets.push(Transport::peer(peer)?);
+    } else {
+        if std::env::var("LORE_SYNC_URL").is_ok_and(|s| !s.trim().is_empty()) {
+            targets.push(Transport::hub()?);
+            seen.insert("hub".to_owned());
+        }
+        for peer in std::env::var("LORE_SYNC_PEER")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let transport = Transport::peer(peer)?;
+            if seen.insert(transport.peer.clone()) {
+                targets.push(transport);
+            }
+        }
+    }
+    if targets.is_empty() {
+        return Err(Error::InvalidRequest);
+    }
+    Ok(targets)
+}
+/// Bootstrap needs an operator-selected source when several streams exist.
+pub fn bootstrap_target(only_peer: Option<&str>) -> Result<Transport> {
+    let mut targets = configured_targets(only_peer)?;
+    if targets.len() != 1 {
+        return Err(Error::InvalidRequest);
+    }
+    Ok(targets.remove(0))
+}
+/// Pull every independent source, then optionally push the configured hub.
+/// The aggregate failure count also makes failures visible to CLI exit policy.
+pub fn exchange(cfg: &Config, targets: &[Transport], push_hub: bool) -> Result<Value> {
+    if targets.is_empty() || !cfg.sync.enabled {
+        return Err(Error::Untrusted);
+    }
+    let mut reports = json!({"failed":0});
+    let mut failed = 0;
+    for target in targets {
+        let result = pull(cfg, target);
+        reports[&target.peer] = match result {
+            Ok(report) => {
+                if report["failed"].as_u64().unwrap_or(0) > 0
+                    || report["may_have_applied"].as_u64().unwrap_or(0) > 0
+                {
+                    failed += 1;
+                }
+                report
+            }
+            Err(error) => {
+                failed += 1;
+                json!({"error":error.code()})
+            }
+        };
+    }
+    if push_hub {
+        if let Some(hub) = targets.iter().find(|t| t.peer == "hub") {
+            reports["push"] = match push(cfg, hub, None) {
+                Ok(report) => {
+                    if report["partial"] == true {
+                        failed += 1;
+                    }
+                    report
+                }
+                Err(error) => {
+                    failed += 1;
+                    json!({"error":error.code()})
+                }
+            };
+        }
+    }
+    reports["failed"] = json!(failed);
+    Ok(reports)
+}
+fn empty_report() -> Value {
+    json!({"applied":0,"deferred":0,"unverified":0,"duplicate":0,"unknown":0,"failed":0,"skipped":0,"may_have_applied":0,"staged":0})
+}
+/// All framing is checked before the first receiver call. Split by bytes and
+/// count only after canonical ordering, retaining cross-page merge ordering.
+fn apply_drained(cfg: &Config, ops: &[Value]) -> Result<Value> {
+    let ordered = sync_apply::canonical_order(ops);
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0;
+    for (index, op) in ordered.iter().enumerate() {
+        validate_envelope(op)?;
+        let size = serde_json::to_vec(op)
+            .map_err(|_| Error::InvalidRequest)?
+            .len();
+        if size > sync_apply::MAX_PAGE_BYTES {
+            return Err(Error::TooLarge);
+        }
+        if index > start
+            && (index - start >= sync_apply::MAX_PAGE || bytes + size > sync_apply::MAX_PAGE_BYTES)
+        {
+            chunks.push(start..index);
+            start = index;
+            bytes = 0;
+        }
+        bytes += size;
+    }
+    if start < ordered.len() {
+        chunks.push(start..ordered.len());
+    }
+    let mut report = empty_report();
+    for range in chunks {
+        // Receipt/application may fail after earlier rows in the first chunk
+        // have landed. Once the receiver is entered, its global error cannot
+        // certify that no effect occurred; retries remain idempotent.
+        let result =
+            sync_apply::apply_ops(cfg, &ordered[range]).map_err(|_| Error::MayHaveApplied)?;
+        for (k, v) in result.as_object().ok_or(Error::Unavailable)? {
+            report[k] =
+                json!(report[k].as_u64().unwrap_or(0) + v.as_u64().ok_or(Error::Unavailable)?);
+        }
+    }
+    Ok(report)
 }
 fn wire(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let payload: String = row.get(8)?;
@@ -294,7 +495,7 @@ pub fn pull_from(
     }
     let conn = store::connect(cfg)?;
     let machine = store::machine_id(&conn)?;
-    let (_, saved) = peer_state(&conn, &transport.peer)?;
+    let (_, saved) = peer_state(&conn, transport.cursor_key())?;
     let initial = from.unwrap_or(saved);
     if initial < 0 {
         return Err(Error::InvalidRequest);
@@ -339,11 +540,13 @@ pub fn pull_from(
             if bytes > DRAIN_BYTES || ops.len() + page.len() > MAX_OPS {
                 return Err(Error::TooLarge);
             }
+            let mut previous = cursor;
             for op in page {
                 let position = op["hub_seq"]
                     .as_i64()
-                    .filter(|n| *n > cursor)
+                    .filter(|n| *n > previous)
                     .ok_or(Error::InvalidRequest)?;
+                previous = position;
                 drained = drained.max(position);
                 ops.push(op.clone());
             }
@@ -353,7 +556,7 @@ pub fn pull_from(
                 Some(n) => {
                     let next = n
                         .as_i64()
-                        .filter(|n| *n > cursor)
+                        .filter(|n| *n > cursor && *n >= previous)
                         .ok_or(Error::InvalidRequest)?;
                     cursor = next;
                     drained = drained.max(next)
@@ -364,23 +567,22 @@ pub fn pull_from(
         Ok(())
     })();
     if let Err(e) = fetched {
-        note(&conn, &transport.peer, None, None, Some(e.code()))?;
+        note(&conn, transport.cursor_key(), None, None, Some(e.code()))?;
         return Err(e);
     }
-    let mut report = json!({"applied":0,"deferred":0,"unverified":0,"duplicate":0,"unknown":0,"failed":0,"skipped":0,"may_have_applied":0,"staged":0});
-    for (index, chunk) in sync_apply::canonical_order(&ops).chunks(512).enumerate() {
-        let result = sync_apply::apply_ops(cfg, chunk).map_err(|error| {
-            if index > 0 {
-                Error::MayHaveApplied
-            } else {
-                error
-            }
-        })?;
-        for (k, v) in result.as_object().ok_or(Error::Unavailable)? {
-            report[k] =
-                json!(report[k].as_u64().unwrap_or(0) + v.as_u64().ok_or(Error::Unavailable)?);
+    let mut report = match apply_drained(cfg, &ops) {
+        Ok(report) => report,
+        Err(error) => {
+            note(
+                &conn,
+                transport.cursor_key(),
+                None,
+                None,
+                Some(error.code()),
+            )?;
+            return Err(error);
         }
-    }
+    };
     // Failed receipt/staging may not have retained the operation. Keep the
     // cursor until every row is durably received; idempotency handles retries.
     let retry = report["failed"].as_u64().unwrap_or(0) > 0
@@ -388,15 +590,17 @@ pub fn pull_from(
     if retry {
         note(
             &conn,
-            &transport.peer,
+            transport.cursor_key(),
             None,
             None,
             Some("application_incomplete"),
         )?;
     } else {
-        note(&conn, &transport.peer, None, Some(drained), None)?;
+        note(&conn, transport.cursor_key(), None, Some(drained), None)?;
     }
     report["cursor_advanced"] = json!(!retry);
+    report["fetched"] = json!(ops.len());
+    report["cursor"] = json!(drained);
     report["pages"] = json!(pages);
     report["drained_to"] = json!(drained);
     Ok(report)
@@ -407,7 +611,7 @@ pub fn push(cfg: &Config, transport: &Transport, from: Option<i64>) -> Result<Va
     }
     let conn = store::connect(cfg)?;
     let machine = store::machine_id(&conn)?;
-    let (mut cursor, _) = peer_state(&conn, &transport.peer)?;
+    let (mut cursor, _) = peer_state(&conn, transport.cursor_key())?;
     if let Some(n) = from {
         if n < 0 {
             return Err(Error::InvalidRequest);
@@ -424,7 +628,8 @@ pub fn push(cfg: &Config, transport: &Transport, from: Option<i64>) -> Result<Va
     let max_bytes = limits["limits"]["max_body_bytes"]
         .as_u64()
         .unwrap_or(4 * 1024 * 1024)
-        .clamp(1024, 4 * 1024 * 1024) as usize;
+        .clamp(1, 4 * 1024 * 1024) as usize;
+    let mut batch_count = max_count;
     let mut accepted = 0u64;
     let mut duplicate = 0u64;
     let mut pages = 0;
@@ -438,11 +643,16 @@ pub fn push(cfg: &Config, transport: &Transport, from: Option<i64>) -> Result<Va
         ))?;
         let mut window = Vec::new();
         let mut budget = 0usize;
-        for row in stmt.query_map(params![machine, cursor, max_count as i64], wire)? {
+        for row in stmt.query_map(params![machine, cursor, batch_count as i64], wire)? {
             let op = row?;
             budget += serde_json::to_vec(&op)
                 .map_err(|_| Error::InvalidRequest)?
                 .len();
+            // A scan window can contain many individually valid large ops.
+            // Retain a bounded prefix; the next push resumes after settlement.
+            if budget > RESPONSE_BYTES && !window.is_empty() {
+                break;
+            }
             if budget > RESPONSE_BYTES {
                 return Err(Error::TooLarge);
             }
@@ -490,10 +700,27 @@ pub fn push(cfg: &Config, transport: &Transport, from: Option<i64>) -> Result<Va
         let (reply, error) = match answer {
             Ok(reply) => (reply, None),
             Err(e) => {
+                if e.status == 413 && seqs.len() > 1 {
+                    // A rejected body settled nothing. Retry a strictly smaller
+                    // prefix without moving the cursor, even if health was stale.
+                    batch_count = (seqs.len() / 2).max(1);
+                    pages += 1;
+                    continue;
+                }
+                if e.status == 413 {
+                    note(
+                        &conn,
+                        transport.cursor_key(),
+                        None,
+                        None,
+                        Some("payload_too_large"),
+                    )?;
+                    return Err(Error::TooLarge);
+                }
                 let advance = e.status == 409
                     && matches!(e.code.as_str(), "machine_seq_gap" | "machine_seq_conflict");
                 if !advance {
-                    note(&conn, &transport.peer, None, None, Some(&e.code))?;
+                    note(&conn, transport.cursor_key(), None, None, Some(&e.code))?;
                     return Err(Error::Unavailable);
                 }
                 (e.body, Some(e.code))
@@ -511,13 +738,26 @@ pub fn push(cfg: &Config, transport: &Transport, from: Option<i64>) -> Result<Va
         accepted += a;
         duplicate += d;
         pages += 1;
-        note(&conn, &transport.peer, Some(cursor), None, error.as_deref())?;
+        note(
+            &conn,
+            transport.cursor_key(),
+            Some(cursor),
+            None,
+            error.as_deref(),
+        )?;
         if let Some(error) = error {
             return Ok(
                 json!({"accepted":accepted,"duplicate":duplicate,"pages":pages,"pushed_seq":cursor,"error":error,"partial":true}),
             );
         }
         if settled != seqs.len() {
+            note(
+                &conn,
+                transport.cursor_key(),
+                None,
+                None,
+                Some("incomplete_push"),
+            )?;
             return Err(Error::Changed);
         }
     }
@@ -586,6 +826,7 @@ pub fn export_bundle(cfg: &Config, path: &Path) -> Result<Value> {
             continue;
         }
         op.as_object_mut().unwrap().remove("seq");
+        validate_envelope(&op)?;
         if !sync_apply::verify_mac(&op, Some(key)) {
             return Err(Error::Untrusted);
         }
@@ -597,7 +838,7 @@ pub fn export_bundle(cfg: &Config, path: &Path) -> Result<Value> {
         }
         ops.push(op)
     }
-    let sha = crate::digest(&store::canonical_bytes(&json!(ops))?);
+    let sha = crate::digest(&store::canonical_bytes_bounded(&json!(ops), BUNDLE_BYTES)?);
     let bundle = json!({"format":"lore-manual-transfer","version":1,"classes":classes,"count":ops.len(),"sha256":sha,"ops":ops});
     let bytes = serde_json::to_vec_pretty(&bundle).map_err(|_| Error::Unavailable)?;
     if bytes.len() > BUNDLE_BYTES {
@@ -664,7 +905,9 @@ pub fn import_bundle(cfg: &Config, path: &Path) -> Result<Value> {
             return Err(Error::InvalidRequest);
         }
     }
-    if bundle["sha256"] != crate::digest(&store::canonical_bytes(&json!(ops))?) {
+    if bundle["sha256"]
+        != crate::digest(&store::canonical_bytes_bounded(&json!(ops), BUNDLE_BYTES)?)
+    {
         return Err(Error::Changed);
     }
     // Validate structural envelopes before touching the receiving store; an invalid
@@ -672,42 +915,18 @@ pub fn import_bundle(cfg: &Config, path: &Path) -> Result<Value> {
     for op in ops {
         validate_envelope(op)?;
     }
-    let mut report = json!({});
-    for (index, chunk) in sync_apply::canonical_order(ops).chunks(512).enumerate() {
-        let result = sync_apply::apply_ops(cfg, chunk).map_err(|error| {
-            if index > 0 {
-                Error::MayHaveApplied
-            } else {
-                error
-            }
-        })?;
-        for (k, v) in result.as_object().ok_or(Error::Unavailable)? {
-            report[k] =
-                json!(report[k].as_u64().unwrap_or(0) + v.as_u64().ok_or(Error::Unavailable)?);
-        }
-    }
-    Ok(report)
+    apply_drained(cfg, ops)
 }
 fn validate_envelope(op: &Value) -> Result<()> {
-    for key in ["op_id", "machine_id", "class", "op"] {
-        if !op[key]
-            .as_str()
-            .is_some_and(|s| !s.is_empty() && s.len() <= 128 && !s.contains('\0'))
-        {
-            return Err(Error::InvalidRequest);
-        }
-    }
+    sync_apply::validate_envelope(op)?;
+    // Wire framing is stricter than legacy receipt compatibility: no zero
+    // sequence, and the display timestamp is present even though it is unsigned.
     for key in ["machine_seq", "lamport"] {
         if !op[key].as_i64().is_some_and(|n| n >= 1) {
             return Err(Error::InvalidRequest);
         }
     }
-    if !op["payload"].is_object()
-        || op.get("project_key").is_none()
-        || !matches!(op["project_key"], Value::Null | Value::String(_))
-        || !matches!(op["mac"], Value::Null | Value::String(_))
-        || !op["created"].is_string()
-    {
+    if !op["created"].is_string() {
         return Err(Error::InvalidRequest);
     }
     Ok(())
@@ -724,7 +943,13 @@ pub struct PeerServer {
 }
 impl PeerServer {
     pub fn new(cfg: Config, loopback: bool) -> Result<Self> {
-        let auth = std::env::var("LORE_SYNC_PEER_AUTH").unwrap_or_else(|_| "tailscale".into());
+        if !cfg.sync.enabled {
+            return Err(Error::Untrusted);
+        }
+        let auth = std::env::var("LORE_SYNC_PEER_AUTH")
+            .unwrap_or_else(|_| "tailscale".into())
+            .trim()
+            .to_lowercase();
         if !matches!(auth.as_str(), "tailscale" | "none") || !loopback && auth != "none" {
             return Err(Error::Untrusted);
         }
@@ -790,6 +1015,14 @@ impl PeerServer {
                 return Ok((401, json!({"error":"unauthenticated"})));
             }
         }
+        // Public fields support fixture embedding, but can never bypass the
+        // startup credential requirement or promote a loopback header to auth.
+        if !matches!(self.auth.as_str(), "none" | "tailscale")
+            || self.auth != "none"
+                && (self.secret.as_ref().is_none_or(|s| s.is_empty()) || !self.loopback)
+        {
+            return Ok((401, json!({"error":"unauthenticated"})));
+        }
         let login = headers
             .get("tailscale-user-login")
             .map(|s| s.trim())
@@ -806,7 +1039,7 @@ impl PeerServer {
         match (method, path) {
             ("GET", "/v1/whoami") => Ok((
                 200,
-                json!({"account":"peer","machine_id":self.machine_id,"auth":self.auth,"trust":if self.loopback{"shared secret + asserted identity"}else{"public listener"},"shared_secret":self.secret.is_some()}),
+                json!({"account":"peer","machine_id":self.machine_id,"auth":self.auth,"trust":if self.secret.is_some(){"shared secret"}else{"no authentication"},"shared_secret":self.secret.is_some()}),
             )),
             (_, "/v1/snapshot") => Ok((501, json!({"error":"not_implemented"}))),
             ("GET", "/v1/ops") => {

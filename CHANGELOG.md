@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.62.2 — 2026-09-28
+
+**Native sync recovery**
+
+- Respect advertised payload limits and split rejected HTTP 413 batches.
+  Preserve settled cursors and refuse an oversized single operation.
+- Retain each source's pull result and report incomplete exchanges as failures.
+  Deduplicate endpoint aliases and require an explicit bootstrap source.
+- Apply canonical receiver byte/count bounds and bounded bundle digests.
+  Keep existing signed bytes, conflict gates and staged review semantics.
+
+**CLI and verification**
+
+- Wire recovery into the native CLI and list its full command families in help.
+  Add real CLI, socket and signed-store regressions.
+- Report unverified imports and possible partial writes as failed commands.
+  Preserve their per-operation results and curated-memory gates.
+
+**Cursor ownership**
+
+- Bind hub/peer cursors to canonical endpoint and configured credential.
+  Preserve legacy rows and safely replay instead of inheriting ambiguous cursors.
+- Calculate backlog and freshness from active streams only.
+  Keep missing-store status lazy and unavailable measurements unknown.
+
 ## 0.62.1 — 2026-09-28
 
 **Codex documentation**

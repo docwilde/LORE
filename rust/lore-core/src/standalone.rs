@@ -11,7 +11,28 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-const HELP:&str="LORE native\nUsage: lore-rs COMMAND [SUBCOMMAND] [options]\nCommands: snapshot inject refresh memory filemap belief evidence graph search session index history pending approve reject review dream skills consult ask outcome status stats doctor setup config sync mcp\nUse --json '{...}' for exact structured arguments; --cwd defaults to this directory.\nSync: status health whoami push pull serve export import classes login resign\nPending: list show PID; approve/reject PID --expected '{\"sha256\":...,\"inode\":...}'\n";
+const HELP: &str = r#"LORE native
+Usage: lore-rs COMMAND [SUBCOMMAND] [options]
+
+Context: snapshot inject refresh status statusline motd provenance doctor
+Memory: memory show|entries|usage|review|add|replace|remove|move
+        filemap show|add|replace|remove
+Beliefs: belief list|search|show|review|add|retract|edges|dedup-report
+         evidence consult ask outcome stats audit crosscheck dream
+Graph: graph stats|neighbours|path|communities|components|degree|context|html|backfill|derive|edge
+Sessions: search session index history recent|prefix|metadata
+Review: review backfill pending list|show approve reject
+Skills: skills list|candidates|usage
+Administration: setup teardown reset project move config show|set|unset
+Sync: sync status|health|whoami|push|pull|bootstrap|serve|export|import|classes|login|resign|seed
+Integration: mcp hook
+
+Use --json '{...}' for structured arguments; --cwd defaults to this directory.
+Approve/reject PID --expected '{"sha256":...,"inode":...}' uses the exact reviewed proposal.
+Without --expected, approval requires an interactive terminal review.
+Sync pulls configured sources; bootstrap requires one source (or --peer).
+Review uses the Claude CLI; source --engine identifies the transcript provider.
+"#;
 pub fn authority() -> Authority {
     let engine = std::env::var("LORE_ENGINE").unwrap_or_else(|_| "unknown".into());
     let marker = std::env::var("AI_AGENT").unwrap_or_default();
@@ -540,7 +561,8 @@ pub fn run(args: &[String]) -> Result<()> {
     let failed = value["partial"] == true
         || value["error"].is_string()
         || value["failed"].as_u64().unwrap_or(0) > 0
-        || value["may_have_applied"].as_u64().unwrap_or(0) > 0;
+        || value["may_have_applied"].as_u64().unwrap_or(0) > 0
+        || (group == "sync" && sub == "import" && value["unverified"].as_u64().unwrap_or(0) > 0);
     output(value)?;
     if failed {
         return Err(Error::MayHaveApplied);
@@ -852,22 +874,7 @@ fn sync(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
         "seed" => crate::sync_admin::seed(cfg, req["apply"] == true),
         "status" => crate::sync::state(cfg),
         "bootstrap" => {
-            let transport = if let Some(peer) = req["peer"].as_str() {
-                n::Transport::peer(peer)?
-            } else if std::env::var("LORE_SYNC_URL").is_ok_and(|s| !s.is_empty()) {
-                n::Transport::hub()?
-            } else {
-                let peers = std::env::var("LORE_SYNC_PEER").unwrap_or_default();
-                let peers = peers
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>();
-                if peers.len() != 1 {
-                    return Err(Error::InvalidRequest);
-                }
-                n::Transport::peer(peers[0])?
-            };
+            let transport = n::bootstrap_target(req["peer"].as_str())?;
             if req["merge"] == true {
                 return n::pull(cfg, &transport);
             }
@@ -981,33 +988,8 @@ fn sync(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
         }
         "push" => n::push(cfg, &n::Transport::hub()?, req["from_seq"].as_i64()),
         "pull" | "" => {
-            let mut targets = Vec::new();
-            if let Some(peer) = req["peer"].as_str() {
-                targets.push(n::Transport::peer(peer)?)
-            } else {
-                if std::env::var("LORE_SYNC_URL").is_ok_and(|s| !s.is_empty()) {
-                    targets.push(n::Transport::hub()?)
-                }
-                for peer in std::env::var("LORE_SYNC_PEER")
-                    .unwrap_or_default()
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    targets.push(n::Transport::peer(peer)?);
-                }
-            }
-            if targets.is_empty() {
-                return Err(Error::InvalidRequest);
-            }
-            let mut reports = json!({});
-            for target in targets {
-                reports[&target.peer] = n::pull(cfg, &target)?;
-            }
-            if sub.is_empty() && std::env::var("LORE_SYNC_URL").is_ok_and(|s| !s.is_empty()) {
-                reports["push"] = n::push(cfg, &n::Transport::hub()?, None)?
-            }
-            Ok(reports)
+            let targets = n::configured_targets(req["peer"].as_str())?;
+            n::exchange(cfg, &targets, sub.is_empty())
         }
         "export" | "import" => {
             let path = absolute(
