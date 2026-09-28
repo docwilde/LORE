@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.61.1 — 2026-09-28
+
+**Sync replay**
+
+- Fix **`_entry_for_key`** and native key lookup across checkout paths. Translate
+  the local bucket while preserving the original signed operation and digest.
+- Scope conflict lookup to the signed project identity. Preserve competing
+  file-map wordings and target replacements/removals by exact entry text.
+
+**Canonical files**
+
+- Persist Python/Rust memory and file maps in identical Unicode text order.
+  Existing files reorder on their next successful mutation; provenance remains.
+- Keep cap overflow staged for review. Previously applied faulty records remain
+  idempotent; affected files require comparison and manual reconciliation.
+
 ## 0.61.0 — 2026-09-27
 
 - Add the canonical Rust core and native carrier for DOXA: shared memory and file maps, beliefs and graph evidence, bounded session indexing/history, context refresh, learned skills, pending review and signed sync replay. Existing Python stores and plugins remain compatible.

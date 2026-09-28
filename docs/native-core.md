@@ -72,3 +72,20 @@ library in-process and the native CLI for its retained SDK/MCP adapters.
 The native integration gate includes Python/native signed replay, review,
 provenance and filesystem fixtures. Provider tests use owned fake executables
 and private stores. They do not verify live provider/account availability.
+
+## Sync replay in 0.61.1
+
+Receivers translate the author’s entry-key bucket into the local bucket for
+its signed project identity. The text digest, operation identity and MAC stay
+unchanged. Concurrent file-map replacements retain both wordings for review;
+removal targets one exact wording even when paths coincide.
+
+Python and Rust persist memory and file-map entries in ascending Unicode text
+order. Legacy files reorder on the next successful mutation. Matching entry
+sets produce matching bytes; concurrent overflow and case variants can still
+produce different membership and need human review.
+
+This upgrade does not rerun operations already marked applied. A store affected
+by older project-key lookup or overwritten file-map conflicts must be compared
+with the author’s retained log and reconciled through reviewed memory/file-map
+operations. Local edits and pending proposals are not reset automatically.
