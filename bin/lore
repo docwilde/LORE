@@ -6,7 +6,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$root/rust/lore-core/Cargo.toml" | head -1)
 matches() {
   [ -x "$1" ] || return 1
-  case $("$1" --version 2>/dev/null) in *" $version") return 0 ;; *) return 1 ;; esac
+  case $("$1" --version 2>/dev/null) in "$version"|*" $version") return 0 ;; *) return 1 ;; esac
 }
 if [ -n "${LORE_RS:-}" ]; then
   matches "$LORE_RS" || { printf 'LORE_RS must name native LORE %s.\n' "$version" >&2; exit 1; }
