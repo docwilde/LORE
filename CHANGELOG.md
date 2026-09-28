@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.62.3 — 2026-09-28
+## 0.62.3 — 2026-09-29
 
 **Shared native settings**
 
