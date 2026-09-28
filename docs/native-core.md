@@ -112,3 +112,16 @@ on loopback; forwarding a Tailscale login header is not authentication.
 validated before application; push acknowledgements advance only the settled
 prefix. Offline bundles retain original signed bytes and refuse overwriting
 an existing destination.
+
+Pull visits every distinct configured source and retains each result when another
+source fails. The CLI returns a failing exit status for incomplete exchanges.
+Bootstrap requires one source; use `--peer` to select explicitly when both a hub
+and peers are configured. Endpoint aliases share a cursor, while different paths
+or ports retain separate cursors.
+
+Push respects advertised body/count limits and splits rejected HTTP 413 batches
+without advancing their cursor. A rejected single operation produces a refusal.
+Receivers split drained operations within the canonical count and byte bounds;
+offline bundle digests use the same canonical encoder with the bundle's explicit
+size limit. These are local socket and signed-store fixture guarantees, rather
+than a live deployment check of a remote hub.

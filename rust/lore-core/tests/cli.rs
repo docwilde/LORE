@@ -31,6 +31,9 @@ impl Fixture {
         }
     }
     fn invoke(&self, args: &[&str]) -> (bool, String, String) {
+        self.invoke_env(args, &[])
+    }
+    fn invoke_env(&self, args: &[&str], env: &[(&str, &str)]) -> (bool, String, String) {
         let out = self.home.join("stdout");
         let err = self.home.join("stderr");
         let mut child = Command::new(env!("CARGO_BIN_EXE_lore-rs"))
@@ -42,6 +45,7 @@ impl Fixture {
             .env("LORE_SKILLS_DIR", self.home.join("skills"))
             .env("LORE_PROJECTS_DIR", self.home.join("sessions"))
             .env("LORE_CODEX_SESSIONS_DIR", self.home.join("codex-sessions"))
+            .envs(env.iter().copied())
             .current_dir(&self.cwd)
             .process_group(0)
             .stdin(Stdio::null())
@@ -109,6 +113,116 @@ fn tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     }
     rows.sort();
     rows
+}
+
+fn sync_reply(status: u16, body: serde_json::Value) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{BufRead, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "native CLI never contacted source"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("owned fixture accept: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let mut bytes = 0;
+        loop {
+            let mut line = String::new();
+            let read = reader.read_line(&mut line).unwrap();
+            assert!(read > 0);
+            bytes += read;
+            assert!(bytes < 16384);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let body = serde_json::to_vec(&body).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 {status} fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(&body).unwrap();
+    });
+    (url, handle)
+}
+
+#[test]
+fn native_sync_cli_preserves_successful_source_and_reports_failure_exit() {
+    let fixture = Fixture::new();
+    let (failed_url, failed) = sync_reply(500, json!({"error":"fixture_failure"}));
+    let (good_url, good) = sync_reply(200, json!({"ops":[],"next":null}));
+    let peers = format!("{failed_url},{good_url},{good_url}/v1");
+    let (success, stdout, stderr) = fixture.invoke_env(
+        &["sync", "pull"],
+        &[
+            ("LORE_SYNC_PEER", &peers),
+            ("LORE_SYNC_TIMEOUT", "1"),
+            ("LORE_SYNC_PEER_SECRET", "fixture-token-never-print"),
+        ],
+    );
+    failed.join().unwrap();
+    good.join().unwrap();
+    assert!(!success);
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["failed"], 1);
+    assert_eq!(
+        report.as_object().unwrap().len(),
+        3,
+        "one report per distinct source"
+    );
+    assert_eq!(
+        report
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|value| value["cursor_advanced"] == true)
+            .count(),
+        1
+    );
+    assert!(stderr.contains("may_have_applied"));
+    assert!(!format!("{stdout}{stderr}").contains("fixture-token-never-print"));
+}
+
+#[test]
+fn native_bootstrap_refuses_ambiguous_source_before_network_or_store_changes() {
+    let fixture = Fixture::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (success, _, stderr) = fixture.invoke_env(
+        &["sync", "bootstrap"],
+        &[
+            ("LORE_SYNC_URL", &url),
+            ("LORE_SYNC_TOKEN", "fixture-token-never-print"),
+            ("LORE_SYNC_PEER", &url),
+        ],
+    );
+    assert!(!success);
+    assert!(stderr.contains("invalid_request"));
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert!(!fixture.root.exists());
 }
 
 #[test]
