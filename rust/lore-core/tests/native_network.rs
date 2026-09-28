@@ -163,8 +163,8 @@ fn pull_drains_before_canonical_application_and_banks_cursor() {
     let conn = store::read_only(&cfg).unwrap();
     let text: String = conn
         .query_row(
-            "SELECT pulled_cursor FROM sync_peers WHERE peer='peer:test'",
-            [],
+            "SELECT pulled_cursor FROM sync_peers WHERE peer=?",
+            [transport.cursor_key()],
             |r| r.get(0),
         )
         .unwrap();
@@ -205,8 +205,8 @@ fn partial_push_conflict_banks_only_settled_prefix() {
     assert_eq!(report["error"], "machine_seq_gap");
     assert_eq!(
         conn.query_row(
-            "SELECT pushed_seq FROM sync_peers WHERE peer='hub'",
-            [],
+            "SELECT pushed_seq FROM sync_peers WHERE peer=?",
+            [transport.cursor_key()],
             |r| r.get::<_, i64>(0)
         )
         .unwrap(),
@@ -232,16 +232,12 @@ fn op_id_conflict_never_advances_push_cursor() {
             json!({"error":"op_id_conflict","accepted":0,"duplicate":0}),
         ),
     ]);
-    assert!(net::push(
-        &cfg,
-        &Transport::new(&url, None, "hub".into()).unwrap(),
-        None
-    )
-    .is_err());
+    let transport = Transport::new(&url, None, "hub".into()).unwrap();
+    assert!(net::push(&cfg, &transport, None).is_err());
     assert_eq!(
         conn.query_row(
-            "SELECT pushed_seq FROM sync_peers WHERE peer='hub'",
-            [],
+            "SELECT pushed_seq FROM sync_peers WHERE peer=?",
+            [transport.cursor_key()],
             |r| r.get::<_, i64>(0)
         )
         .unwrap(),
@@ -258,13 +254,8 @@ fn failed_drain_never_applies_or_advances() {
         (200, json!({"ops":[a],"next":1})),
         (200, json!({"ops":[],"next":1})),
     ]);
-    assert_eq!(
-        net::pull(
-            &cfg,
-            &Transport::new(&url, None, "peer:test".into()).unwrap()
-        ),
-        Err(Error::InvalidRequest)
-    );
+    let transport = Transport::new(&url, None, "peer:test".into()).unwrap();
+    assert_eq!(net::pull(&cfg, &transport), Err(Error::InvalidRequest));
     let conn = store::read_only(&cfg).unwrap();
     assert_eq!(
         conn.query_row("SELECT count(*) FROM sync_ops", [], |r| r.get::<_, i64>(0))
@@ -273,8 +264,8 @@ fn failed_drain_never_applies_or_advances() {
     );
     assert_eq!(
         conn.query_row(
-            "SELECT pulled_cursor FROM sync_peers WHERE peer='peer:test'",
-            [],
+            "SELECT pulled_cursor FROM sync_peers WHERE peer=?",
+            [transport.cursor_key()],
             |r| r.get::<_, Option<String>>(0)
         )
         .unwrap(),
@@ -328,8 +319,8 @@ fn failed_receipt_retains_cursor_and_retry_receives_missing_operation() {
     let conn = store::read_only(&cfg).unwrap();
     let cursor: String = conn
         .query_row(
-            "SELECT coalesce(pulled_cursor,'0') FROM sync_peers WHERE peer='peer:retry'",
-            [],
+            "SELECT coalesce(pulled_cursor,'0') FROM sync_peers WHERE peer=?",
+            [transport.cursor_key()],
             |r| r.get(0),
         )
         .unwrap();
@@ -351,8 +342,8 @@ fn failed_receipt_retains_cursor_and_retry_receives_missing_operation() {
     assert!(requests.iter().all(|r| r.contains("since=0")));
     let cursor: String = conn
         .query_row(
-            "SELECT coalesce(pulled_cursor,'0') FROM sync_peers WHERE peer='peer:retry'",
-            [],
+            "SELECT coalesce(pulled_cursor,'0') FROM sync_peers WHERE peer=?",
+            [transport.cursor_key()],
             |r| r.get(0),
         )
         .unwrap();
@@ -451,12 +442,8 @@ fn oversized_push_splits_and_single_rejection_terminates() {
         (200, json!({"accepted":1,"duplicate":0})),
         (200, json!({"accepted":1,"duplicate":0})),
     ]);
-    let report = net::push(
-        &cfg,
-        &Transport::new(&url, Some("secret".into()), "hub".into()).unwrap(),
-        None,
-    )
-    .unwrap();
+    let original_transport = Transport::new(&url, Some("secret".into()), "hub".into()).unwrap();
+    let report = net::push(&cfg, &original_transport, None).unwrap();
     assert_eq!(report["accepted"], 3);
     assert_eq!(report["pushed_seq"], 3);
     let requests = h.join().unwrap();
@@ -485,8 +472,8 @@ fn oversized_push_splits_and_single_rejection_terminates() {
     assert!(net::push(&cfg, &transport, Some(2)).is_err());
     assert_eq!(
         conn.query_row(
-            "SELECT pushed_seq FROM sync_peers WHERE peer='hub'",
-            [],
+            "SELECT pushed_seq FROM sync_peers WHERE peer=?",
+            [original_transport.cursor_key()],
             |r| r.get::<_, i64>(0)
         )
         .unwrap(),
@@ -567,8 +554,8 @@ fn all_sources_continue_and_hub_push_runs_after_failed_pull() {
         .contains("fixture-secret"));
     assert_eq!(
         conn.query_row(
-            "SELECT pulled_cursor FROM sync_peers WHERE peer='peer:good'",
-            [],
+            "SELECT pulled_cursor FROM sync_peers WHERE peer=?",
+            [targets[1].cursor_key()],
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
@@ -576,8 +563,8 @@ fn all_sources_continue_and_hub_push_runs_after_failed_pull() {
     );
     assert_eq!(
         conn.query_row(
-            "SELECT pulled_cursor FROM sync_peers WHERE peer='hub'",
-            [],
+            "SELECT pulled_cursor FROM sync_peers WHERE peer=?",
+            [targets[0].cursor_key()],
             |r| r.get::<_, Option<String>>(0)
         )
         .unwrap(),
@@ -908,10 +895,79 @@ fn legacy_cursor_is_retained_without_skipping_new_endpoint_history() {
     assert_eq!(
         conn.query_row(
             "SELECT pulled_cursor FROM sync_peers WHERE peer=?",
-            [&transport.peer],
+            [transport.cursor_key()],
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
         "1"
     );
+}
+
+#[test]
+fn hub_url_and_auth_switches_never_borrow_another_stream_cursor() {
+    let (_t, cfg) = config();
+    let mut conn = store::connect(&cfg).unwrap();
+    conn.execute(
+        "INSERT INTO sync_peers(peer,pushed_seq,pulled_cursor) VALUES('hub',99,'9000')",
+        [],
+    )
+    .unwrap();
+    let tx = conn.transaction().unwrap();
+    store::append_op(
+        &cfg,
+        &tx,
+        "memory",
+        "add",
+        None,
+        &json!({"text":"Authored for both owned hub fixtures"}),
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let mut a = op("First hub stream", 1);
+    a["hub_seq"] = json!(1);
+    let mut b = op("Second hub stream", 2);
+    b["hub_seq"] = json!(1);
+    let (url_a, first) = fixture(vec![
+        (200, json!({"ops":[a],"next":null})),
+        (200, json!({})),
+        (200, json!({"accepted":1,"duplicate":0})),
+    ]);
+    let (url_b, second) = fixture(vec![
+        (200, json!({"ops":[b],"next":null})),
+        (200, json!({})),
+        (200, json!({"accepted":1,"duplicate":0})),
+    ]);
+    let a = Transport::new(&url_a, Some("fixture-token".into()), "hub".into()).unwrap();
+    let b = Transport::new(&url_b, Some("fixture-token".into()), "hub".into()).unwrap();
+    assert_eq!(a.peer, b.peer);
+    assert_ne!(a.cursor_key(), b.cursor_key());
+    assert_eq!(net::pull(&cfg, &a).unwrap()["applied"], 1);
+    assert_eq!(net::pull(&cfg, &b).unwrap()["applied"], 1);
+    assert_eq!(net::push(&cfg, &a, None).unwrap()["accepted"], 1);
+    assert_eq!(net::push(&cfg, &b, None).unwrap()["accepted"], 1);
+    let first_requests = first.join().unwrap();
+    let second_requests = second.join().unwrap();
+    assert!(first_requests[0].contains("since=0"));
+    assert!(second_requests[0].contains("since=0"));
+    let pushed = |request: &str| -> Value {
+        serde_json::from_str(request.rsplit("\r\n").next().unwrap()).unwrap()
+    };
+    assert_eq!(
+        pushed(&first_requests[2])["ops"][0]["op_id"],
+        pushed(&second_requests[2])["ops"][0]["op_id"]
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT pulled_cursor FROM sync_peers WHERE peer='hub'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "9000"
+    );
+    let rotated =
+        Transport::new(&url_b, Some("different-account-token".into()), "hub".into()).unwrap();
+    assert_ne!(b.cursor_key(), rotated.cursor_key());
+    assert!(!rotated.cursor_key().contains("different-account-token"));
+    assert!(!rotated.cursor_key().contains(&url_b));
 }

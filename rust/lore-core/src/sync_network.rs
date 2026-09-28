@@ -49,6 +49,7 @@ pub struct Transport {
     client: Client,
     base: Url,
     credential: Option<String>,
+    cursor_key: String,
     pub peer: String,
 }
 fn timeout() -> Duration {
@@ -87,6 +88,15 @@ impl Transport {
             format!("{path}/v1")
         };
         base.set_path(&format!("{path}/"));
+        // Neither a display label nor a URL alone identifies an account's
+        // stream. A token rotation/account switch safely replays from zero.
+        // Keep endpoints and credentials out of public status diagnostics.
+        let owner = store::canonical_bytes(&json!([base.as_str(), credential.as_deref()]))?;
+        let cursor_key = format!(
+            "transport:v1:{}:{}",
+            if peer == "hub" { "hub" } else { "peer" },
+            crate::digest(&owner)
+        );
         let client = Client::builder()
             .timeout(timeout())
             .connect_timeout(timeout())
@@ -97,8 +107,13 @@ impl Transport {
             client,
             base,
             credential,
+            cursor_key,
             peer,
         })
+    }
+    /// Private persistence identity; `peer` remains the report/transport role.
+    pub fn cursor_key(&self) -> &str {
+        &self.cursor_key
     }
     pub fn hub() -> Result<Self> {
         let url = std::env::var("LORE_SYNC_URL").map_err(|_| Error::InvalidRequest)?;
@@ -439,7 +454,7 @@ pub fn pull_from(
     }
     let conn = store::connect(cfg)?;
     let machine = store::machine_id(&conn)?;
-    let (_, saved) = peer_state(&conn, &transport.peer)?;
+    let (_, saved) = peer_state(&conn, transport.cursor_key())?;
     let initial = from.unwrap_or(saved);
     if initial < 0 {
         return Err(Error::InvalidRequest);
@@ -511,13 +526,19 @@ pub fn pull_from(
         Ok(())
     })();
     if let Err(e) = fetched {
-        note(&conn, &transport.peer, None, None, Some(e.code()))?;
+        note(&conn, transport.cursor_key(), None, None, Some(e.code()))?;
         return Err(e);
     }
     let mut report = match apply_drained(cfg, &ops) {
         Ok(report) => report,
         Err(error) => {
-            note(&conn, &transport.peer, None, None, Some(error.code()))?;
+            note(
+                &conn,
+                transport.cursor_key(),
+                None,
+                None,
+                Some(error.code()),
+            )?;
             return Err(error);
         }
     };
@@ -528,13 +549,13 @@ pub fn pull_from(
     if retry {
         note(
             &conn,
-            &transport.peer,
+            transport.cursor_key(),
             None,
             None,
             Some("application_incomplete"),
         )?;
     } else {
-        note(&conn, &transport.peer, None, Some(drained), None)?;
+        note(&conn, transport.cursor_key(), None, Some(drained), None)?;
     }
     report["cursor_advanced"] = json!(!retry);
     report["fetched"] = json!(ops.len());
@@ -549,7 +570,7 @@ pub fn push(cfg: &Config, transport: &Transport, from: Option<i64>) -> Result<Va
     }
     let conn = store::connect(cfg)?;
     let machine = store::machine_id(&conn)?;
-    let (mut cursor, _) = peer_state(&conn, &transport.peer)?;
+    let (mut cursor, _) = peer_state(&conn, transport.cursor_key())?;
     if let Some(n) = from {
         if n < 0 {
             return Err(Error::InvalidRequest);
@@ -648,7 +669,7 @@ pub fn push(cfg: &Config, transport: &Transport, from: Option<i64>) -> Result<Va
                 if e.status == 413 {
                     note(
                         &conn,
-                        &transport.peer,
+                        transport.cursor_key(),
                         None,
                         None,
                         Some("payload_too_large"),
@@ -658,7 +679,7 @@ pub fn push(cfg: &Config, transport: &Transport, from: Option<i64>) -> Result<Va
                 let advance = e.status == 409
                     && matches!(e.code.as_str(), "machine_seq_gap" | "machine_seq_conflict");
                 if !advance {
-                    note(&conn, &transport.peer, None, None, Some(&e.code))?;
+                    note(&conn, transport.cursor_key(), None, None, Some(&e.code))?;
                     return Err(Error::Unavailable);
                 }
                 (e.body, Some(e.code))
@@ -676,14 +697,26 @@ pub fn push(cfg: &Config, transport: &Transport, from: Option<i64>) -> Result<Va
         accepted += a;
         duplicate += d;
         pages += 1;
-        note(&conn, &transport.peer, Some(cursor), None, error.as_deref())?;
+        note(
+            &conn,
+            transport.cursor_key(),
+            Some(cursor),
+            None,
+            error.as_deref(),
+        )?;
         if let Some(error) = error {
             return Ok(
                 json!({"accepted":accepted,"duplicate":duplicate,"pages":pages,"pushed_seq":cursor,"error":error,"partial":true}),
             );
         }
         if settled != seqs.len() {
-            note(&conn, &transport.peer, None, None, Some("incomplete_push"))?;
+            note(
+                &conn,
+                transport.cursor_key(),
+                None,
+                None,
+                Some("incomplete_push"),
+            )?;
             return Err(Error::Changed);
         }
     }
