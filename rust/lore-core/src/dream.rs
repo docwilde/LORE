@@ -84,7 +84,7 @@ pub fn build(cfg: &Config, cwd: &Path, authority: &Authority) -> Result<Option<J
     if !matches!(authority, Authority::Derived { .. }) {
         return Err(Error::Untrusted);
     }
-    if std::env::var("LORE_DISABLE_BELIEFS").is_ok_and(|s| !matches!(s.as_str(), "" | "0")) {
+    if cfg.disabled("LORE_DISABLE_BELIEFS") {
         return Ok(None);
     }
     let Some(lock) = lock(cfg)? else {

@@ -20,12 +20,20 @@ pub struct RefreshPolicy {
 }
 impl RefreshPolicy {
     pub fn from_env() -> Self {
+        Self::from_settings(&crate::config::ResolvedSettings::from_env().unwrap_or_default())
+    }
+    pub fn from_config(cfg: &Config) -> Self {
+        Self::from_settings(&cfg.settings().unwrap_or_default())
+    }
+    fn from_settings(settings: &crate::config::ResolvedSettings) -> Self {
         Self {
-            interval_secs: std::env::var("LORE_REFRESH_SECS")
+            interval_secs: settings
+                .get("LORE_REFRESH_SECS")
                 .ok()
                 .and_then(|value| value.trim().parse().ok())
                 .filter(|value| *value > 0),
-            on_change: std::env::var("LORE_REFRESH_ON_CHANGE")
+            on_change: settings
+                .get("LORE_REFRESH_ON_CHANGE")
                 .map_or(true, |value| value.trim() != "0"),
         }
     }
@@ -61,8 +69,8 @@ pub enum RefreshDecision {
     RecordOnly,
     Inject,
 }
-pub fn refresh_interval(_cfg: &Config, _req: &Value) -> Result<Value> {
-    Ok(json!(RefreshPolicy::from_env().interval_secs))
+pub fn refresh_interval(cfg: &Config, _req: &Value) -> Result<Value> {
+    Ok(json!(RefreshPolicy::from_config(cfg).interval_secs))
 }
 pub fn interaction_model_lines(cfg: &Config) -> Result<Vec<String>> {
     let mut conn = crate::store::connect(cfg)?;
@@ -259,7 +267,7 @@ pub fn snapshot(cfg: &Config, req: &Value) -> Result<Value> {
         gate::cwd(req)?,
         &requested_scope,
         &engine,
-        RefreshPolicy::from_env()
+        RefreshPolicy::from_config(cfg)
     )?))
 }
 fn prune_stamps(dir: &Path, now: f64) {
@@ -538,7 +546,7 @@ pub fn refresh_with_skills(cfg: &Config, req: &Value, skills: &[Value]) -> Resul
         .as_str()
         .filter(|id| valid_id(id))
         .ok_or(Error::InvalidRequest)?;
-    let policy = RefreshPolicy::from_env();
+    let policy = RefreshPolicy::from_config(cfg);
     if policy.interval_secs.is_none() && !policy.on_change {
         return Ok(if graph.is_empty() {
             Value::Null

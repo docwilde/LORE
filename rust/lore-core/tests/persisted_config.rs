@@ -70,6 +70,22 @@ fn custom_settings_directory_preserves_default_root_consistency() {
         );
         assert_eq!(saved.get("LORE_DISABLE_REVIEW").unwrap(), "1");
         assert!(cfg.disabled("LORE_DISABLE_REVIEW"));
+        let refresh = lore_core::context::RefreshPolicy::from_config(&cfg);
+        assert_eq!(refresh.interval_secs, Some(45));
+        assert!(!refresh.on_change);
+        assert_eq!(
+            lore_core::context::refresh_interval(&cfg, &json!({})).unwrap(),
+            json!(45)
+        );
+        let authority = lore_core::gate::Authority::Derived {
+            agent: "fixture".into(),
+            engine: "claude".into(),
+        };
+        assert!(lore_core::dream::build(&cfg, &cfg.root, &authority)
+            .unwrap()
+            .is_none());
+        assert!(!cfg.root.exists());
+
         assert_eq!(
             lore_core::sync_network::configured_targets_with_settings(&saved, None)
                 .unwrap()
@@ -81,7 +97,7 @@ fn custom_settings_directory_preserves_default_root_consistency() {
     let home = tempfile::tempdir().unwrap();
     let directory = home.path().join("custom-claude");
     lore_core::files::atomic_write(&directory.join("settings.json"),json!({"env":{
-        "LORE_MEMORY_CAP":"17600","LORE_DISABLE_REVIEW":"1","LORE_SYNC_URL":"https://example.invalid","LORE_SYNC_AUTH":"none"
+        "LORE_MEMORY_CAP":"17600","LORE_DISABLE_REVIEW":"1","LORE_SYNC_URL":"https://example.invalid","LORE_SYNC_AUTH":"tailscale","LORE_DISABLE_BELIEFS":"1","LORE_REFRESH_SECS":"45","LORE_REFRESH_ON_CHANGE":"0"
     }}).to_string().as_bytes()).unwrap();
     let shown = show(
         home.path(),
