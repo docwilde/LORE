@@ -358,7 +358,10 @@ pub fn configured_targets_with_settings(settings: &crate::config::ResolvedSettin
 }
 /// Bootstrap needs an operator-selected source when several streams exist.
 pub fn bootstrap_target(only_peer: Option<&str>) -> Result<Transport> {
-    let mut targets = configured_targets(only_peer)?;
+    bootstrap_target_with_settings(&crate::config::ResolvedSettings::from_env()?, only_peer)
+}
+pub fn bootstrap_target_with_settings(settings: &crate::config::ResolvedSettings, only_peer: Option<&str>) -> Result<Transport> {
+    let mut targets = configured_targets_with_settings(settings,only_peer)?;
     if targets.len() != 1 {
         return Err(Error::InvalidRequest);
     }

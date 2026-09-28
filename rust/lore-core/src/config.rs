@@ -330,7 +330,7 @@ pub fn runtime(cfg: &Config) -> serde_json::Value {
         ("beliefs", "LORE_DISABLE_BELIEFS"),
         ("skills", "LORE_DISABLE_SKILLS"),
     ];
-    serde_json::json!({"root":cfg.root,"projects_dir":cfg.projects,"version":env!("CARGO_PKG_VERSION"),"disabled_stages":stages.into_iter().filter(|(_,name)|disabled(name)).map(|(stage,_)|stage).collect::<Vec<_>>()})
+    serde_json::json!({"root":cfg.root,"projects_dir":cfg.projects,"version":env!("CARGO_PKG_VERSION"),"disabled_stages":stages.into_iter().filter(|(_,name)|cfg.settings().is_ok_and(|s| s.get(name).is_ok_and(|v| !matches!(v.as_str(), "" | "0")))).map(|(stage,_)|stage).collect::<Vec<_>>()})
 }
 
 #[cfg(test)]

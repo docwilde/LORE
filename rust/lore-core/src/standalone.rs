@@ -793,12 +793,13 @@ fn settings() -> Result<PathBuf> {
 }
 fn configuration(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
     if matches!(sub, "" | "show") {
+        let settings = cfg.settings()?;
         let mut runtime = crate::config::runtime(cfg);
         runtime["caps"] = json!({"user":cfg.user_cap,"project":cfg.project_cap,"machine":cfg.machine_cap,"filemap":cfg.filemap_cap});
-        runtime["models"] = json!({"deriver":crate::config::var("LORE_DERIVER_MODEL").unwrap_or_else(|_|"haiku".into()),"dreamer":crate::config::var("LORE_DREAMER_MODEL").unwrap_or_else(|_|"sonnet".into()),"dialectic":crate::config::var("LORE_DIALECTIC_MODEL").ok()});
-        runtime["sync"] = json!({"enabled":cfg.sync.enabled,"classes":cfg.sync.classes,"key_configured":cfg.sync.key.is_some(),"hub_configured":crate::config::var("LORE_SYNC_URL").is_ok_and(|v|!v.is_empty()),"peer_configured":crate::config::var("LORE_SYNC_PEER").is_ok_and(|v|!v.is_empty())});
-        runtime["stream_index"] = json!(config::disabled("LORE_STREAM_INDEX"));
-        runtime["review_secs"] = json!(crate::config::var("LORE_REVIEW_SECS")
+        runtime["models"] = json!({"deriver":settings.get("LORE_DERIVER_MODEL").unwrap_or_else(|_|"haiku".into()),"dreamer":settings.get("LORE_DREAMER_MODEL").unwrap_or_else(|_|"sonnet".into()),"dialectic":settings.get("LORE_DIALECTIC_MODEL").ok()});
+        runtime["sync"] = json!({"enabled":cfg.sync.enabled,"classes":cfg.sync.classes,"key_configured":cfg.sync.key.is_some(),"hub_configured":settings.get("LORE_SYNC_URL").is_ok_and(|v|!v.is_empty()),"peer_configured":settings.get("LORE_SYNC_PEER").is_ok_and(|v|!v.is_empty())});
+        runtime["stream_index"] = json!(settings.get("LORE_STREAM_INDEX").is_ok_and(|v| !matches!(v.as_str(), "" | "0")));
+        runtime["review_secs"] = json!(settings.get("LORE_REVIEW_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok()));
         return Ok(runtime);
@@ -874,7 +875,7 @@ fn sync(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
         "seed" => crate::sync_admin::seed(cfg, req["apply"] == true),
         "status" => crate::sync::state(cfg),
         "bootstrap" => {
-            let transport = n::bootstrap_target(req["peer"].as_str())?;
+            let transport = n::bootstrap_target_with_settings(&cfg.settings()?,req["peer"].as_str())?;
             if req["merge"] == true {
                 return n::pull(cfg, &transport);
             }
