@@ -747,7 +747,7 @@ fn configured_sources_deduplicate_and_bootstrap_requires_one() {
     assert!(net::bootstrap_target(None).is_err());
     assert_eq!(
         net::bootstrap_target(Some("host.test")).unwrap().peer,
-        "peer:host.test"
+        "peer:v1:http://host.test:8765/v1"
     );
     std::env::set_var("LORE_SYNC_URL", "https://hub.example.test");
     std::env::set_var("LORE_SYNC_TOKEN", "fixture-only-token");
@@ -877,5 +877,41 @@ fn changing_default_peer_port_cannot_reuse_another_endpoint_cursor() {
     assert_eq!(
         legacy,
         Transport::peer("http://host.test:8765/v1").unwrap().peer
+    );
+}
+
+#[test]
+fn legacy_cursor_is_retained_without_skipping_new_endpoint_history() {
+    let (_t, cfg) = config();
+    let conn = store::connect(&cfg).unwrap();
+    conn.execute(
+        "INSERT INTO sync_peers(peer,pushed_seq,pulled_cursor) VALUES('peer:127.0.0.1',42,'9000')",
+        [],
+    )
+    .unwrap();
+    let mut row = op("New endpoint starts from zero", 1);
+    row["hub_seq"] = json!(1);
+    let (url, h) = fixture(vec![(200, json!({"ops":[row],"next":null}))]);
+    let transport = Transport::peer(&url).unwrap();
+    assert!(transport.peer.starts_with("peer:v1:http://127.0.0.1:"));
+    assert_eq!(net::pull(&cfg, &transport).unwrap()["applied"], 1);
+    assert!(h.join().unwrap()[0].contains("since=0"));
+    assert_eq!(
+        conn.query_row(
+            "SELECT pulled_cursor FROM sync_peers WHERE peer='peer:127.0.0.1'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "9000"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT pulled_cursor FROM sync_peers WHERE peer=?",
+            [&transport.peer],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "1"
     );
 }

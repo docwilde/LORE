@@ -156,31 +156,12 @@ impl Transport {
             host
         };
         let p = url.port_or_known_default().ok_or(Error::InvalidRequest)?;
-        let key = if url.scheme() == "https" {
-            format!(
-                "peer:https://{host}{}",
-                if p == 443 {
-                    String::new()
-                } else {
-                    format!(":{p}")
-                }
-            )
-        } else if p == 8765 {
-            format!("peer:{host}")
-        } else if p == 80 {
-            format!("peer:http://{host}")
-        } else {
-            format!("peer:{host}:{p}")
-        };
-        // An HTTP path can identify a different stream on the same host. Its
-        // cursor must not be shared with the legacy host-only endpoint.
+        // Legacy host keys depend on mutable default-port configuration and
+        // cannot prove which endpoint owns their opaque cursor. Leave those
+        // rows intact and replay into an unambiguous endpoint namespace.
         let path = url.path().trim_end_matches('/');
         let path = path.strip_suffix("/v1").unwrap_or(path);
-        let key = if path.is_empty() {
-            key
-        } else {
-            format!("{key}{path}")
-        };
+        let key = format!("peer:v1:{}://{host}:{p}{path}/v1", url.scheme());
         Self::new(
             &raw,
             std::env::var("LORE_SYNC_PEER_SECRET")
