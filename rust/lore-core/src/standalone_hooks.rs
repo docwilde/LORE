@@ -104,7 +104,7 @@ pub fn review_at_prompt(
     session: Option<&str>,
     engine: &str,
 ) -> Result<()> {
-    if config::disabled("LORE_DISABLE_REVIEW") {
+    if cfg.disabled("LORE_DISABLE_REVIEW") {
         return Ok(());
     }
     let Some(interval) = std::env::var("LORE_REVIEW_SECS")

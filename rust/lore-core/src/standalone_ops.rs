@@ -173,7 +173,7 @@ fn prefix_hash(file: &std::fs::File, size: u64) -> Result<String> {
     }
 }
 pub fn review(cfg: &Config, req: &Value) -> Result<Value> {
-    if config::disabled("LORE_DISABLE_REVIEW")
+    if cfg.disabled("LORE_DISABLE_REVIEW")
         || std::env::var("LORE_SKIP").is_ok_and(|s| !s.is_empty())
     {
         return Ok(json!({"skipped":true}));
@@ -503,7 +503,7 @@ fn backfill_project(
             }
         }
     }
-    if derived && !config::disabled("LORE_DEFER_DREAM") {
+    if derived && !cfg.disabled("LORE_DEFER_DREAM") {
         if let Some(cwd) = project_cwd {
             let auth = Authority::Derived {
                 agent: "backfill-dream".into(),
@@ -1433,7 +1433,7 @@ pub fn belief_list(cfg: &Config, req: &Value, search: bool) -> Result<Value> {
     let query = req["query"].as_str().unwrap_or("");
     let statuses = if req["all"] == true {
         vec!["active", "dormant", "superseded", "retracted"]
-    } else if req["include_dormant"] == true || config::disabled("LORE_INCLUDE_DORMANT") {
+    } else if req["include_dormant"] == true || cfg.disabled("LORE_INCLUDE_DORMANT") {
         vec!["active", "dormant"]
     } else {
         vec!["active"]
@@ -1491,7 +1491,7 @@ pub fn belief_list(cfg: &Config, req: &Value, search: bool) -> Result<Value> {
     Ok(json!(results))
 }
 pub fn search(cfg: &Config, req: &Value) -> Result<Value> {
-    if !config::disabled("LORE_DISABLE_INDEX") {
+    if !cfg.disabled("LORE_DISABLE_INDEX") {
         crate::index::index(cfg, &json!({"force":false}))?;
     }
     let conn = store::connect(cfg)?;
@@ -1579,7 +1579,7 @@ pub fn consult(cfg: &Config, req: &Value, ask: bool) -> Result<Value> {
     }
     let limit = cap(req, "limit", if ask { 12 } else { 8 }, 100)?;
     let conn = store::connect(cfg)?;
-    let dormant = ask && config::disabled("LORE_INCLUDE_DORMANT");
+    let dormant = ask && cfg.disabled("LORE_INCLUDE_DORMANT");
     let mut statement=conn.prepare("SELECT b.id,b.subject,b.claim,b.confidence,b.status,(SELECT count(*) FROM belief_outcomes o WHERE o.belief_id=b.id),(SELECT coalesce(sum(event='confirmed'),0) FROM belief_outcomes o WHERE o.belief_id=b.id),(SELECT coalesce(sum(event='contradicted'),0) FROM belief_outcomes o WHERE o.belief_id=b.id),(SELECT count(*) FROM belief_evidence e WHERE e.belief_id=b.id),(SELECT count(DISTINCT session_id) FROM belief_evidence e WHERE e.belief_id=b.id) FROM beliefs b JOIN belief_fts f ON b.id=f.belief_id WHERE belief_fts MATCH ? AND (status='active' OR (? AND status='dormant')) ORDER BY bm25(belief_fts) LIMIT ?")?;
     let mut cursor = statement.query(params![expression, dormant, limit as i64])?;
     let mut budget = 8 * 1024 * 1024;
@@ -1664,7 +1664,7 @@ pub fn ask(cfg: &Config, req: &Value) -> Result<Value> {
     search_req["limit"] = json!(12);
     search_req["or_only"] = json!(true);
     let sessions = search(cfg, &search_req)?;
-    let beliefs = if config::disabled("LORE_DISABLE_BELIEFS") {
+    let beliefs = if cfg.disabled("LORE_DISABLE_BELIEFS") {
         json!({"disabled":true})
     } else {
         consult(cfg, &search_req, true)?

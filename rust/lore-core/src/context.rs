@@ -465,7 +465,7 @@ pub fn render_graph_context(rows: &[Value], skills: &[Value], cap: usize) -> Res
 pub fn graph_context_block(cfg: &Config, req: &Value, skills: &[Value]) -> Result<String> {
     if std::env::var("LORE_GRAPH_CONTEXT").map_or(true, |value| {
         matches!(value.as_str(), "" | "0" | "off" | "false")
-    }) || disabled("LORE_DISABLE_BELIEFS")
+    }) || cfg.disabled("LORE_DISABLE_BELIEFS")
     {
         return Ok(String::new());
     }
@@ -497,7 +497,7 @@ pub fn graph_context_block(cfg: &Config, req: &Value, skills: &[Value]) -> Resul
     render_graph_context(&rows, skills, cap)
 }
 pub fn graph_context_op(cfg: &Config, req: &Value) -> Result<Value> {
-    let skills = if disabled("LORE_DISABLE_SKILLS") {
+    let skills = if cfg.disabled("LORE_DISABLE_SKILLS") {
         Vec::new()
     } else {
         crate::skills::candidates(cfg, req["prompt"].as_str().unwrap_or(""), 4)?
@@ -513,12 +513,12 @@ pub fn graph_awareness_op(cfg: &Config, _req: &Value) -> Result<Value> {
         Value::Null
     })
 }
-use crate::config::disabled;
+
 fn refresh_frame(text: &str, message: &str) -> Value {
     json!({"suppressOutput":true,"systemMessage":message,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":text}})
 }
 pub fn refresh(cfg: &Config, req: &Value) -> Result<Value> {
-    let skills = if disabled("LORE_DISABLE_SKILLS") {
+    let skills = if cfg.disabled("LORE_DISABLE_SKILLS") {
         Vec::new()
     } else {
         crate::skills::candidates(cfg, req["prompt"].as_str().unwrap_or(""), 4).unwrap_or_default()
@@ -527,7 +527,7 @@ pub fn refresh(cfg: &Config, req: &Value) -> Result<Value> {
 }
 pub fn refresh_with_skills(cfg: &Config, req: &Value, skills: &[Value]) -> Result<Value> {
     if std::env::var("LORE_SKIP").is_ok_and(|value| !value.is_empty())
-        || disabled("LORE_DISABLE_INJECT")
+        || cfg.disabled("LORE_DISABLE_INJECT")
     {
         return Ok(Value::Null);
     }

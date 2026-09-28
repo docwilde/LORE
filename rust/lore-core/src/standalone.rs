@@ -688,7 +688,7 @@ fn status(cfg: &Config, req: &Value) -> Result<Value> {
     )
 }
 fn doctor(cfg: &Config, req: &Value) -> Result<Value> {
-    let mut checks = json!({"native":true,"root_absolute":cfg.root.is_absolute(),"sync_key_configured":cfg.sync.key.is_some(),"version":env!("CARGO_PKG_VERSION"),"runtime":config::runtime(cfg),"transcripts_present":cfg.projects.is_dir(),"stream_index_enabled":config::disabled("LORE_STREAM_INDEX"),"mid_session_review_secs":crate::config::var("LORE_REVIEW_SECS").ok().and_then(|s|s.parse::<u64>().ok()).filter(|n|*n>0),"refresh_on_change":!crate::config::var("LORE_REFRESH_ON_CHANGE").is_ok_and(|v|v=="0")});
+    let mut checks = json!({"native":true,"root_absolute":cfg.root.is_absolute(),"sync_key_configured":cfg.sync.key.is_some(),"version":env!("CARGO_PKG_VERSION"),"runtime":config::runtime(cfg),"transcripts_present":cfg.projects.is_dir(),"stream_index_enabled":cfg.disabled("LORE_STREAM_INDEX"),"mid_session_review_secs":crate::config::var("LORE_REVIEW_SECS").ok().and_then(|s|s.parse::<u64>().ok()).filter(|n|*n>0),"refresh_on_change":!crate::config::var("LORE_REFRESH_ON_CHANGE").is_ok_and(|v|v=="0")});
     let provider = crate::config::var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
     let available = if provider.contains('/') {
         Path::new(&provider).is_file()
@@ -1217,7 +1217,7 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
             if let Some(thread) = input["provider_thread"].as_str() {
                 req["provider_thread"] = json!(thread);
             }
-            if event == "pre-compact" && config::disabled("LORE_DISABLE_PRECOMPACT") {
+            if event == "pre-compact" && cfg.disabled("LORE_DISABLE_PRECOMPACT") {
                 return Ok(());
             }
             req["engine"] = json!(engine);

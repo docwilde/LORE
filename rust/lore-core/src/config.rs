@@ -169,6 +169,15 @@ impl Config {
             sync: SyncConfig::from_settings(&saved),
         })
     }
+    pub fn var(&self, name: &str) -> std::result::Result<String, env::VarError> {
+        match env::var(name) {
+            Err(env::VarError::NotPresent) => self.settings().unwrap_or_default().get(name),
+            value => value,
+        }
+    }
+    pub fn disabled(&self, name: &str) -> bool {
+        self.var(name).is_ok_and(|v| !matches!(v.as_str(), "" | "0"))
+    }
     pub fn settings(&self) -> Result<ResolvedSettings> {
         ResolvedSettings::from_env_with_root(Some(&self.root))
     }
