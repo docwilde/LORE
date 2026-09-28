@@ -16,3 +16,5 @@ Apply the diff between the user's selection and the current states, and only the
 Stages already in the requested state get no command. Re-run `lore config` afterwards and show the resulting table as confirmation.
 
 Close with the reminder: hook-read switches apply from the next hook fire of a session that carries them in its environment — a restart of Claude Code refreshes everything at once. `LORE_SKIP=1` remains the master off-switch over all stages.
+
+Native LORE reads saved `LORE_*` values from `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json` on each invocation. Explicit process environment values take precedence, including an empty value used to clear a saved signing key. A nondefault `LORE_ROOT` uses only process overrides unless it matches the settings directory's `lore` child. Saved secret values require an owned regular settings file with private permissions; malformed or unsafe settings are rejected. No configuration is copied into the process environment.

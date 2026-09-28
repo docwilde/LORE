@@ -18,7 +18,7 @@ impl ResolvedSettings {
         let home = env::var_os("HOME").map(PathBuf::from).ok_or(Error::Unavailable)?;
         let directory = env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from)
             .unwrap_or_else(|| home.join(".claude"));
-        let root = effective_root.map(PathBuf::from).or_else(|| env::var_os("LORE_ROOT").filter(|v| !v.is_empty()).map(PathBuf::from));
+        let root = effective_root.map(PathBuf::from).or_else(|| env::var_os("LORE_ROOT").filter(|v| !v.to_string_lossy().trim().is_empty()).map(PathBuf::from));
         // An isolated store must never inherit the host's saved credentials.
         if root.as_ref().is_some_and(|r| r != &directory.join("lore")) {
             return Ok(Self::default());
