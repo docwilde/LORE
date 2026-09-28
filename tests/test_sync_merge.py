@@ -146,16 +146,10 @@ def _map_entries(mod, slug):
 
 
 def _align_project(mod, project_key: str, slug: str):
-    """Give `mod` the SAME slug for `project_key` the author uses.
+    """Pin a receiver's local checkout slug for the signed project identity.
 
-    Not a convenience: `entry_key` hashes `kind:bucket:text`, and for the file
-    map the bucket IS the slug (`project:<slug>` for project memory), so a
-    `remove`/`replace` key only matches on a receiver whose slug for that
-    project agrees with the author's. That is the ordinary case -- the slug is
-    a checkout path flattened, and two machines that keep the repository in the
-    same place produce the same one -- and it is what `record_project_identity`
-    records on first sight. Without it the receiver mints `sync-<key>` and
-    nothing keyed by the author's bucket can ever be found.
+    Different-slug and synthetic-slug lookup is covered separately in
+    test_sync_project_keys; a checkout path is never a distributed identity.
     """
     conn = mod.db_connect()
     mod.record_project_identity(conn, project_key, slug)
