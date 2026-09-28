@@ -21,7 +21,9 @@ pub mod store;
 pub mod sync;
 pub mod sync_apply;
 pub mod sync_network;
+pub mod sync_admin;
 pub mod standalone;
+pub mod standalone_ops;
 pub mod worker;
 pub use core::Core;
 
