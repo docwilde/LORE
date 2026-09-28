@@ -54,7 +54,8 @@ pub struct Transport {
 }
 fn timeout(settings: &crate::config::ResolvedSettings) -> Duration {
     Duration::from_secs_f64(
-        settings.get("LORE_SYNC_TIMEOUT")
+        settings
+            .get("LORE_SYNC_TIMEOUT")
             .ok()
             .and_then(|x| x.parse::<f64>().ok())
             .filter(|n| n.is_finite() && *n > 0.)
@@ -63,7 +64,8 @@ fn timeout(settings: &crate::config::ResolvedSettings) -> Duration {
     )
 }
 fn port(settings: &crate::config::ResolvedSettings) -> u16 {
-    settings.get("LORE_SYNC_PEER_PORT")
+    settings
+        .get("LORE_SYNC_PEER_PORT")
         .ok()
         .and_then(|x| x.parse().ok())
         .filter(|n| *n > 0)
@@ -99,15 +101,19 @@ fn cursor_identity(base: &Url, credential: Option<&str>, peer: &str) -> Result<S
     Ok(cursor_key)
 }
 fn hub_settings(settings: &crate::config::ResolvedSettings) -> Result<(String, Option<String>)> {
-    let url = settings.get("LORE_SYNC_URL").map_err(|_| Error::InvalidRequest)?;
-    let auth = settings.get("LORE_SYNC_AUTH")
+    let url = settings
+        .get("LORE_SYNC_URL")
+        .map_err(|_| Error::InvalidRequest)?;
+    let auth = settings
+        .get("LORE_SYNC_AUTH")
         .unwrap_or_default()
         .trim()
         .to_lowercase();
     let auth = if auth.is_empty() { "token" } else { &auth };
     let token = if auth == "token" {
         Some(
-            settings.get("LORE_SYNC_TOKEN")
+            settings
+                .get("LORE_SYNC_TOKEN")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .ok_or(Error::Untrusted)?,
@@ -119,7 +125,10 @@ fn hub_settings(settings: &crate::config::ResolvedSettings) -> Result<(String, O
     };
     Ok((url, token))
 }
-fn peer_settings(settings: &crate::config::ResolvedSettings, spec: &str) -> Result<(String, Option<String>, String)> {
+fn peer_settings(
+    settings: &crate::config::ResolvedSettings,
+    spec: &str,
+) -> Result<(String, Option<String>, String)> {
     let spec = spec.trim();
     if spec.is_empty() {
         return Err(Error::InvalidRequest);
@@ -162,7 +171,8 @@ fn peer_settings(settings: &crate::config::ResolvedSettings, spec: &str) -> Resu
     let key = format!("peer:v1:{}://{host}:{p}{path}/v1", url.scheme());
     Ok((
         raw,
-        settings.get("LORE_SYNC_PEER_SECRET")
+        settings
+            .get("LORE_SYNC_PEER_SECRET")
             .ok()
             .filter(|s| !s.is_empty()),
         key,
@@ -172,16 +182,22 @@ fn peer_settings(settings: &crate::config::ResolvedSettings, spec: &str) -> Resu
 pub fn configured_cursor_keys() -> Result<(Option<String>, BTreeSet<String>)> {
     configured_cursor_keys_with_settings(&crate::config::ResolvedSettings::from_env()?)
 }
-pub fn configured_cursor_keys_with_settings(settings: &crate::config::ResolvedSettings) -> Result<(Option<String>, BTreeSet<String>)> {
+pub fn configured_cursor_keys_with_settings(
+    settings: &crate::config::ResolvedSettings,
+) -> Result<(Option<String>, BTreeSet<String>)> {
     let mut hub = None;
     let mut pull = BTreeSet::new();
-    if settings.get("LORE_SYNC_URL").is_ok_and(|s| !s.trim().is_empty()) {
+    if settings
+        .get("LORE_SYNC_URL")
+        .is_ok_and(|s| !s.trim().is_empty())
+    {
         let (url, credential) = hub_settings(settings)?;
         let key = cursor_identity(&normalized_base(&url)?, credential.as_deref(), "hub")?;
         pull.insert(key.clone());
         hub = Some(key);
     }
-    for peer in settings.get("LORE_SYNC_PEER")
+    for peer in settings
+        .get("LORE_SYNC_PEER")
         .unwrap_or_default()
         .split(',')
         .map(str::trim)
@@ -201,9 +217,19 @@ pub fn configured_cursor_keys_with_settings(settings: &crate::config::ResolvedSe
 }
 impl Transport {
     pub fn new(base: &str, credential: Option<String>, peer: String) -> Result<Self> {
-        Self::new_with_settings(&crate::config::ResolvedSettings::from_env()?,base,credential,peer)
+        Self::new_with_settings(
+            &crate::config::ResolvedSettings::from_env()?,
+            base,
+            credential,
+            peer,
+        )
     }
-    fn new_with_settings(settings: &crate::config::ResolvedSettings,base: &str, credential: Option<String>, peer: String) -> Result<Self> {
+    fn new_with_settings(
+        settings: &crate::config::ResolvedSettings,
+        base: &str,
+        credential: Option<String>,
+        peer: String,
+    ) -> Result<Self> {
         let base = normalized_base(base)?;
         let cursor_key = cursor_identity(&base, credential.as_deref(), &peer)?;
         let client = Client::builder()
@@ -224,15 +250,22 @@ impl Transport {
     pub fn cursor_key(&self) -> &str {
         &self.cursor_key
     }
-    pub fn hub() -> Result<Self> { Self::hub_with_settings(&crate::config::ResolvedSettings::from_env()?) }
+    pub fn hub() -> Result<Self> {
+        Self::hub_with_settings(&crate::config::ResolvedSettings::from_env()?)
+    }
     pub fn hub_with_settings(settings: &crate::config::ResolvedSettings) -> Result<Self> {
         let (url, token) = hub_settings(settings)?;
-        Self::new_with_settings(settings,&url, token, "hub".into())
+        Self::new_with_settings(settings, &url, token, "hub".into())
     }
-    pub fn peer(spec: &str) -> Result<Self> { Self::peer_with_settings(&crate::config::ResolvedSettings::from_env()?,spec) }
-    pub fn peer_with_settings(settings: &crate::config::ResolvedSettings,spec: &str) -> Result<Self> {
+    pub fn peer(spec: &str) -> Result<Self> {
+        Self::peer_with_settings(&crate::config::ResolvedSettings::from_env()?, spec)
+    }
+    pub fn peer_with_settings(
+        settings: &crate::config::ResolvedSettings,
+        spec: &str,
+    ) -> Result<Self> {
         let (url, credential, key) = peer_settings(settings, spec)?;
-        Self::new_with_settings(settings,&url, credential, key)
+        Self::new_with_settings(settings, &url, credential, key)
     }
     pub fn request(
         &self,
@@ -327,25 +360,32 @@ impl Transport {
 /// Discover transports in configured order and collapse aliases of one stream.
 /// Explicit `only_peer` is usable without changing saved configuration.
 pub fn configured_targets(only_peer: Option<&str>) -> Result<Vec<Transport>> {
-    configured_targets_with_settings(&crate::config::ResolvedSettings::from_env()?,only_peer)
+    configured_targets_with_settings(&crate::config::ResolvedSettings::from_env()?, only_peer)
 }
-pub fn configured_targets_with_settings(settings: &crate::config::ResolvedSettings,only_peer: Option<&str>) -> Result<Vec<Transport>> {
+pub fn configured_targets_with_settings(
+    settings: &crate::config::ResolvedSettings,
+    only_peer: Option<&str>,
+) -> Result<Vec<Transport>> {
     let mut targets = Vec::new();
     let mut seen = BTreeSet::new();
     if let Some(peer) = only_peer {
-        targets.push(Transport::peer_with_settings(settings,peer)?);
+        targets.push(Transport::peer_with_settings(settings, peer)?);
     } else {
-        if settings.get("LORE_SYNC_URL").is_ok_and(|s| !s.trim().is_empty()) {
+        if settings
+            .get("LORE_SYNC_URL")
+            .is_ok_and(|s| !s.trim().is_empty())
+        {
             targets.push(Transport::hub_with_settings(settings)?);
             seen.insert("hub".to_owned());
         }
-        for peer in settings.get("LORE_SYNC_PEER")
+        for peer in settings
+            .get("LORE_SYNC_PEER")
             .unwrap_or_default()
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            let transport = Transport::peer_with_settings(settings,peer)?;
+            let transport = Transport::peer_with_settings(settings, peer)?;
             if seen.insert(transport.peer.clone()) {
                 targets.push(transport);
             }
@@ -360,8 +400,11 @@ pub fn configured_targets_with_settings(settings: &crate::config::ResolvedSettin
 pub fn bootstrap_target(only_peer: Option<&str>) -> Result<Transport> {
     bootstrap_target_with_settings(&crate::config::ResolvedSettings::from_env()?, only_peer)
 }
-pub fn bootstrap_target_with_settings(settings: &crate::config::ResolvedSettings, only_peer: Option<&str>) -> Result<Transport> {
-    let mut targets = configured_targets_with_settings(settings,only_peer)?;
+pub fn bootstrap_target_with_settings(
+    settings: &crate::config::ResolvedSettings,
+    only_peer: Option<&str>,
+) -> Result<Transport> {
+    let mut targets = configured_targets_with_settings(settings, only_peer)?;
     if targets.len() != 1 {
         return Err(Error::InvalidRequest);
     }
@@ -961,20 +1004,23 @@ impl PeerServer {
         if !cfg.sync.enabled {
             return Err(Error::Untrusted);
         }
-        let auth = settings.get("LORE_SYNC_PEER_AUTH")
+        let auth = settings
+            .get("LORE_SYNC_PEER_AUTH")
             .unwrap_or_else(|_| "tailscale".into())
             .trim()
             .to_lowercase();
         if !matches!(auth.as_str(), "tailscale" | "none") || !loopback && auth != "none" {
             return Err(Error::Untrusted);
         }
-        let allow = settings.get("LORE_SYNC_PEER_ALLOW")
+        let allow = settings
+            .get("LORE_SYNC_PEER_ALLOW")
             .unwrap_or_default()
             .split(',')
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
             .collect();
-        let secret = settings.get("LORE_SYNC_PEER_SECRET")
+        let secret = settings
+            .get("LORE_SYNC_PEER_SECRET")
             .ok()
             .filter(|s| !s.is_empty());
         if auth != "none" && secret.is_none() {

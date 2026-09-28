@@ -477,12 +477,14 @@ pub fn graph_context_block(cfg: &Config, req: &Value, skills: &[Value]) -> Resul
     if prompt.chars().count() > 8192 {
         return Err(Error::TooLarge);
     }
-    let cap = cfg.var("LORE_GRAPH_CONTEXT_CAP")
+    let cap = cfg
+        .var("LORE_GRAPH_CONTEXT_CAP")
         .ok()
         .map_or(Some(1200), |value| value.parse::<usize>().ok())
         .filter(|value| *value <= 65536)
         .ok_or(Error::InvalidRequest)?;
-    let hops = cfg.var("LORE_GRAPH_CONTEXT_HOPS")
+    let hops = cfg
+        .var("LORE_GRAPH_CONTEXT_HOPS")
         .ok()
         .map_or(Some(1), |value| value.parse::<usize>().ok())
         .filter(|value| *value <= 4)

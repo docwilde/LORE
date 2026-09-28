@@ -28,7 +28,8 @@ pub fn run(cfg: &Config, req: &Value, engine: &str) -> Result<()> {
     let Some(job) = crate::review::build_review_job(cfg, req, &authority)? else {
         return Ok(());
     };
-    let program = cfg.var("LORE_CLAUDE_BIN")
+    let program = cfg
+        .var("LORE_CLAUDE_BIN")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "claude".into());
@@ -42,8 +43,9 @@ pub fn run(cfg: &Config, req: &Value, engine: &str) -> Result<()> {
         deadline,
     )?;
     let result = crate::review::process_result(cfg, &job, &response)?;
-    let deferred =
-        cfg.var("LORE_DEFER_DREAM").is_ok_and(|value| !matches!(value.as_str(), "" | "0"));
+    let deferred = cfg
+        .var("LORE_DEFER_DREAM")
+        .is_ok_and(|value| !matches!(value.as_str(), "" | "0"));
     if result["beliefs"]["derived"].as_u64().unwrap_or(0) > 0 && !deferred {
         // Earlier review effects have landed. A reconciliation error must not
         // advertise a safe retry of the complete review.
@@ -75,14 +77,11 @@ pub(crate) fn review_provider(
     prompt: &str,
     deadline: Instant,
 ) -> Result<String> {
-    let model = cfg.var(model_env)
+    let model = cfg
+        .var(model_env)
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            cfg.var("LORE_REVIEW_MODEL")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
+        .or_else(|| cfg.var("LORE_REVIEW_MODEL").ok().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| fallback.into());
     review_with_model(program, &model, prompt, deadline)
 }

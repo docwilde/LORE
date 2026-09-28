@@ -658,7 +658,9 @@ fn dream(cfg: &Config, req: &Value) -> Result<Value> {
         return Ok(json!(job.prompt()));
     }
     own_process_group()?;
-    let program = cfg.var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+    let program = cfg
+        .var("LORE_CLAUDE_BIN")
+        .unwrap_or_else(|_| "claude".into());
     let output = crate::worker::review_provider(
         cfg,
         &program,
@@ -690,7 +692,9 @@ fn status(cfg: &Config, req: &Value) -> Result<Value> {
 }
 fn doctor(cfg: &Config, req: &Value) -> Result<Value> {
     let mut checks = json!({"native":true,"root_absolute":cfg.root.is_absolute(),"sync_key_configured":cfg.sync.key.is_some(),"version":env!("CARGO_PKG_VERSION"),"runtime":config::runtime(cfg),"transcripts_present":cfg.projects.is_dir(),"stream_index_enabled":cfg.disabled("LORE_STREAM_INDEX"),"mid_session_review_secs":cfg.var("LORE_REVIEW_SECS").ok().and_then(|s|s.parse::<u64>().ok()).filter(|n|*n>0),"refresh_on_change":!cfg.var("LORE_REFRESH_ON_CHANGE").is_ok_and(|v|v=="0")});
-    let provider = cfg.var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+    let provider = cfg
+        .var("LORE_CLAUDE_BIN")
+        .unwrap_or_else(|_| "claude".into());
     let available = if provider.contains('/') {
         Path::new(&provider).is_file()
     } else {
@@ -799,8 +803,11 @@ fn configuration(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<V
         runtime["caps"] = json!({"user":cfg.user_cap,"project":cfg.project_cap,"machine":cfg.machine_cap,"filemap":cfg.filemap_cap});
         runtime["models"] = json!({"deriver":settings.get("LORE_DERIVER_MODEL").unwrap_or_else(|_|"haiku".into()),"dreamer":settings.get("LORE_DREAMER_MODEL").unwrap_or_else(|_|"sonnet".into()),"dialectic":settings.get("LORE_DIALECTIC_MODEL").ok()});
         runtime["sync"] = json!({"enabled":cfg.sync.enabled,"classes":cfg.sync.classes,"key_configured":cfg.sync.key.is_some(),"hub_configured":settings.get("LORE_SYNC_URL").is_ok_and(|v|!v.is_empty()),"peer_configured":settings.get("LORE_SYNC_PEER").is_ok_and(|v|!v.is_empty())});
-        runtime["stream_index"] = json!(settings.get("LORE_STREAM_INDEX").is_ok_and(|v| !matches!(v.as_str(), "" | "0")));
-        runtime["review_secs"] = json!(settings.get("LORE_REVIEW_SECS")
+        runtime["stream_index"] = json!(settings
+            .get("LORE_STREAM_INDEX")
+            .is_ok_and(|v| !matches!(v.as_str(), "" | "0")));
+        runtime["review_secs"] = json!(settings
+            .get("LORE_REVIEW_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok()));
         return Ok(runtime);
@@ -876,7 +883,8 @@ fn sync(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
         "seed" => crate::sync_admin::seed(cfg, req["apply"] == true),
         "status" => crate::sync::state(cfg),
         "bootstrap" => {
-            let transport = n::bootstrap_target_with_settings(&cfg.settings()?,req["peer"].as_str())?;
+            let transport =
+                n::bootstrap_target_with_settings(&cfg.settings()?, req["peer"].as_str())?;
             if req["merge"] == true {
                 return n::pull(cfg, &transport);
             }
@@ -979,7 +987,7 @@ fn sync(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
         }
         "health" | "whoami" => {
             let t = if let Some(peer) = req["peer"].as_str() {
-                n::Transport::peer_with_settings(&cfg.settings()?,peer)?
+                n::Transport::peer_with_settings(&cfg.settings()?, peer)?
             } else {
                 n::Transport::hub_with_settings(&cfg.settings()?)?
             };
@@ -988,9 +996,14 @@ fn sync(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
                 Error::Unavailable
             })
         }
-        "push" => n::push(cfg, &n::Transport::hub_with_settings(&cfg.settings()?)?, req["from_seq"].as_i64()),
+        "push" => n::push(
+            cfg,
+            &n::Transport::hub_with_settings(&cfg.settings()?)?,
+            req["from_seq"].as_i64(),
+        ),
         "pull" | "" => {
-            let targets = n::configured_targets_with_settings(&cfg.settings()?,req["peer"].as_str())?;
+            let targets =
+                n::configured_targets_with_settings(&cfg.settings()?, req["peer"].as_str())?;
             n::exchange(cfg, &targets, sub.is_empty())
         }
         "export" | "import" => {
@@ -1173,7 +1186,10 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
     match event {
         "session-start" => {
             let _ = crate::standalone_hooks::pull_at_start(cfg, cwd);
-            if cfg.var("LORE_DISABLE_INJECT").is_ok_and(|s| !matches!(s.as_str(), "" | "0")) {
+            if cfg
+                .var("LORE_DISABLE_INJECT")
+                .is_ok_and(|s| !matches!(s.as_str(), "" | "0"))
+            {
                 return Ok(());
             }
             let snapshot = crate::context::snapshot(cfg, &req)?;

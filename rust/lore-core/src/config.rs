@@ -15,10 +15,17 @@ impl ResolvedSettings {
         Self::from_env_with_root(None)
     }
     pub fn from_env_with_root(effective_root: Option<&Path>) -> Result<Self> {
-        let home = env::var_os("HOME").map(PathBuf::from).ok_or(Error::Unavailable)?;
-        let directory = env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from)
+        let home = env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or(Error::Unavailable)?;
+        let directory = env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".claude"));
-        let root = effective_root.map(PathBuf::from).or_else(|| env::var_os("LORE_ROOT").filter(|v| !v.to_string_lossy().trim().is_empty()).map(PathBuf::from));
+        let root = effective_root.map(PathBuf::from).or_else(|| {
+            env::var_os("LORE_ROOT")
+                .filter(|v| !v.to_string_lossy().trim().is_empty())
+                .map(PathBuf::from)
+        });
         // An isolated store must never inherit the host's saved credentials.
         if root.as_ref().is_some_and(|r| r != &directory.join("lore")) {
             return Ok(Self::default());
@@ -29,15 +36,24 @@ impl ResolvedSettings {
     pub fn from_file(path: &Path) -> Result<Self> {
         let mut file = match crate::files::open_regular(path, crate::MAX_FRAME_BYTES) {
             Ok(file) => file,
-            Err(Error::Unavailable) if !path.try_exists().unwrap_or(true) => return Ok(Self::default()),
+            Err(Error::Unavailable) if !path.try_exists().unwrap_or(true) => {
+                return Ok(Self::default())
+            }
             Err(error) => return Err(error),
         };
         let mut bytes = Vec::new();
         use std::io::Read;
-        file.by_ref().take(crate::MAX_FRAME_BYTES as u64 + 1).read_to_end(&mut bytes)?;
-        if bytes.len() > crate::MAX_FRAME_BYTES { return Err(Error::TooLarge); }
-        let data: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| Error::InvalidRequest)?;
-        if !data.is_object() { return Err(Error::InvalidRequest); }
+        file.by_ref()
+            .take(crate::MAX_FRAME_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > crate::MAX_FRAME_BYTES {
+            return Err(Error::TooLarge);
+        }
+        let data: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| Error::InvalidRequest)?;
+        if !data.is_object() {
+            return Err(Error::InvalidRequest);
+        }
         let mut saved = std::collections::HashMap::new();
         if let Some(values) = data.get("env") {
             let values = values.as_object().ok_or(Error::InvalidRequest)?;
@@ -46,10 +62,13 @@ impl ResolvedSettings {
                 saved.insert(name.clone(), value.to_owned());
             }
         }
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt;
-            if saved.keys().any(|name| name.contains("KEY") || name.contains("TOKEN") || name.contains("SECRET"))
-                && file.metadata()?.permissions().mode() & 0o077 != 0 {
+            if saved.keys().any(|name| {
+                name.contains("KEY") || name.contains("TOKEN") || name.contains("SECRET")
+            }) && file.metadata()?.permissions().mode() & 0o077 != 0
+            {
                 return Err(Error::UnsafePath);
             }
         }
@@ -57,14 +76,22 @@ impl ResolvedSettings {
     }
     /// Identify the source without exposing its value.
     pub fn source(&self, name: &str) -> Option<&'static str> {
-        if env::var_os(name).is_some() { Some("environment") }
-        else if self.saved.contains_key(name) { Some("settings") }
-        else { None }
+        if env::var_os(name).is_some() {
+            Some("environment")
+        } else if self.saved.contains_key(name) {
+            Some("settings")
+        } else {
+            None
+        }
     }
     /// Process overrides, including empty values, always win.
     pub fn get(&self, name: &str) -> std::result::Result<String, env::VarError> {
         match env::var(name) {
-            Err(env::VarError::NotPresent) => self.saved.get(name).cloned().ok_or(env::VarError::NotPresent),
+            Err(env::VarError::NotPresent) => self
+                .saved
+                .get(name)
+                .cloned()
+                .ok_or(env::VarError::NotPresent),
             value => value,
         }
     }
@@ -72,7 +99,9 @@ impl ResolvedSettings {
 /// Environment-compatible shared lookup for standalone runtime consumers.
 pub fn var(name: &str) -> std::result::Result<String, env::VarError> {
     match env::var(name) {
-        Err(env::VarError::NotPresent) => ResolvedSettings::from_env().unwrap_or_default().get(name),
+        Err(env::VarError::NotPresent) => {
+            ResolvedSettings::from_env().unwrap_or_default().get(name)
+        }
         value => value,
     }
 }
@@ -110,8 +139,11 @@ impl SyncConfig {
         Self::from_settings(&ResolvedSettings::from_env().unwrap_or_default())
     }
     fn from_settings(saved: &ResolvedSettings) -> Self {
-        let enabled = saved.get("LORE_DISABLE_SYNC").map_or(true, |s| s.is_empty() || s == "0");
-        let classes = saved.get("LORE_SYNC_CLASSES")
+        let enabled = saved
+            .get("LORE_DISABLE_SYNC")
+            .map_or(true, |s| s.is_empty() || s == "0");
+        let classes = saved
+            .get("LORE_SYNC_CLASSES")
             .unwrap_or_else(|_| "memory,filemap,beliefs,pending,skills,sessions".into())
             .split(',')
             .map(str::trim)
@@ -121,7 +153,8 @@ impl SyncConfig {
         Self {
             enabled,
             classes,
-            key: saved.get("LORE_SYNC_HMAC_KEY")
+            key: saved
+                .get("LORE_SYNC_HMAC_KEY")
                 .ok()
                 .filter(|s| !s.is_empty()),
         }
@@ -137,9 +170,12 @@ impl Config {
             .map(PathBuf::from)
             .ok_or(Error::Unavailable)?;
         let default_root = home.join(".claude/lore");
-        let root = effective_root.or_else(|| env::var_os("LORE_ROOT")
-            .filter(|s| !s.to_string_lossy().trim().is_empty())
-            .map(PathBuf::from))
+        let root = effective_root
+            .or_else(|| {
+                env::var_os("LORE_ROOT")
+                    .filter(|s| !s.to_string_lossy().trim().is_empty())
+                    .map(PathBuf::from)
+            })
             .unwrap_or_else(|| default_root.clone());
         if !root.is_absolute() || timeout.is_zero() {
             return Err(Error::InvalidRequest);
@@ -182,7 +218,8 @@ impl Config {
         }
     }
     pub fn disabled(&self, name: &str) -> bool {
-        self.var(name).is_ok_and(|v| !matches!(v.as_str(), "" | "0"))
+        self.var(name)
+            .is_ok_and(|v| !matches!(v.as_str(), "" | "0"))
     }
     pub fn settings(&self) -> Result<ResolvedSettings> {
         ResolvedSettings::from_env_with_root(Some(&self.root))
@@ -361,43 +398,66 @@ mod persisted_tests {
     }
     #[test]
     fn saved_caps_signing_and_transport() {
-        let (_dir, path) = settings(r#"{"env":{"LORE_MEMORY_CAP":"17600","LORE_FILEMAP_CAP":"8800","LORE_SYNC_HMAC_KEY":"fixture-key","LORE_SYNC_URL":"https://example.invalid","LORE_SYNC_TOKEN":"fixture-token","LORE_SYNC_CLASSES":"memory","LORE_DISABLE_SYNC":"1"}}"#);
+        let (_dir, path) = settings(
+            r#"{"env":{"LORE_MEMORY_CAP":"17600","LORE_FILEMAP_CAP":"8800","LORE_SYNC_HMAC_KEY":"fixture-key","LORE_SYNC_URL":"https://example.invalid","LORE_SYNC_TOKEN":"fixture-token","LORE_SYNC_CLASSES":"memory","LORE_DISABLE_SYNC":"1"}}"#,
+        );
         let saved = ResolvedSettings::from_file(&path).unwrap();
-        assert_eq!(cap(&saved,"LORE_MEMORY_CAP",8800).unwrap(),17600);
-        assert_eq!(cap(&saved,"LORE_FILEMAP_CAP",4400).unwrap(),8800);
+        assert_eq!(cap(&saved, "LORE_MEMORY_CAP", 8800).unwrap(), 17600);
+        assert_eq!(cap(&saved, "LORE_FILEMAP_CAP", 4400).unwrap(), 8800);
         let sync = SyncConfig::from_settings(&saved);
         assert!(sync.key.is_some());
         assert!(!sync.enabled);
         assert!(sync.classes.contains("memory"));
-        assert_eq!(saved.get("LORE_SYNC_URL").unwrap(),"https://example.invalid");
+        assert_eq!(
+            saved.get("LORE_SYNC_URL").unwrap(),
+            "https://example.invalid"
+        );
         assert!(saved.get("LORE_SYNC_TOKEN").is_ok());
-        let targets = crate::sync_network::configured_targets_with_settings(&saved,None).unwrap();
-        assert_eq!(targets.len(),1);
-        assert_eq!(targets[0].peer,"hub");
+        let targets = crate::sync_network::configured_targets_with_settings(&saved, None).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].peer, "hub");
         let (hub, _) = crate::sync_network::configured_cursor_keys_with_settings(&saved).unwrap();
-        assert_eq!(hub.as_deref(),Some(targets[0].cursor_key()));
+        assert_eq!(hub.as_deref(), Some(targets[0].cursor_key()));
     }
     #[test]
     fn rejects_malformed_and_unsafe_settings() {
-        let (dir,path) = settings("{");
-        assert!(matches!(ResolvedSettings::from_file(&path),Err(Error::InvalidRequest)));
-        std::fs::write(&path,r#"{"env":{"LORE_SYNC_HMAC_KEY":"fixture"}}"#).unwrap();
-        std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(matches!(ResolvedSettings::from_file(&path),Err(Error::UnsafePath)));
-        std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();
-        let link=dir.path().join("link.json");
-        std::os::unix::fs::symlink(&path,&link).unwrap();
-        assert!(matches!(ResolvedSettings::from_file(&link),Err(Error::UnsafePath)));
+        let (dir, path) = settings("{");
+        assert!(matches!(
+            ResolvedSettings::from_file(&path),
+            Err(Error::InvalidRequest)
+        ));
+        std::fs::write(&path, r#"{"env":{"LORE_SYNC_HMAC_KEY":"fixture"}}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(
+            ResolvedSettings::from_file(&path),
+            Err(Error::UnsafePath)
+        ));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(matches!(
+            ResolvedSettings::from_file(&link),
+            Err(Error::UnsafePath)
+        ));
         std::fs::remove_file(&link).unwrap();
         let fifo = dir.path().join("fifo");
         let raw = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
-        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(),0o600) },0);
-        assert!(matches!(ResolvedSettings::from_file(&fifo),Err(Error::UnsafePath)));
-        let oversized=dir.path().join("oversized");
-        let file=std::fs::File::create(&oversized).unwrap();
-        file.set_len(crate::MAX_FRAME_BYTES as u64+1).unwrap();
-        assert!(matches!(ResolvedSettings::from_file(&oversized),Err(Error::TooLarge)));
-        std::fs::hard_link(&path,&link).unwrap();
-        assert!(matches!(ResolvedSettings::from_file(&path),Err(Error::UnsafePath)));
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        assert!(matches!(
+            ResolvedSettings::from_file(&fifo),
+            Err(Error::UnsafePath)
+        ));
+        let oversized = dir.path().join("oversized");
+        let file = std::fs::File::create(&oversized).unwrap();
+        file.set_len(crate::MAX_FRAME_BYTES as u64 + 1).unwrap();
+        assert!(matches!(
+            ResolvedSettings::from_file(&oversized),
+            Err(Error::TooLarge)
+        ));
+        std::fs::hard_link(&path, &link).unwrap();
+        assert!(matches!(
+            ResolvedSettings::from_file(&path),
+            Err(Error::UnsafePath)
+        ));
     }
 }
