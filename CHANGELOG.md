@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.62.2 — 2026-09-28
+
+**Native sync recovery**
+
+- Respect advertised payload limits and split rejected HTTP 413 batches.
+  Preserve settled cursors and refuse an oversized single operation.
+- Retain each source's pull result and report incomplete exchanges as failures.
+  Deduplicate endpoint aliases and require an explicit bootstrap source.
+- Apply canonical receiver byte/count bounds and bounded bundle digests.
+  Keep existing signed bytes, conflict gates and staged review semantics.
+
+**CLI and verification**
+
+- Wire recovery into the native CLI and list its full command families in help.
+  Add real CLI, socket and signed-store regressions.
+
 ## 0.62.1 — 2026-09-28
 
 **Codex documentation**
