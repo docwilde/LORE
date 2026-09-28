@@ -81,6 +81,14 @@ pub(crate) fn review_provider(
                 .filter(|s| !s.is_empty())
         })
         .unwrap_or_else(|| fallback.into());
+    review_with_model(program, &model, prompt, deadline)
+}
+pub(crate) fn review_with_model(
+    program: &str,
+    model: &str,
+    prompt: &str,
+    deadline: Instant,
+) -> Result<String> {
     if model.len() > 128 || model.starts_with('-') || model.chars().any(char::is_control) {
         return Err(Error::InvalidRequest);
     }

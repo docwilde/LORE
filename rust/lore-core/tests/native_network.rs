@@ -299,3 +299,55 @@ fn native_peer_real_socket_serves_signed_wire() {
     ));
     task.join().unwrap();
 }
+#[test]
+fn failed_receipt_retains_cursor_and_retry_receives_missing_operation() {
+    let (_t, mut cfg) = config();
+    cfg.timeout = std::time::Duration::from_millis(20);
+    let mut row = op("Retryable owned transport fact", 1);
+    row["hub_seq"] = json!(1);
+    let lock_path = cfg.root.join(format!(
+        ".sync-op-{}",
+        lore_core::sync_apply::deterministic_uid(row["op_id"].as_str().unwrap())
+    ));
+    let lock = lore_core::files::Locks::acquire(&cfg.root, &[lock_path], cfg.timeout).unwrap();
+    let (url, h) = fixture(vec![
+        (200, json!({"ops":[row.clone()],"next":null})),
+        (200, json!({"ops":[row],"next":null})),
+    ]);
+    let transport = Transport::new(&url, None, "peer:retry".into()).unwrap();
+    let first = net::pull(&cfg, &transport).unwrap();
+    assert_eq!(first["failed"], 1);
+    assert_eq!(first["cursor_advanced"], false);
+    let conn = store::read_only(&cfg).unwrap();
+    let cursor: String = conn
+        .query_row(
+            "SELECT coalesce(pulled_cursor,'0') FROM sync_peers WHERE peer='peer:retry'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(cursor, "0");
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM sync_ops WHERE machine_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    drop(lock);
+    let second = net::pull(&cfg, &transport).unwrap();
+    assert_eq!(second["applied"], 1);
+    assert_eq!(second["cursor_advanced"], true);
+    let requests = h.join().unwrap();
+    assert!(requests.iter().all(|r| r.contains("since=0")));
+    let cursor: String = conn
+        .query_row(
+            "SELECT coalesce(pulled_cursor,'0') FROM sync_peers WHERE peer='peer:retry'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(cursor, "1");
+}

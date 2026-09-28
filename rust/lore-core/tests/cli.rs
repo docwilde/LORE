@@ -228,16 +228,14 @@ fn readback_scrubs_credentials_and_refuses_terminal_controls_or_oversized_output
     assert_eq!(err, "lore-rs: untrusted_write\n");
 }
 #[test]
-fn unsafe_sources_and_unrecognized_or_mutating_cli_forms_are_refused() {
+fn unsafe_sources_and_unrecognized_cli_forms_are_refused() {
     let fixture = Fixture::new();
     for args in [
         vec!["memory", "add", "fact"],
-        vec!["filemap", "remove", "--match", "fact"],
         vec!["memory", "show", "--scope", "unknown"],
         vec!["memory", "show", "--scope", "user", "--host", "remote"],
         vec!["memory", "show", "--scope", "user", "--scope", "project"],
         vec!["memory", "show", "--host"],
-        vec!["filemap", "show", "--cwd", "/unknown"],
     ] {
         let (success, out, err) = fixture.invoke(&args);
         assert!(!success && out.is_empty());

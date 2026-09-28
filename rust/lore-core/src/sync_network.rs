@@ -381,8 +381,22 @@ pub fn pull_from(
                 json!(report[k].as_u64().unwrap_or(0) + v.as_u64().ok_or(Error::Unavailable)?);
         }
     }
-    // If application throws, cursor is retained; idempotency safely resumes.
-    note(&conn, &transport.peer, None, Some(drained), None)?;
+    // Failed receipt/staging may not have retained the operation. Keep the
+    // cursor until every row is durably received; idempotency handles retries.
+    let retry = report["failed"].as_u64().unwrap_or(0) > 0
+        || report["may_have_applied"].as_u64().unwrap_or(0) > 0;
+    if retry {
+        note(
+            &conn,
+            &transport.peer,
+            None,
+            None,
+            Some("application_incomplete"),
+        )?;
+    } else {
+        note(&conn, &transport.peer, None, Some(drained), None)?;
+    }
+    report["cursor_advanced"] = json!(!retry);
     report["pages"] = json!(pages);
     report["drained_to"] = json!(drained);
     Ok(report)

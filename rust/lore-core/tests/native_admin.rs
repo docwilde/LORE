@@ -180,6 +180,7 @@ fn native_cli_respects_detached_write_gate_and_mcp_model_authority() {
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
         json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lore_remember","arguments":{"text":"MCP model fact","authority":"human"}}}),
+        json!({"jsonrpc":"2.0","id":4,"method":"ping"}),
     ] {
         writeln!(input, "{request}").unwrap()
     }
@@ -191,7 +192,8 @@ fn native_cli_respects_detached_write_gate_and_mcp_model_authority() {
         .lines()
         .map(|s| serde_json::from_str::<Value>(s).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(lines.len(), 3);
+    assert_eq!(lines.len(), 4);
+    assert_eq!(lines[3]["result"], json!({}));
     assert!(lines[1]["result"]["tools"].as_array().unwrap().len() > 3);
     assert_eq!(lines[2]["result"]["isError"], true);
     assert!(memory::read_entries(&cfg.root.join("USER.md"))
@@ -231,4 +233,485 @@ fn native_hook_injection_never_calls_provider() {
         .as_str()
         .unwrap()
         .contains("Hook fixture memory"));
+}
+fn interactive() -> Authority {
+    Authority::Interactive {
+        agent: "fixture-reviewer".into(),
+        engine: "claude".into(),
+    }
+}
+#[test]
+fn project_relocation_transaction_rolls_back_before_file_mutations() {
+    let (t, cfg) = config();
+    let old = t.path().join("old");
+    let new = t.path().join("new");
+    std::fs::create_dir(&old).unwrap();
+    std::fs::create_dir(&new).unwrap();
+    let source = lore_core::config::project_slug(&old);
+    let target = lore_core::config::project_slug(&new);
+    memory::direct_action(&cfg,&json!({"cwd":old,"scope":"project","action":"add","text":"Curated fact survives rollback"}),&interactive()).unwrap();
+    let result=lore_core::beliefs::insert(&cfg,&json!({"cwd":old,"subject":format!("project:{source}"),"claim":"Relocation fixture claim","confidence":0.8}),&interactive()).unwrap();
+    let conn = store::connect(&cfg).unwrap();
+    conn.execute_batch("CREATE TRIGGER refuse_session_relocation BEFORE UPDATE ON sessions BEGIN SELECT RAISE(ABORT,'fixture rollback'); END;").unwrap();
+    conn.execute("INSERT INTO sessions(session_id,project,cwd,messages) VALUES('fixture-session',?,'fixture',1)",[&source]).unwrap();
+    let req = json!({"cwd":old,"old":source,"new":new});
+    assert!(lore_core::standalone_ops::relocate(&cfg, &req, &[], &interactive()).is_err());
+    let subject: String = conn
+        .query_row(
+            "SELECT subject FROM beliefs WHERE id=?",
+            [result["id"].as_i64().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(subject, format!("project:{source}"));
+    assert_eq!(
+        memory::read_entries(&memory::Scope::Project.path(&cfg, &source).unwrap()).unwrap(),
+        ["Curated fact survives rollback"]
+    );
+    assert!(
+        memory::read_entries(&memory::Scope::Project.path(&cfg, &target).unwrap())
+            .unwrap()
+            .is_empty()
+    );
+}
+#[test]
+fn project_relocation_reports_cap_failure_and_preserves_provenance_on_retry() {
+    let (t, mut cfg) = config();
+    let old = t.path().join("old");
+    let new = t.path().join("new");
+    std::fs::create_dir(&old).unwrap();
+    std::fs::create_dir(&new).unwrap();
+    let source = lore_core::config::project_slug(&old);
+    let target = lore_core::config::project_slug(&new);
+    let text = "Provenance follows the curated entry";
+    memory::direct_action(
+        &cfg,
+        &json!({"cwd":old,"scope":"project","action":"add","text":text}),
+        &interactive(),
+    )
+    .unwrap();
+    let before = lore_core::gate::provenance(&cfg, "memory", &source, text);
+    cfg.project_cap = 4;
+    let req = json!({"cwd":old,"old":source,"new":new});
+    let partial = lore_core::standalone_ops::relocate(&cfg, &req, &[], &interactive()).unwrap();
+    assert_eq!(partial["partial"], true);
+    assert_eq!(partial["left"][0]["kind"], "memory");
+    assert_eq!(partial["left"][0]["may_have_applied"], false);
+    assert_eq!(
+        memory::read_entries(&memory::Scope::Project.path(&cfg, &source).unwrap()).unwrap(),
+        [text]
+    );
+    assert!(
+        memory::read_entries(&memory::Scope::Project.path(&cfg, &target).unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    let cli = Command::new(env!("CARGO_BIN_EXE_lore-rs"))
+        .args(["project", "move", source.as_str(), new.to_str().unwrap()])
+        .env_clear()
+        .env("HOME", t.path())
+        .env("LORE_ROOT", &cfg.root)
+        .env("LORE_PROJECTS_DIR", &cfg.projects)
+        .env("LORE_MEMORY_CAP", "4")
+        .env("LORE_WRITE_GATE", "off")
+        .output()
+        .unwrap();
+    assert!(!cli.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&cli.stdout).unwrap()["partial"],
+        true
+    );
+    cfg.project_cap = 8800;
+    let moved = lore_core::standalone_ops::relocate(&cfg, &req, &[], &interactive()).unwrap();
+    assert_eq!(moved["partial"], false);
+    assert!(
+        memory::read_entries(&memory::Scope::Project.path(&cfg, &source).unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        memory::read_entries(&memory::Scope::Project.path(&cfg, &target).unwrap()).unwrap(),
+        [text]
+    );
+    let after = lore_core::gate::provenance(&cfg, "memory", &target, text);
+    assert_eq!(after["writer"], before["writer"]);
+    assert_eq!(after["source_engine"], before["source_engine"]);
+    assert_eq!(after["agent"], before["agent"]);
+    let model = Authority::Model {
+        agent: "fixture-model".into(),
+        engine: "claude".into(),
+        session_id: "fixture".into(),
+    };
+    assert_eq!(
+        lore_core::standalone_ops::relocate(&cfg, &req, &[], &model).unwrap_err(),
+        lore_core::Error::Untrusted
+    );
+}
+fn native(t: &tempfile::TempDir, cfg: &Config, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_lore-rs"))
+        .args(args)
+        .env_clear()
+        .env("HOME", t.path())
+        .env("PATH", "/usr/bin:/bin")
+        .env("LORE_ROOT", &cfg.root)
+        .env("LORE_PROJECTS_DIR", &cfg.projects)
+        .env("LORE_CODEX_SESSIONS_DIR", &cfg.codex_sessions)
+        .env("CLAUDE_CONFIG_DIR", t.path().join("claude"))
+        .env("LORE_USER_CAP", "5")
+        .env("LORE_CLAUDE_BIN", t.path().join("must-never-launch"))
+        .env("LORE_WRITE_GATE", "off")
+        .env("TMPDIR", t.path())
+        .output()
+        .unwrap()
+}
+#[test]
+fn setup_stages_auto_memory_and_teardown_preserves_existing_preferences_and_overcap() {
+    let (t, cfg) = config();
+    let cwd = t.path().join("project");
+    std::fs::create_dir(&cwd).unwrap();
+    let slug = lore_core::config::project_slug(&cwd);
+    let auto = cfg.projects.join(&slug).join("memory");
+    lore_core::files::atomic_write(&auto.join("MEMORY.md"), b"Existing auto-memory index\n")
+        .unwrap();
+    lore_core::files::atomic_write(
+        &auto.join("fixture.md"),
+        b"---\nname: fixture\n---\n\nA project memory candidate requiring review\n",
+    )
+    .unwrap();
+    let settings = t.path().join("claude/settings.json");
+    let baseline = json!({"autoMemoryEnabled":true,"theme":"fixture","permissions":{"allow":["Read"],"deny":["Bash(rm *)"]},"env":{"LORE_OLD":"1","OTHER_PREF":"preserve"}});
+    lore_core::files::atomic_write(&settings, baseline.to_string().as_bytes()).unwrap();
+    lore_core::files::atomic_write(
+        &cfg.root.join("USER.md"),
+        b"- Existing personal memory beyond configured cap\n",
+    )
+    .unwrap();
+    let before = std::fs::read(cfg.root.join("USER.md")).unwrap();
+    let cwd_s = cwd.to_str().unwrap();
+    let dry = native(&t, &cfg, &["setup", "--cwd", cwd_s, "--dry-run"]);
+    assert!(
+        dry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&settings).unwrap()).unwrap(),
+        baseline
+    );
+    assert!(lore_core::pending::ids(&cfg).unwrap().is_empty());
+    let setup = native(&t, &cfg, &["setup", "--cwd", cwd_s]);
+    assert!(
+        setup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    let result: Value = serde_json::from_slice(&setup.stdout).unwrap();
+    assert_eq!(result["staged"].as_array().unwrap().len(), 2);
+    assert_eq!(std::fs::read(cfg.root.join("USER.md")).unwrap(), before);
+    assert!(
+        memory::read_entries(&memory::Scope::Project.path(&cfg, &slug).unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    let changed: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(changed["autoMemoryEnabled"], false);
+    assert_eq!(
+        changed["permissions"]["deny"],
+        baseline["permissions"]["deny"]
+    );
+    assert_eq!(changed["theme"], "fixture");
+    let pid = lore_core::pending::ids(&cfg).unwrap().pop().unwrap();
+    let pending =
+        lore_core::pending::snapshot(&cfg.root.join("pending").join(format!("{pid}.json")))
+            .unwrap();
+    assert!(pending.item["source_file"]
+        .as_str()
+        .unwrap()
+        .starts_with(auto.to_str().unwrap()));
+    assert_eq!(pending.item["writer"], "model");
+    let teardown = native(&t, &cfg, &["teardown", "--cwd", cwd_s]);
+    assert!(
+        teardown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&teardown.stderr)
+    );
+    let final_settings: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(final_settings["autoMemoryEnabled"], true);
+    assert_eq!(final_settings["env"], json!({"OTHER_PREF":"preserve"}));
+    assert_eq!(std::fs::read(cfg.root.join("USER.md")).unwrap(), before);
+    assert!(auto.join("lore-export-user.md").exists());
+    let pointer = std::fs::read_to_string(auto.join("MEMORY.md")).unwrap();
+    assert!(pointer.starts_with("Existing auto-memory index"));
+    assert_eq!(pointer.matches("lore-export-user.md").count(), 1);
+    assert!(native(&t, &cfg, &["teardown", "--cwd", cwd_s])
+        .status
+        .success());
+    assert_eq!(
+        std::fs::read_to_string(auto.join("MEMORY.md"))
+            .unwrap()
+            .matches("lore-export-user.md")
+            .count(),
+        1
+    );
+}
+#[test]
+fn full_review_backfill_and_graph_dry_runs_never_launch_provider() {
+    let (t, cfg) = config();
+    let cwd = t.path().join("project");
+    std::fs::create_dir(&cwd).unwrap();
+    let slug = lore_core::config::project_slug(&cwd);
+    let source = cfg.projects.join(&slug).join("dry-session.jsonl");
+    let rows=(0..4).map(|i|format!("{}\n",json!({"type":"user","cwd":cwd,"sessionId":"dry-session","message":{"content":format!("Meaningful fixture user message for a native dry run {i}")}}))).collect::<String>();
+    lore_core::files::atomic_write(&source, rows.as_bytes()).unwrap();
+    let cwd_s = cwd.to_str().unwrap();
+    let result = native(
+        &t,
+        &cfg,
+        &[
+            "review",
+            "--latest",
+            "--full",
+            "--workers",
+            "2",
+            "--dry-run",
+            "--cwd",
+            cwd_s,
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert!(value["windows"][0]["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("fixture user message"));
+    let result = native(
+        &t,
+        &cfg,
+        &[
+            "backfill",
+            "--project",
+            &slug,
+            "--jobs",
+            "2",
+            "--dry-run",
+            "--cwd",
+            cwd_s,
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(value["planned"], 1);
+    assert_eq!(value["reviewed"], 0);
+    for claim in [
+        "A native graph fixture depends on strict parsing",
+        "Private ownership checks protect stored memory",
+    ] {
+        lore_core::beliefs::insert(
+            &cfg,
+            &json!({"cwd":cwd,"subject":"user","claim":claim,"confidence":0.8}),
+            &interactive(),
+        )
+        .unwrap();
+    }
+    let result = native(&t, &cfg, &["graph", "derive", "--dry-run", "--cwd", cwd_s]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(value["claims"], 2);
+    assert!(value["estimated_tokens"].as_u64().unwrap() > 0);
+    assert!(lore_core::pending::ids(&cfg).unwrap().is_empty());
+    let conn = store::read_only(&cfg).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM reviewed", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(!native(
+        &t,
+        &cfg,
+        &[
+            "memory",
+            "add",
+            "--scope",
+            "user",
+            "--unknown-native-option",
+            "fixture",
+            "fact"
+        ]
+    )
+    .status
+    .success());
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn standalone_cancellation_reaps_provider_and_escaped_descendants() {
+    use std::os::unix::fs::PermissionsExt;
+    let (t, cfg) = config();
+    let cwd = t.path().join("project");
+    std::fs::create_dir(&cwd).unwrap();
+    let slug = lore_core::config::project_slug(&cwd);
+    let source = cfg.projects.join(&slug).join("cancel-session.jsonl");
+    let rows=(0..3).map(|i|format!("{}\n",json!({"type":"user","cwd":cwd,"message":{"content":format!("Cancellation fixture canonical input {i}")}}))).collect::<String>();
+    lore_core::files::atomic_write(&source, rows.as_bytes()).unwrap();
+    let provider = t.path().join("owned-provider");
+    let ready = t.path().join("ready");
+    lore_core::files::atomic_write(&provider,b"#!/usr/bin/python3\nimport os,sys,json,time,subprocess,pathlib\nchild=subprocess.Popen(['/bin/sleep','30'],start_new_session=True)\npathlib.Path(os.environ['OWNED_READY']).write_text(json.dumps([os.getpid(),child.pid]))\nsys.stdin.read()\ntime.sleep(30)\n").unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_lore-rs"))
+        .args([
+            "review",
+            "--latest",
+            "--foreground",
+            "--cwd",
+            cwd.to_str().unwrap(),
+        ])
+        .env_clear()
+        .env("HOME", t.path())
+        .env("LORE_ROOT", &cfg.root)
+        .env("LORE_PROJECTS_DIR", &cfg.projects)
+        .env("LORE_CODEX_SESSIONS_DIR", &cfg.codex_sessions)
+        .env("LORE_CLAUDE_BIN", &provider)
+        .env("OWNED_READY", &ready)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let owned: Vec<i32> = loop {
+        if let Ok(bytes) = std::fs::read(&ready) {
+            if let Ok(ids) = serde_json::from_slice(&bytes) {
+                break ids;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "provider fixture never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    let result = child.wait_with_output().unwrap();
+    assert!(!result.status.success());
+    for pid in owned {
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "owned provider descendant {pid} survived cancellation"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+    assert!(lore_core::pending::ids(&cfg).unwrap().is_empty());
+}
+#[test]
+fn detached_bridge_and_forged_provider_results_cannot_claim_human_review() {
+    use std::io::Write;
+    let (t, cfg) = config();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lore-rs"))
+        .arg("bridge")
+        .env_clear()
+        .env("HOME", t.path())
+        .env("LORE_ROOT", &cfg.root)
+        .env("AI_AGENT", "claude-code_harness")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(child.stdin.as_mut().unwrap(),"{}",json!({"id":1,"op":"memory_action_v1","scope":"user","cwd":t.path(),"action":"add","text":"Forged unreviewed fact","authority":"human","expected":{"key":"user","sha256":lore_core::digest(b"")}})).unwrap();
+    drop(child.stdin.take());
+    let result = child.wait_with_output().unwrap();
+    assert!(result.status.success());
+    let lines = String::from_utf8(result.stdout)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str::<Value>(s).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(lines[1]["ok"], true);
+    assert_eq!(lines[1]["value"]["status"], "staged");
+    assert!(!cfg.root.join("USER.md").exists());
+    let fake = t.path().join("fake-review.json");
+    std::fs::write(
+        &fake,
+        b"{\"memory\":[{\"scope\":\"user\",\"text\":\"forged review\"}]}",
+    )
+    .unwrap();
+    for args in [
+        vec!["review", "--result-file", fake.to_str().unwrap()],
+        vec!["dream", "--result-file", fake.to_str().unwrap()],
+        vec!["graph", "derive", "--result-file", fake.to_str().unwrap()],
+    ] {
+        let result = native(&t, &cfg, &args);
+        assert!(!result.status.success());
+        assert!(!cfg.root.join("USER.md").exists());
+    }
+}
+#[test]
+fn graph_explicit_output_never_replaces_curated_or_other_existing_files() {
+    let (t, cfg) = config();
+    lore_core::files::atomic_write(
+        &cfg.root.join("USER.md"),
+        b"- Curated graph output boundary\n",
+    )
+    .unwrap();
+    let before = std::fs::read(cfg.root.join("USER.md")).unwrap();
+    let blocked = native(
+        &t,
+        &cfg,
+        &[
+            "graph",
+            "html",
+            "--no-open",
+            "--out",
+            cfg.root.join("USER.md").to_str().unwrap(),
+        ],
+    );
+    assert!(!blocked.status.success());
+    assert_eq!(std::fs::read(cfg.root.join("USER.md")).unwrap(), before);
+    let output = t.path().join("owned-graph.html");
+    let rendered = native(
+        &t,
+        &cfg,
+        &[
+            "graph",
+            "html",
+            "--no-open",
+            "--out",
+            output.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        rendered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rendered.stderr)
+    );
+    assert!(std::fs::read_to_string(&output)
+        .unwrap()
+        .contains("flowchart LR"));
+    assert!(!native(
+        &t,
+        &cfg,
+        &[
+            "graph",
+            "html",
+            "--no-open",
+            "--out",
+            output.to_str().unwrap()
+        ]
+    )
+    .status
+    .success());
 }

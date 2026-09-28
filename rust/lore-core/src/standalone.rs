@@ -92,63 +92,70 @@ fn parse(args: &[String]) -> Result<(Value, Vec<String>)> {
                 other => other,
             }
             .replace('-', "_");
-            let value = if matches!(
-                key.as_str(),
-                "force"
-                    | "all"
-                    | "dry_run"
-                    | "browser"
-                    | "merge"
-                    | "index"
-                    | "beliefs"
-                    | "apply"
-                    | "replace_foreign_key"
-                    | "latest"
-                    | "foreground"
-                    | "full"
-                    | "list"
-                    | "cluster"
-                    | "include_dormant"
-                    | "history"
-                    | "asserted"
-                    | "mermaid"
-                    | "no_open"
-            ) {
-                json!(true)
-            } else {
-                index += 1;
-                let raw = args.get(index).ok_or(Error::InvalidRequest)?;
-                if matches!(key.as_str(), "expected" | "ids" | "exclude_ids" | "payload") {
-                    serde_json::from_str(raw).map_err(|_| Error::InvalidRequest)?
+            let value =
+                if key == "live" && !args.get(index + 1).is_some_and(|s| !s.starts_with('-')) {
+                    json!("")
                 } else if matches!(
                     key.as_str(),
-                    "limit"
-                        | "offset"
-                        | "belief_id"
-                        | "src"
-                        | "dst"
-                        | "hops"
-                        | "cap"
-                        | "confidence"
-                        | "spawn_depth"
-                        | "port"
-                        | "from_seq"
-                        | "sample"
-                        | "threshold"
-                        | "max_edges"
-                        | "workers"
-                        | "jobs"
-                        | "context"
-                        | "trunc"
-                        | "max_hops"
+                    "force"
+                        | "all"
+                        | "dry_run"
+                        | "browser"
+                        | "merge"
+                        | "index"
+                        | "beliefs"
+                        | "apply"
+                        | "replace_foreign_key"
+                        | "latest"
+                        | "foreground"
+                        | "full"
+                        | "list"
+                        | "cluster"
+                        | "include_dormant"
+                        | "history"
+                        | "asserted"
+                        | "mermaid"
+                        | "no_open"
                 ) {
-                    serde_json::from_str(raw).map_err(|_| Error::InvalidRequest)?
+                    json!(true)
                 } else {
-                    json!(raw)
-                }
-            };
+                    index += 1;
+                    let raw = args.get(index).ok_or(Error::InvalidRequest)?;
+                    if matches!(key.as_str(), "expected" | "ids" | "exclude_ids" | "payload") {
+                        serde_json::from_str(raw).map_err(|_| Error::InvalidRequest)?
+                    } else if matches!(
+                        key.as_str(),
+                        "limit"
+                            | "offset"
+                            | "belief_id"
+                            | "src"
+                            | "dst"
+                            | "hops"
+                            | "cap"
+                            | "confidence"
+                            | "spawn_depth"
+                            | "port"
+                            | "from_seq"
+                            | "sample"
+                            | "threshold"
+                            | "max_edges"
+                            | "workers"
+                            | "jobs"
+                            | "context"
+                            | "trunc"
+                            | "max_hops"
+                            | "belief"
+                            | "dropped"
+                            | "max_nodes"
+                            | "max_clusters"
+                    ) {
+                        serde_json::from_str(raw).map_err(|_| Error::InvalidRequest)?
+                    } else {
+                        json!(raw)
+                    }
+                };
             if req.get(&key).is_some() && key != "cwd" {
-                if key == "project" || key == "subject" {
+                if matches!(key.as_str(), "project" | "subject" | "rel") {
                     let old = req[&key].clone();
                     let mut values = if let Some(a) = old.as_array() {
                         a.clone()
@@ -169,6 +176,62 @@ fn parse(args: &[String]) -> Result<(Value, Vec<String>)> {
         index += 1
     }
     Ok((req, positional))
+}
+fn validate_flags(group: &str, sub: &str, req: &Value) -> Result<()> {
+    if group == "request" {
+        return Ok(());
+    }
+    let extra = match (group,sub) {
+        ("memory", "add"|"replace"|"remove") => "scope host match text",
+        ("memory", "move") => "scope host match to to_scope to_machine",
+        ("memory", _) => "scope host",
+        ("filemap", "add"|"replace"|"remove") => "path purpose match action",
+        ("filemap", _) => "",
+        ("belief", "list"|"search") => "subject all include_dormant query limit",
+        ("belief", "add"|"insert") => "subject confidence evidence claim",
+        ("belief", "retract") => "belief_id reason",
+        ("belief", "dedup-report")|("crosscheck", _) => "threshold",
+        ("belief", _) | ("evidence",_) => "belief_id limit",
+        ("graph", "derive") => "subject all max_edges model dry_run engine",
+        ("graph", "context") => "prompt cap hops",
+        ("graph", "edge") => "src dst rel source session_id note",
+        ("graph",_) => "belief belief_id src dst hops max_hops rel history limit out mermaid no_open max_nodes max_clusters",
+        ("search",_) => "query all limit",
+        ("session",_) => "session_id grep context limit trunc offset",
+        ("index",_) => "force live",
+        ("history",_) => "limit offset prefix session_id",
+        ("review",_) => "transcript latest foreground dry_run workers full engine session_id model",
+        ("backfill",_) => "project list jobs force dry_run",
+        ("pending",_) => "pid all cluster limit",
+        ("approve"|"reject",_) => "pid expected",
+        ("consult"|"ask"|"dialectic",_) => "query limit",
+        ("outcome",_) => "belief_id event source note",
+        ("skills",_) => "prompt limit",
+        ("dream",_) => "dry_run engine",
+        ("audit",_) => "sample",
+        ("project", "move") => "old new dry_run",
+        ("reset",_) => "force index beliefs dry_run",
+        ("setup"|"teardown",_) => "dry_run",
+        ("motd",_) => "limit",
+        ("config",_) => "var value",
+        ("sync", "serve") => "bind port",
+        ("sync",_) => "apply replace_foreign_key peer from_seq merge path",
+        _ => "",
+    };
+    for key in req.as_object().ok_or(Error::InvalidRequest)?.keys() {
+        if !matches!(key.as_str(), "cwd" | "output_json")
+            && !extra.split_whitespace().any(|allowed| allowed == key)
+        {
+            eprintln!(
+                "unsupported option --{} for {} {}",
+                key.replace('_', "-"),
+                group,
+                sub
+            );
+            return Err(Error::InvalidRequest);
+        }
+    }
+    Ok(())
 }
 fn pos(req: &mut Value, name: &str, p: &[String], join: bool) -> Result<()> {
     if req.get(name).is_none() {
@@ -224,6 +287,7 @@ pub fn run(args: &[String]) -> Result<()> {
             | "sync"
             | "config"
             | "pending"
+            | "project"
     );
     let (sub, tail) = if grouped && args.get(1).is_some_and(|s| !s.starts_with('-')) {
         (args[1].as_str(), &args[2..])
@@ -232,6 +296,14 @@ pub fn run(args: &[String]) -> Result<()> {
     };
     let (mut req, p) = parse(tail)?;
     let auth = authority();
+    validate_flags(group, sub, &req)?;
+    if ((group == "config" && !matches!(sub, "" | "show"))
+        || (group == "sync"
+            && (matches!(sub, "login" | "classes") && !p.is_empty() || req["apply"] == true)))
+        && !auth.may_write()
+    {
+        return Err(Error::Untrusted);
+    }
     let mut core = Core::new(cfg.clone(), auth.clone());
     let value = match (group, sub) {
         ("snapshot" | "inject", _) => crate::context::snapshot(&cfg, &req)?,
@@ -258,6 +330,12 @@ pub fn run(args: &[String]) -> Result<()> {
             if let Some(to) = req.get("to_machine").cloned() {
                 req["to_scope"] = json!("machine");
                 req["to"] = to
+            } else if action == "move" && req.get("to").is_some() {
+                req["to_scope"] = json!("project");
+                req["to"] = json!(crate::standalone_ops::resolve_destination(
+                    &cfg,
+                    req["to"].as_str().ok_or(Error::InvalidRequest)?
+                )?);
             }
             crate::memory::direct_action(&cfg, &req, &auth)?
         }
@@ -270,10 +348,10 @@ pub fn run(args: &[String]) -> Result<()> {
             }
             crate::filemap::action(&cfg, &req, &auth)?
         }
-        ("belief", "list") => crate::beliefs::list(&cfg, &req)?,
+        ("belief", "list") => crate::standalone_ops::belief_list(&cfg, &req, false)?,
         ("belief", "search") => {
             pos(&mut req, "query", &p, true)?;
-            crate::beliefs::list(&cfg, &req)?
+            crate::standalone_ops::belief_list(&cfg, &req, true)?
         }
         ("belief", "show" | "review") => {
             id(&mut req, &p)?;
@@ -335,24 +413,17 @@ pub fn run(args: &[String]) -> Result<()> {
             id(&mut req, &p)?;
             crate::beliefs::evidence(&cfg, &req)?
         }
-        ("graph", "stats") => {
-            req["mode"] = json!("degree");
-            let degree = crate::graph::query(&cfg, &req)?;
-            req["mode"] = json!("components");
-            let components = crate::graph::query(&cfg, &req)?;
-            req["mode"] = json!("communities");
-            json!({"degree":degree,"components":components,"communities":crate::graph::query(&cfg,&req)?})
-        }
-        ("graph", "neighbours") => {
-            id(&mut req, &p)?;
-            req["mode"] = json!("khop");
-            if req.get("hops").is_none() {
-                req["hops"] = json!(2)
+        (
+            "graph",
+            mode @ ("stats" | "neighbours" | "path" | "paths" | "communities" | "components"
+            | "degree" | "html"),
+        ) => {
+            if mode == "neighbours" {
+                id(&mut req, &p)?;
             }
-            crate::graph::query(&cfg, &req)?
-        }
-        ("graph", mode @ ("path" | "paths" | "communities" | "components" | "degree")) => {
-            req["mode"] = json!(mode);
+            if mode == "html" && req.get("belief").is_some() {
+                req["belief_id"] = req["belief"].clone();
+            }
             if mode == "path" || mode == "paths" {
                 for (field, position) in [("src", 0), ("dst", 1)] {
                     if req.get(field).is_none() {
@@ -360,27 +431,22 @@ pub fn run(args: &[String]) -> Result<()> {
                             .get(position)
                             .ok_or(Error::InvalidRequest)?
                             .parse::<i64>()
-                            .map_err(|_| Error::InvalidRequest)?)
+                            .map_err(|_| Error::InvalidRequest)?);
                     }
                 }
             }
-            crate::graph::query(&cfg, &req)?
-        }
-        ("graph", "html") => {
-            id(&mut req, &p)?;
-            req["browser"] = json!(true);
-            crate::graph::read(&cfg, &req)?
+            crate::standalone_graph::view(&cfg, &req, mode)?
         }
         ("graph", "context") => crate::context::graph_context_op(&cfg, &req)?,
         ("graph", "backfill") => crate::graph::backfill(&cfg, &req, &auth)?,
         ("graph", "edge") => crate::graph::edge_insert(&cfg, &req, &auth)?,
         ("search", _) => {
             pos(&mut req, "query", &p, true)?;
-            crate::index::search(&cfg, &req)?
+            crate::standalone_ops::search(&cfg, &req)?
         }
         ("session", _) => {
             pos(&mut req, "session_id", &p, false)?;
-            crate::index::session(&cfg, &req)?
+            crate::standalone_ops::session(&cfg, &req)?
         }
         ("index", _) => {
             if let Some(path) = req["live"].as_str() {
@@ -395,7 +461,7 @@ pub fn run(args: &[String]) -> Result<()> {
             crate::history::prefix(&cfg, &req)?
         }
         ("history", "metadata") => crate::history::metadata(&cfg, &req)?,
-        ("pending", "" | "list") => crate::pending::list(&cfg, &req)?,
+        ("pending", "" | "list") => crate::standalone_ops::pending_list(&cfg, &req)?,
         ("pending", "show") => {
             pos(&mut req, "pid", &p, false)?;
             crate::pending::review(&cfg, &req)?
@@ -406,12 +472,19 @@ pub fn run(args: &[String]) -> Result<()> {
             req["op"] = json!("resolve_reviewed_v1");
             core.execute(&req)?
         }
-        ("consult" | "ask", _) => {
+        ("consult", _) => {
             pos(&mut req, "query", &p, true)?;
             crate::beliefs::consult(&cfg, &req)?
         }
+        ("ask" | "dialectic", _) => {
+            pos(&mut req, "query", &p, true)?;
+            crate::standalone_ops::ask(&cfg, &req)?
+        }
         ("outcome", _) => {
             id(&mut req, &p)?;
+            if req.get("event").is_none() {
+                req["event"] = json!(p.get(1).ok_or(Error::InvalidRequest)?);
+            }
             if req.get("source").is_none() {
                 req["source"] = json!("user")
             }
@@ -448,20 +521,16 @@ pub fn run(args: &[String]) -> Result<()> {
         ("reset", _) => crate::standalone_ops::reset(&cfg, &req, &auth)?,
         ("motd", _) => crate::standalone_ops::motd(&cfg, &req)?,
         ("statusline", _) => crate::standalone_ops::statusline(&cfg)?,
-        ("teardown", _) => crate::standalone_ops::teardown(&cfg, &req)?,
+        ("teardown", _) => crate::standalone_ops::teardown(&cfg, &req, &auth)?,
         ("doctor", _) => doctor(&cfg)?,
-        ("setup", _) => {
-            crate::files::private_dir(&cfg.root)?;
-            let conn = crate::store::connect(&cfg)?;
-            crate::store::record_project(&conn, crate::gate::cwd(&req)?)?;
-            json!({"root":cfg.root,"native":true,"schema":true})
-        }
+        ("setup", _) => crate::standalone_ops::setup(&cfg, &req, &auth)?,
         ("config", _) => configuration(&cfg, sub, &req, &p)?,
         ("sync", _) => sync(&cfg, sub, &req, &p)?,
         ("request", _) => core.execute(&req)?,
         _ => return Err(Error::InvalidRequest),
     };
-    let failed = value["error"].is_string()
+    let failed = value["partial"] == true
+        || value["error"].is_string()
         || value["failed"].as_u64().unwrap_or(0) > 0
         || value["may_have_applied"].as_u64().unwrap_or(0) > 0;
     output(value)?;
@@ -496,23 +565,15 @@ fn dream(cfg: &Config, req: &Value) -> Result<Value> {
     if req["dry_run"] == true {
         return Ok(json!(job.prompt()));
     }
-    let output = if let Some(path) = req["result_file"].as_str() {
-        String::from_utf8(crate::files::read_regular(
-            Path::new(path),
-            crate::MAX_FRAME_BYTES,
-        )?)
-        .map_err(|_| Error::InvalidRequest)?
-    } else {
-        own_process_group()?;
-        let program = std::env::var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
-        crate::worker::review_provider(
-            &program,
-            "LORE_DREAMER_MODEL",
-            "sonnet",
-            job.prompt(),
-            std::time::Instant::now() + Duration::from_secs(150),
-        )?
-    };
+    own_process_group()?;
+    let program = std::env::var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+    let output = crate::worker::review_provider(
+        &program,
+        "LORE_DREAMER_MODEL",
+        "sonnet",
+        job.prompt(),
+        std::time::Instant::now() + Duration::from_secs(150),
+    )?;
     crate::dream::process(cfg, &job, &output)
 }
 fn status(cfg: &Config, req: &Value) -> Result<Value> {
@@ -674,9 +735,64 @@ fn sync(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
             n::pull_from(cfg, &transport, Some(0), false)
         }
         "classes" => {
-            let mut classes = cfg.sync.classes.iter().collect::<Vec<_>>();
-            classes.sort();
-            Ok(json!({"classes":classes,"enabled":cfg.sync.enabled}))
+            let known = [
+                "memory",
+                "filemap",
+                "beliefs",
+                "pending",
+                "skills",
+                "sessions",
+                "transcripts",
+                "tabsets",
+                "worktrees",
+                "skill_usage",
+            ];
+            let path = settings()?;
+            let mut classes = cfg.sync.classes.clone();
+            if path.try_exists()? {
+                let data: Value = serde_json::from_slice(&crate::files::read_regular(
+                    &path,
+                    crate::MAX_FRAME_BYTES,
+                )?)
+                .map_err(|_| Error::InvalidRequest)?;
+                if let Some(raw) = data["env"]["LORE_SYNC_CLASSES"].as_str() {
+                    classes = raw
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
+            }
+            for change in p {
+                let (action, name) = change.split_at_checked(1).ok_or(Error::InvalidRequest)?;
+                if !known.contains(&name) {
+                    return Err(Error::InvalidRequest);
+                }
+                match action {
+                    "+" => {
+                        classes.insert(name.into());
+                    }
+                    "-" => {
+                        classes.remove(name);
+                    }
+                    _ => return Err(Error::InvalidRequest),
+                };
+            }
+            let ordered = known
+                .iter()
+                .filter(|c| classes.contains(**c))
+                .copied()
+                .collect::<Vec<_>>();
+            if !p.is_empty() {
+                configuration(
+                    cfg,
+                    "set",
+                    &json!({"var":"LORE_SYNC_CLASSES","value":ordered.join(",")}),
+                    &[],
+                )?;
+            }
+            Ok(json!({"classes":ordered,"enabled":cfg.sync.enabled}))
         }
         "login" => {
             let token = p.first().ok_or(Error::InvalidRequest)?;
@@ -743,7 +859,14 @@ fn sync(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
         }
         "serve" => {
             let bind = req["bind"].as_str().unwrap_or("127.0.0.1");
-            let port = req["port"].as_u64().unwrap_or(8765);
+            let port = req["port"]
+                .as_u64()
+                .or_else(|| {
+                    std::env::var("LORE_SYNC_PEER_PORT")
+                        .ok()
+                        .and_then(|p| p.parse().ok())
+                })
+                .unwrap_or(8765);
             if port > 65535 {
                 return Err(Error::InvalidRequest);
             }
@@ -764,6 +887,14 @@ fn sync(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
 /// MCP stdio uses the same catalog, identity and model proposal gate as DOXA.
 pub fn mcp(cfg: &Config, args: &[String]) -> Result<()> {
     let (req, p) = parse(args)?;
+    if req
+        .as_object()
+        .ok_or(Error::InvalidRequest)?
+        .keys()
+        .any(|k| !matches!(k.as_str(), "cwd" | "engine" | "session_id" | "spawn_depth"))
+    {
+        return Err(Error::InvalidRequest);
+    }
     if !p.is_empty() {
         return Err(Error::InvalidRequest);
     }
@@ -833,6 +964,14 @@ pub fn mcp(cfg: &Config, args: &[String]) -> Result<()> {
 /// injection or prompt paths. Review admits only canonical owned transcripts.
 pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
     let (options, positional) = parse(args)?;
+    if options
+        .as_object()
+        .ok_or(Error::InvalidRequest)?
+        .keys()
+        .any(|k| !matches!(k.as_str(), "cwd" | "engine" | "event" | "session_id"))
+    {
+        return Err(Error::InvalidRequest);
+    }
     if !positional.is_empty() {
         return Err(Error::InvalidRequest);
     }
@@ -919,6 +1058,15 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
                         .join(format!("{sid}.jsonl"))
                 });
             req["transcript"] = json!(transcript);
+            if let Some(proof) = input.get("expected_source") {
+                if !proof.is_object() {
+                    return Err(Error::InvalidRequest);
+                }
+                req["expected_source"] = proof.clone();
+            }
+            if let Some(thread) = input["provider_thread"].as_str() {
+                req["provider_thread"] = json!(thread);
+            }
             own_process_group()?;
             crate::worker::run(cfg, &req, engine)
         }

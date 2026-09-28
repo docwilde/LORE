@@ -40,14 +40,15 @@ fn provider(
     default: &str,
 ) -> Result<String> {
     let _ = cfg;
-    if let Some(path) = req["result_file"].as_str() {
-        return String::from_utf8(files::read_regular(
-            Path::new(path),
-            crate::MAX_FRAME_BYTES,
-        )?)
-        .map_err(|_| Error::InvalidRequest);
-    }
     let program = std::env::var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+    if let Some(model) = req["model"].as_str() {
+        return crate::worker::review_with_model(
+            &program,
+            model,
+            prompt,
+            Instant::now() + Duration::from_secs(150),
+        );
+    }
     crate::worker::review_provider(
         &program,
         model_env,
@@ -122,6 +123,18 @@ fn review_one(cfg: &Config, req: &Value) -> Result<Value> {
     }
     let response = provider(cfg, req, job.prompt(), "LORE_DERIVER_MODEL", "haiku")?;
     let result = crate::review::process_result(cfg, &job, &response)?;
+    if result["beliefs"]["derived"].as_u64().unwrap_or(0) > 0
+        && req["defer_dream"] != true
+        && !std::env::var("LORE_DEFER_DREAM").is_ok_and(|s| !matches!(s.as_str(), "" | "0"))
+    {
+        if let Some(dream) =
+            crate::dream::build(cfg, gate::cwd(req)?, &auth).map_err(|_| Error::MayHaveApplied)?
+        {
+            let response = provider(cfg, req, dream.prompt(), "LORE_DREAMER_MODEL", "sonnet")
+                .map_err(|_| Error::MayHaveApplied)?;
+            crate::dream::process(cfg, &dream, &response).map_err(|_| Error::MayHaveApplied)?;
+        }
+    }
     let conn = store::connect(cfg).map_err(|_| Error::MayHaveApplied)?;
     conn.execute(
         "INSERT OR REPLACE INTO reviewed(session_id,project,ts) VALUES(?,?,?)",
@@ -138,6 +151,7 @@ pub fn review(cfg: &Config, req: &Value) -> Result<Value> {
     let Some(req) = prepare_review(cfg, req)? else {
         return Ok(json!({"skipped":true,"reason":"no_transcript"}));
     };
+    let _ = cap(&req, "workers", 1, 8)?;
     if req["full"] != true {
         return review_one(cfg, &req);
     }
@@ -150,9 +164,13 @@ pub fn review(cfg: &Config, req: &Value) -> Result<Value> {
         .map_or(Some(500), |s| s.parse::<usize>().ok())
         .filter(|n| *n > 0 && *n <= 20000)
         .ok_or(Error::InvalidRequest)?;
-    let mut results = Vec::new();
+    let workers = cap(&req, "workers", 1, 8)?.max(1);
+    let mut parts = Vec::new();
     let mut ranges = (0..count).step_by(window).enumerate().collect::<Vec<_>>();
     ranges.reverse();
+    if ranges.len() > 1000 {
+        return Err(Error::TooLarge);
+    }
     for (index, lo) in ranges {
         let hi = (lo + window).min(count);
         let mut part = req.clone();
@@ -160,16 +178,48 @@ pub fn review(cfg: &Config, req: &Value) -> Result<Value> {
         part["part"] = json!(format!("w{index:03}"));
         part["older"] = json!(hi < count);
         part["agent"] = json!(format!("backfill-w{index}"));
-        results.push(review_one(cfg, &part).map_err(|error| {
-            if results.is_empty() {
-                error
-            } else {
-                Error::MayHaveApplied
-            }
-        })?);
+        parts.push(part);
     }
-    Ok(json!({"messages":count,"windows":results}))
+    let mut results = Vec::new();
+    let mut failures = 0;
+    for chunk in parts.chunks(workers) {
+        let batch = std::thread::scope(|scope| {
+            let handles = chunk
+                .iter()
+                .map(|part| scope.spawn(move || review_one(cfg, part)))
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or(Err(Error::MayHaveApplied)))
+                .collect::<Vec<_>>()
+        });
+        for result in batch {
+            match result {
+                Ok(value) => results.push(value),
+                Err(error) => {
+                    failures += 1;
+                    results.push(
+                        json!({"error":error.code(),"may_have_applied":req["dry_run"]!=true}),
+                    );
+                }
+            }
+        }
+    }
+    if req["dry_run"] != true && failures == 0 {
+        let conn = store::connect(cfg).map_err(|_| Error::MayHaveApplied)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO reviewed(session_id,project,ts) VALUES(?,?,?)",
+            params![
+                req["session_id"].as_str().ok_or(Error::InvalidRequest)?,
+                config::project_slug(gate::cwd(&req)?),
+                crate::utcnow()
+            ],
+        )
+        .map_err(|_| Error::MayHaveApplied)?;
+    }
+    Ok(json!({"messages":count,"windows":results,"workers":workers,"failed":failures}))
 }
+
 pub fn live_index(cfg: &Config, path: &str) -> Result<Value> {
     if std::env::var("LORE_DISABLE_INDEX").is_ok_and(|s| !matches!(s.as_str(), "" | "0")) {
         return Ok(json!({"disabled":true}));
@@ -269,46 +319,118 @@ pub fn backfill(cfg: &Config, req: &Value) -> Result<Value> {
             done.insert(row?);
         }
     }
-    let mut reviewed = 0;
-    let mut skipped = 0;
-    let mut failed = 0;
-    let mut planned = 0;
-    for slug in chosen {
-        for path in &available[&slug] {
-            let sid = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .ok_or(Error::InvalidRequest)?;
-            if done.contains(sid) {
-                skipped += 1;
-                continue;
+    let jobs = cap(req, "jobs", 4, 8)?.max(1);
+    let chosen = chosen.into_iter().collect::<Vec<_>>();
+    let mut reports = Vec::new();
+    for chunk in chosen.chunks(jobs) {
+        let batch = std::thread::scope(|scope| {
+            let handles = chunk
+                .iter()
+                .map(|slug| {
+                    let paths = &available[slug];
+                    let done = &done;
+                    scope.spawn(move || backfill_project(cfg, req, slug, paths, done))
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or(Err(Error::MayHaveApplied)))
+                .collect::<Vec<_>>()
+        });
+        for result in batch {
+            reports.push(result.map_err(|e| {
+                if req["dry_run"] == true {
+                    e
+                } else {
+                    Error::MayHaveApplied
+                }
+            })?);
+        }
+    }
+    let sum = |key: &str| {
+        reports
+            .iter()
+            .map(|r| r[key].as_u64().unwrap_or(0))
+            .sum::<u64>()
+    };
+    Ok(
+        json!({"planned":sum("planned"),"reviewed":sum("reviewed"),"skipped":sum("skipped"),"failed":sum("failed"),"projects":reports,"jobs":jobs,"dry_run":req["dry_run"]==true}),
+    )
+}
+fn backfill_project(
+    cfg: &Config,
+    req: &Value,
+    slug: &str,
+    paths: &[PathBuf],
+    done: &BTreeSet<String>,
+) -> Result<Value> {
+    let (mut planned, mut reviewed, mut skipped, mut failed) = (0u64, 0u64, 0u64, 0u64);
+    let mut derived = false;
+    let mut project_cwd = None;
+    let mut failures = Vec::new();
+    for path in paths {
+        let sid = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or(Error::InvalidRequest)?;
+        if done.contains(sid) {
+            skipped += 1;
+            continue;
+        }
+        let file = files::open_regular(path, 256 * 1024 * 1024)?;
+        let (meta, _) = crate::index::parse_transcript_fd(&file, false)?;
+        let Some(cwd) = meta.cwd else {
+            skipped += 1;
+            continue;
+        };
+        if config::project_slug(Path::new(&cwd)) != slug || meta.internal {
+            skipped += 1;
+            continue;
+        }
+        planned += 1;
+        project_cwd = Some(cwd.clone());
+        if req["dry_run"] == true {
+            continue;
+        }
+        let part = json!({"cwd":cwd,"transcript":path,"session_id":sid,"engine":"claude","defer_dream":true});
+        match review_one(cfg, &part) {
+            Ok(result) if result["skipped"] != true => {
+                reviewed += 1;
+                derived |= result["beliefs"]["derived"].as_u64().unwrap_or(0) > 0;
             }
-            planned += 1;
-            if req["dry_run"] == true {
-                continue;
+            Ok(_) => skipped += 1,
+            Err(error) => {
+                failed += 1;
+                failures.push(json!({"session":sid,"error":error.code(),"may_have_applied":true}));
             }
-            let file = files::open_regular(path, 256 * 1024 * 1024)?;
-            let (meta, _) = crate::index::parse_transcript_fd(&file, false)?;
-            let Some(cwd) = meta.cwd else {
-                skipped += 1;
-                continue;
+        }
+    }
+    if derived && !config::disabled("LORE_DEFER_DREAM") {
+        if let Some(cwd) = project_cwd {
+            let auth = Authority::Derived {
+                agent: "backfill-dream".into(),
+                engine: "claude".into(),
             };
-            if config::project_slug(Path::new(&cwd)) != slug || meta.internal {
-                skipped += 1;
-                continue;
-            }
-            let part = json!({"cwd":cwd,"transcript":path,"session_id":sid,"engine":"claude"});
-            match review_one(cfg, &part) {
-                Ok(result) if result["skipped"] != true => reviewed += 1,
-                Ok(_) => skipped += 1,
-                Err(_) => failed += 1,
+            let consolidation = (|| -> Result<()> {
+                if let Some(job) = crate::dream::build(cfg, Path::new(&cwd), &auth)? {
+                    let response =
+                        provider(cfg, req, job.prompt(), "LORE_DREAMER_MODEL", "sonnet")?;
+                    crate::dream::process(cfg, &job, &response)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = consolidation {
+                failed += 1;
+                failures
+                    .push(json!({"stage":"dream","error":error.code(),"may_have_applied":true}));
             }
         }
     }
     Ok(
-        json!({"planned":planned,"reviewed":reviewed,"skipped":skipped,"failed":failed,"dry_run":req["dry_run"]==true}),
+        json!({"project":slug,"planned":planned,"reviewed":reviewed,"skipped":skipped,"failed":failed,"failures":failures}),
     )
 }
+
 pub fn calibration(cfg: &Config) -> Result<Value> {
     let conn = store::connect(cfg)?;
     let total = conn.query_row("SELECT count(*) FROM belief_outcomes", [], |r| {
@@ -458,7 +580,15 @@ pub fn audit(cfg: &Config, req: &Value, auth: &Authority) -> Result<Value> {
     Ok(json!({"rows":rows}))
 }
 pub fn derive_graph(cfg: &Config, req: &Value) -> Result<Value> {
-    let subjects = beliefs::subjects(req)?;
+    let subjects = match req.get("subject") {
+        None => beliefs::subjects(req)?.into_iter().collect::<BTreeSet<_>>(),
+        Some(Value::String(s)) => [s.clone()].into_iter().collect(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|v| v.as_str().map(str::to_owned).ok_or(Error::InvalidRequest))
+            .collect::<Result<BTreeSet<_>>>()?,
+        _ => return Err(Error::InvalidRequest),
+    };
     let conn = store::connect(cfg)?;
     let mut stmt = conn.prepare(
         "SELECT id,subject,claim FROM beliefs WHERE status='active' ORDER BY id LIMIT 4097",
@@ -499,7 +629,9 @@ pub fn derive_graph(cfg: &Config, req: &Value) -> Result<Value> {
         return Err(Error::TooLarge);
     }
     if req["dry_run"] == true {
-        return Ok(json!({"prompt":prompt,"claims":count}));
+        return Ok(
+            json!({"prompt":prompt,"claims":count,"chars":prompt.chars().count(),"estimated_tokens":prompt.chars().count().div_ceil(4)}),
+        );
     }
     let response = provider(cfg, req, &prompt, "LORE_DREAMER_MODEL", "sonnet")?;
     let data = crate::review::extract_json(&response)?;
@@ -590,6 +722,10 @@ fn resolve(raw: &str, known: &BTreeSet<String>) -> Result<String> {
     } else {
         Err(Error::Changed)
     }
+}
+pub fn resolve_destination(cfg: &Config, raw: &str) -> Result<String> {
+    let conn = store::connect(cfg)?;
+    resolve(raw, &known(cfg, &conn)?)
 }
 pub fn relocate(cfg: &Config, req: &Value, p: &[String], auth: &Authority) -> Result<Value> {
     let old = req["old"]
@@ -713,7 +849,7 @@ pub fn relocate(cfg: &Config, req: &Value, p: &[String], auth: &Authority) -> Re
     let mut left = Vec::new();
     let mut pending = 0;
     let pdir = cfg.root.join("pending");
-    for name in names(&pdir)? {
+    for name in names(&pdir).map_err(|error| if dry { error } else { Error::MayHaveApplied })? {
         if !name.to_str().is_some_and(|s| s.ends_with(".json")) {
             continue;
         }
@@ -751,7 +887,10 @@ pub fn relocate(cfg: &Config, req: &Value, p: &[String], auth: &Authority) -> Re
     report["pending"] = json!(pending);
     let src = Scope::Project.path(cfg, &source)?;
     let mut moved = 0;
-    for entry in memory::read_entries(&src)? {
+    for entry in
+        memory::read_entries(&src)
+            .map_err(|error| if dry { error } else { Error::MayHaveApplied })?
+    {
         if dry {
             moved += 1;
             continue;
@@ -762,7 +901,10 @@ pub fn relocate(cfg: &Config, req: &Value, p: &[String], auth: &Authority) -> Re
     let src = crate::filemap::path(cfg, &source)?;
     let dst = crate::filemap::path(cfg, &target)?;
     let mut moved = 0;
-    for entry in memory::read_entries(&src)? {
+    for entry in
+        memory::read_entries(&src)
+            .map_err(|error| if dry { error } else { Error::MayHaveApplied })?
+    {
         if dry {
             moved += 1;
             continue;
@@ -812,18 +954,6 @@ pub fn relocate(cfg: &Config, req: &Value, p: &[String], auth: &Authority) -> Re
     report["filemap"] = json!(moved);
     report["left"] = json!(left);
     report["partial"] = json!(!left.is_empty());
-    if !dry {
-        for path in [
-            Scope::Project.path(cfg, &source)?,
-            crate::filemap::path(cfg, &source)?,
-        ] {
-            if path.try_exists()? && memory::read_entries(&path)?.is_empty() {
-                let dir = files::open_directory(path.parent().ok_or(Error::UnsafePath)?)?;
-                files::unlink_at(&dir, path.file_name().ok_or(Error::UnsafePath)?)
-                    .map_err(|_| Error::MayHaveApplied)?
-            }
-        }
-    }
     Ok(report)
 }
 pub fn provenance(cfg: &Config, req: &Value) -> Result<Value> {
@@ -934,8 +1064,39 @@ pub fn statusline(cfg: &Config) -> Result<Value> {
         .unwrap_or(0);
     Ok(json!(format!("lore {beliefs} beliefs · {pending} pending")))
 }
-pub fn teardown(cfg: &Config, req: &Value) -> Result<Value> {
+pub fn teardown(cfg: &Config, req: &Value, auth: &Authority) -> Result<Value> {
     let dry = req["dry_run"] == true;
+    if !dry && !auth.may_write() {
+        return Err(Error::Untrusted);
+    }
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or(Error::Unavailable)?);
+    let path = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".claude"))
+        .join("settings.json");
+    let _settings_lock = if path.try_exists()? {
+        Some(files::Locks::acquire(
+            path.parent().ok_or(Error::UnsafePath)?,
+            std::slice::from_ref(&path),
+            cfg.timeout,
+        )?)
+    } else {
+        None
+    };
+    let mut saved_settings = None;
+    if path.try_exists()? {
+        let mut settings: Value =
+            serde_json::from_slice(&files::read_regular(&path, crate::MAX_FRAME_BYTES)?)
+                .map_err(|_| Error::InvalidRequest)?;
+        if !settings.is_object() {
+            return Err(Error::InvalidRequest);
+        }
+        settings["autoMemoryEnabled"] = json!(true);
+        if let Some(env) = settings["env"].as_object_mut() {
+            env.retain(|k, _| !k.starts_with("LORE_"));
+        }
+        saved_settings = Some(settings);
+    }
     let slug = config::project_slug(gate::cwd(req)?);
     let mut exports = Vec::new();
     let user = memory::read_entries(&cfg.root.join("USER.md"))?;
@@ -989,7 +1150,7 @@ pub fn teardown(cfg: &Config, req: &Value) -> Result<Value> {
             format!("lore-export-{scope}")
         };
         let text=format!("---\nname: {label}\ndescription: Curated LORE memory ({scope})\nmetadata:\n  type: {scope}\n---\n\n{}",memory::render_entries(&entries));
-        files::atomic_write(&path, text.as_bytes())?;
+        files::atomic_write(&path, text.as_bytes()).map_err(|_| Error::MayHaveApplied)?;
         let pointer = format!(
             "- [lore export ({scope})]({}) — curated lore memory returned by `lore teardown`",
             path.file_name()
@@ -1006,37 +1167,380 @@ pub fn teardown(cfg: &Config, req: &Value) -> Result<Value> {
             let raw = String::from_utf8(files::read_regular(&index, crate::MAX_FRAME_BYTES)?)
                 .map_err(|_| Error::InvalidRequest)?;
             if !raw.contains(&pointer) {
-                files::atomic_write(&index, format!("{raw}\n{pointer}\n").as_bytes())?
+                files::atomic_write(&index, format!("{raw}\n{pointer}\n").as_bytes())
+                    .map_err(|_| Error::MayHaveApplied)?
             }
         }
     }
-    let home = PathBuf::from(std::env::var_os("HOME").ok_or(Error::Unavailable)?);
-    let path = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".claude"))
-        .join("settings.json");
-    if path.try_exists()? {
-        let _locks = files::Locks::acquire(
-            path.parent().ok_or(Error::UnsafePath)?,
-            std::slice::from_ref(&path),
-            cfg.timeout,
-        )?;
-        let mut settings: Value =
-            serde_json::from_slice(&files::read_regular(&path, crate::MAX_FRAME_BYTES)?)
-                .map_err(|_| Error::InvalidRequest)?;
-        if !settings.is_object() {
-            return Err(Error::InvalidRequest);
-        }
-        settings["autoMemoryEnabled"] = json!(true);
-        if let Some(env) = settings["env"].as_object_mut() {
-            env.retain(|k, _| !k.starts_with("LORE_"));
-        }
-        if !dry {
+    if !dry {
+        if let Some(settings) = saved_settings {
             files::atomic_write(
                 &path,
-                &serde_json::to_vec_pretty(&settings).map_err(|_| Error::Unavailable)?,
-            )?
+                &serde_json::to_vec_pretty(&settings).map_err(|_| Error::MayHaveApplied)?,
+            )
+            .map_err(|_| Error::MayHaveApplied)?;
         }
     }
     Ok(json!({"exports":report,"dry_run":dry,"root_preserved":cfg.root,"auto_memory_enabled":!dry}))
+}
+pub fn setup(cfg: &Config, req: &Value, auth: &Authority) -> Result<Value> {
+    let dry = req["dry_run"] == true;
+    if !dry && !auth.may_write() {
+        return Err(Error::Untrusted);
+    }
+    let slug = config::project_slug(gate::cwd(req)?);
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or(Error::Unavailable)?);
+    let settings_path = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".claude"))
+        .join("settings.json");
+    let mut settings = if settings_path.try_exists()? {
+        serde_json::from_slice::<Value>(&files::read_regular(
+            &settings_path,
+            crate::MAX_FRAME_BYTES,
+        )?)
+        .map_err(|_| Error::InvalidRequest)?
+    } else {
+        json!({})
+    };
+    if !settings.is_object() {
+        return Err(Error::InvalidRequest);
+    }
+    settings["autoMemoryEnabled"] = json!(false);
+    if settings.get("permissions").is_none() {
+        settings["permissions"] = json!({})
+    }
+    if !settings["permissions"].is_object() {
+        return Err(Error::InvalidRequest);
+    }
+    if settings["permissions"].get("allow").is_none() {
+        settings["permissions"]["allow"] = json!([])
+    }
+    let allow = settings["permissions"]["allow"]
+        .as_array_mut()
+        .ok_or(Error::InvalidRequest)?;
+    let permission = "Bash(*/plugins/lore/*/bin/lore *)";
+    if !allow.iter().any(|p| p == permission) {
+        allow.push(json!(permission));
+    }
+    let mut candidates = Vec::new();
+    let source = cfg.projects.join(&slug).join("memory");
+    for name in names(&source)? {
+        let Some(name) = name
+            .to_str()
+            .filter(|s| s.ends_with(".md") && !s.starts_with("lore-export-"))
+        else {
+            continue;
+        };
+        let path = source.join(name);
+        let raw = String::from_utf8(files::read_regular(&path, crate::MAX_FRAME_BYTES)?)
+            .map_err(|_| Error::InvalidRequest)?;
+        let mut body = raw.as_str();
+        if body.starts_with("---\n") {
+            if let Some(end) = body[4..].find("\n---") {
+                body = &body[end + 8..];
+            }
+        }
+        for paragraph in body.split("\n\n") {
+            let line = gate::one_line(&crate::scrub::scrub(paragraph)?);
+            if line.is_empty() {
+                continue;
+            }
+            if line.len() > 16384 {
+                return Err(Error::TooLarge);
+            }
+            let text = line.strip_prefix("- ").unwrap_or(&line).to_owned();
+            if memory::read_entries(&Scope::Project.path(cfg, &slug)?)?
+                .iter()
+                .any(|e| e.to_lowercase() == text.to_lowercase())
+            {
+                continue;
+            }
+            candidates.push(json!({"kind":"memory","scope":"project","action":"add","project":slug,"cwd":req["cwd"],"text":text,"origin":format!("auto-memory {name}"),"source_file":path}));
+            if candidates.len() > 400 {
+                return Err(Error::TooLarge);
+            }
+        }
+    }
+    let mut staged = Vec::new();
+    if !dry {
+        let _locks = files::Locks::acquire(
+            settings_path.parent().ok_or(Error::UnsafePath)?,
+            std::slice::from_ref(&settings_path),
+            cfg.timeout,
+        )?;
+        let before = if settings_path.try_exists()? {
+            files::read_regular(&settings_path, crate::MAX_FRAME_BYTES)?
+        } else {
+            Vec::new()
+        };
+        let current = if before.is_empty() {
+            json!({})
+        } else {
+            serde_json::from_slice::<Value>(&before).map_err(|_| Error::InvalidRequest)?
+        };
+        let mut merged = current;
+        if !merged.is_object() {
+            return Err(Error::InvalidRequest);
+        }
+        merged["autoMemoryEnabled"] = json!(false);
+        if merged.get("permissions").is_none() {
+            merged["permissions"] = json!({});
+        }
+        if !merged["permissions"].is_object() {
+            return Err(Error::InvalidRequest);
+        }
+        if merged["permissions"].get("allow").is_none() {
+            merged["permissions"]["allow"] = json!([]);
+        }
+        let permissions = merged["permissions"]["allow"]
+            .as_array_mut()
+            .ok_or(Error::InvalidRequest)?;
+        if !permissions.iter().any(|p| p == permission) {
+            permissions.push(json!(permission));
+        }
+        files::atomic_write(
+            &settings_path,
+            &serde_json::to_vec_pretty(&merged).map_err(|_| Error::Unavailable)?,
+        )?;
+        let conn = store::connect(cfg).map_err(|_| Error::MayHaveApplied)?;
+        store::record_project(&conn, gate::cwd(req)?).map_err(|_| Error::MayHaveApplied)?;
+        let model = Authority::Model {
+            agent: "auto-memory-import".into(),
+            engine: auth.engine().into(),
+            session_id: String::new(),
+        };
+        for item in &candidates {
+            staged.push(gate::stage(cfg, item, &model).map_err(|_| Error::MayHaveApplied)?);
+        }
+        crate::index::index(cfg, &json!({"force":false})).map_err(|_| Error::MayHaveApplied)?;
+    }
+    Ok(
+        json!({"root":cfg.root,"settings":settings_path,"auto_memory_enabled":false,"permission":permission,"migration_candidates":candidates,"staged":staged,"dry_run":dry,"backlog_command":"lore backfill --list","restart_required":!dry}),
+    )
+}
+pub fn belief_list(cfg: &Config, req: &Value, search: bool) -> Result<Value> {
+    let conn = store::connect(cfg)?;
+    let subject = match req.get("subject") {
+        None => None,
+        Some(value) => {
+            let subject = value.as_str().ok_or(Error::InvalidRequest)?;
+            Some(if subject == "project" {
+                format!("project:{}", config::project_slug(gate::cwd(req)?))
+            } else {
+                subject.into()
+            })
+        }
+    };
+    let query = req["query"].as_str().unwrap_or("");
+    let statuses = if req["all"] == true {
+        vec!["active", "dormant", "superseded", "retracted"]
+    } else if req["include_dormant"] == true || config::disabled("LORE_INCLUDE_DORMANT") {
+        vec!["active", "dormant"]
+    } else {
+        vec!["active"]
+    };
+    let limit = cap(req, "limit", if search { 10 } else { 100 }, 500)?;
+    let mut results = Vec::new();
+    for expr in if search {
+        vec![
+            crate::index::fts_expr(query, " "),
+            crate::index::fts_expr(query, " OR "),
+        ]
+    } else {
+        vec![String::new()]
+    } {
+        if search && expr.is_empty() {
+            return Err(Error::InvalidRequest);
+        }
+        let sql = if search {
+            "SELECT b.id,b.subject,b.claim,b.confidence,b.status,(SELECT count(*) FROM belief_evidence e WHERE e.belief_id=b.id) FROM beliefs b JOIN belief_fts f ON b.id=f.belief_id WHERE belief_fts MATCH ? AND (? IS NULL OR b.subject=?) AND instr(?, '|'||b.status||'|')>0 ORDER BY bm25(belief_fts) LIMIT 501"
+        } else {
+            "SELECT b.id,b.subject,b.claim,b.confidence,b.status,(SELECT count(*) FROM belief_evidence e WHERE e.belief_id=b.id) FROM beliefs b WHERE (?='' OR ?='') AND (? IS NULL OR b.subject=?) AND instr(?, '|'||b.status||'|')>0 ORDER BY subject,confidence DESC LIMIT 501"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let mut budget = 8 * 1024 * 1024;
+        let mut cursor = if search {
+            stmt.query(params![
+                expr,
+                subject,
+                subject,
+                format!("|{}|", statuses.join("|"))
+            ])?
+        } else {
+            stmt.query(params![
+                expr,
+                expr,
+                subject,
+                subject,
+                format!("|{}|", statuses.join("|"))
+            ])?
+        };
+        while let Some(row) = cursor.next()? {
+            let status = crate::graph::db_text(row, 4, 32, &mut budget)?;
+            if !statuses.contains(&status.as_str()) {
+                continue;
+            }
+            if results.len() >= limit {
+                break;
+            }
+            results.push(json!({"id":row.get::<_,i64>(0)?,"subject":crate::scrub::scrub(&crate::graph::db_text(row,1,4096,&mut budget)?)?,"claim":crate::scrub::scrub(&crate::graph::db_text(row,2,65536,&mut budget)?)?,"confidence":row.get::<_,f64>(3)?,"status":status,"evidence_count":row.get::<_,i64>(5)?}));
+        }
+        if !results.is_empty() {
+            break;
+        }
+    }
+    Ok(json!(results))
+}
+pub fn search(cfg: &Config, req: &Value) -> Result<Value> {
+    if !config::disabled("LORE_DISABLE_INDEX") {
+        crate::index::index(cfg, &json!({"force":false}))?;
+    }
+    let conn = store::connect(cfg)?;
+    let query = req["query"]
+        .as_str()
+        .filter(|s| s.len() <= 1024 && !s.chars().any(char::is_control))
+        .ok_or(Error::InvalidRequest)?;
+    let slug = config::project_slug(gate::cwd(req)?);
+    let limit = cap(req, "limit", 5, 100)?;
+    let scopes = if req["all"] == true {
+        vec![None]
+    } else {
+        vec![Some(slug.as_str()), None]
+    };
+    for scope in scopes {
+        for expr in [
+            crate::index::fts_expr(query, " "),
+            crate::index::fts_expr(query, " OR "),
+        ] {
+            if expr.is_empty() {
+                return Err(Error::InvalidRequest);
+            }
+            let mut stmt=conn.prepare("SELECT m.session_id,m.project,m.ts,m.role,snippet(msg,4,'[',']','…',16),bm25(msg) FROM msg m WHERE msg MATCH ? AND (? IS NULL OR project=?) ORDER BY bm25(msg) LIMIT ?")?;
+            let mut cursor = stmt.query(params![expr, scope, scope, limit as i64])?;
+            let mut budget = crate::MAX_FRAME_BYTES;
+            let mut hits = Vec::new();
+            while let Some(row) = cursor.next()? {
+                hits.push(json!({"session_id":crate::graph::db_text(row,0,134,&mut budget)?,"project":crate::graph::db_optional_text(row,1,4096,&mut budget)?,"ts":crate::graph::db_text(row,2,128,&mut budget)?,"role":crate::graph::db_text(row,3,32,&mut budget)?,"snippet":crate::scrub::scrub(&crate::graph::db_text(row,4,65536,&mut budget)?)?,"score":row.get::<_,f64>(5)?}));
+            }
+            if !hits.is_empty() {
+                return Ok(json!(hits));
+            }
+        }
+    }
+    Ok(json!([]))
+}
+pub fn session(cfg: &Config, req: &Value) -> Result<Value> {
+    let sid = req["session_id"]
+        .as_str()
+        .filter(|s| config::valid_id(s) || s.strip_prefix("codex:").is_some_and(config::valid_id))
+        .ok_or(Error::InvalidRequest)?;
+    let conn = store::connect(cfg)?;
+    let limit = cap(req, "limit", 60, 1000)?;
+    let offset = cap(req, "offset", 0, 20000)?;
+    let context = cap(req, "context", 2, 20)?;
+    let trunc = cap(req, "trunc", 500, 65536)?;
+    let grep = req["grep"].as_str().unwrap_or("");
+    if grep.len() > 1024 {
+        return Err(Error::TooLarge);
+    }
+    let mut stmt=conn.prepare("WITH numbered AS (SELECT row_number() OVER (ORDER BY rowid) AS n,ts,role,content FROM msg WHERE session_id=?),matched AS (SELECT n FROM numbered WHERE instr(content,?)>0) SELECT ts,role,content FROM numbered WHERE ?='' OR EXISTS (SELECT 1 FROM matched m WHERE numbered.n BETWEEN m.n-? AND m.n+?) ORDER BY n LIMIT ? OFFSET ?")?;
+    let mut cursor = stmt.query(params![
+        sid,
+        grep,
+        grep,
+        context as i64,
+        context as i64,
+        limit as i64,
+        offset as i64
+    ])?;
+    let mut rows = Vec::new();
+    let mut budget = 8 * 1024 * 1024;
+    while let Some(r) = cursor.next()? {
+        let content = crate::scrub::scrub(&crate::graph::db_text(r, 2, 1024 * 1024, &mut budget)?)?;
+        rows.push(json!({"ts":crate::graph::db_text(r,0,128,&mut budget)?,"role":crate::graph::db_text(r,1,32,&mut budget)?,"content":content.chars().take(trunc).collect::<String>(),"truncated":content.chars().count()>trunc}));
+    }
+    let meta = crate::history::metadata(cfg, &json!({"ids":[sid]}))?;
+    Ok(json!({"session":meta,"rows":rows,"offset":offset,"limit":limit}))
+}
+
+pub fn ask(cfg: &Config, req: &Value) -> Result<Value> {
+    let mut search_req = req.clone();
+    search_req["all"] = json!(true);
+    search_req["limit"] = json!(12);
+    let sessions = search(cfg, &search_req)?;
+    let beliefs = if config::disabled("LORE_DISABLE_BELIEFS") {
+        json!({"disabled":true})
+    } else {
+        crate::beliefs::consult(cfg, &search_req)?
+    };
+    let slug = config::project_slug(gate::cwd(req)?);
+    let host = memory::this_machine();
+    let mut curated = json!({});
+    for (scope, key) in [
+        (Scope::User, slug.as_str()),
+        (Scope::Project, slug.as_str()),
+        (Scope::Machine, host.as_str()),
+    ] {
+        curated[scope.name()] = json!(memory::read_entries(&scope.path(cfg, key)?)?
+            .iter()
+            .map(|e| crate::scrub::scrub(e))
+            .collect::<Result<Vec<_>>>()?);
+    }
+    Ok(
+        json!({"beliefs":beliefs,"curated_memory":curated,"sessions":sessions,"note":"Only outcome-calibrated beliefs may steer decisions. Relations provide structure and do not establish evidence."}),
+    )
+}
+pub fn pending_list(cfg: &Config, req: &Value) -> Result<Value> {
+    let mut all = Vec::new();
+    let mut page = req.clone();
+    page["limit"] = json!(50);
+    let ceiling = if req["all"] == true || req["cluster"] == true {
+        4096
+    } else {
+        cap(req, "limit", 50, 50)?
+    };
+    let mut budget = crate::MAX_FRAME_BYTES - 4096;
+    while all.len() < ceiling {
+        page["offset"] = json!(all.len());
+        let rows = crate::pending::list(cfg, &page)?
+            .as_array()
+            .cloned()
+            .ok_or(Error::Unavailable)?;
+        let count = rows.len();
+        for row in rows.into_iter().take(ceiling - all.len()) {
+            let size = serde_json::to_vec(&row)
+                .map_err(|_| Error::Unavailable)?
+                .len();
+            budget = budget.checked_sub(size).ok_or(Error::TooLarge)?;
+            all.push(row);
+        }
+        if count < 50 {
+            break;
+        }
+    }
+    if req["cluster"] != true {
+        return Ok(json!(all));
+    }
+    let mut groups: Vec<(BTreeSet<String>, Vec<Value>)> = Vec::new();
+    let mut others = Vec::new();
+    for row in all {
+        if row["kind"] != "memory" {
+            others.push(row);
+            continue;
+        }
+        let tokens = crate::skills::overlap_tokens(row["text"].as_str().unwrap_or(""));
+        if let Some((existing, rows)) = groups.iter_mut().find(|(t, _)| {
+            crate::skills::containment(t, &tokens).max(crate::skills::containment(&tokens, t))
+                >= 0.5
+        }) {
+            existing.extend(tokens);
+            rows.push(row);
+        } else {
+            groups.push((tokens, vec![row]));
+        }
+    }
+    Ok(
+        json!({"memory_clusters":groups.into_iter().map(|(_,rows)|rows).collect::<Vec<_>>(),"other":others}),
+    )
 }

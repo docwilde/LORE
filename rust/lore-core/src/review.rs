@@ -772,7 +772,7 @@ pub fn build_review_job(
     if span.as_ref().is_some_and(|span| span.is_empty()) {
         return Ok(None);
     }
-    let record_usage = span.is_none();
+    let record_usage = span.is_none() && req["dry_run"] != true;
     let chosen = span.map_or(messages.as_slice(), |span| &messages[span]);
     let pending = pending_items(cfg, &slug)?;
     let pending_text = pending
