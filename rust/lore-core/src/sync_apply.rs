@@ -696,6 +696,12 @@ fn file_entries(cfg: &Config, conn: &Connection, op: &Value, kind: &str) -> Resu
             if let Some(entry) = keyed_entry(&entries, kind, &bucket, key)? {
                 old = entry
             } else {
+                if entries
+                    .iter()
+                    .any(|entry| entry.to_lowercase() == gate::one_line(&value).to_lowercase())
+                {
+                    return Ok(Applied::Complete);
+                }
                 let competing = conflict(conn, op, kind, &bucket, key, &value)?;
                 action = if kind == "filemap" && competing {
                     "add-conflict"
