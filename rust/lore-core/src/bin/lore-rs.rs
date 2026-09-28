@@ -20,7 +20,7 @@ fn main() {
             memory_show(options)
         }
         [group, command] if group == "filemap" && command == "show" => filemap_show(),
-        _ => Err(Error::InvalidRequest),
+        _ => lore_core::standalone::run(&args),
     };
     if let Err(error) = outcome {
         eprintln!("lore-rs: {}", error.code());

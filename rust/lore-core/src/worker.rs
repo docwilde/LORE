@@ -65,7 +65,7 @@ pub fn run(cfg: &Config, req: &Value, engine: &str) -> Result<()> {
     Ok(())
 }
 
-fn review_provider(
+pub(crate) fn review_provider(
     program: &str,
     model_env: &str,
     fallback: &str,

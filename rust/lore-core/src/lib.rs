@@ -20,6 +20,8 @@ pub mod skills;
 pub mod store;
 pub mod sync;
 pub mod sync_apply;
+pub mod sync_network;
+pub mod standalone;
 pub mod worker;
 pub use core::Core;
 
