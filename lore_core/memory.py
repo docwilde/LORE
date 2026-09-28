@@ -132,8 +132,14 @@ def usage_line(entries: list[str], cap: int) -> str:
 
 
 def write_entries(path: Path, entries: list[str], cap: int, label: str) -> str | None:
-    """Persist entries; returns an error message when over cap (nothing written)."""
-    body = render_entries(entries)
+    """Persist every entry in ascending text order, independent of arrival.
+
+    UTF-8 preserves Unicode code point order, matching the native writer.
+    Sorting only at persistence leaves review snapshots and legacy reads
+    faithful to the file; the next successful mutation canonicalizes it.
+    No entries or provenance are discarded. Over cap writes remain refused.
+    """
+    body = render_entries(sorted(entries))
     if len(body) > cap:
         listing = "\n".join(f"  - {e}" for e in entries)
         return (
@@ -246,10 +252,11 @@ def memory_add(scope: str, slug: str, text: str, *, via: str = "direct",
 def memory_replace(scope: str, slug: str, needle: str, text: str, *,
                    via: str = "direct", origin: "str | None" = None,
                    source_engine: "str | None" = None,
-                   writer: "str | None" = None) -> str | None:
+                   writer: "str | None" = None, exact: bool = False) -> str | None:
     path = memory_path(scope, slug)
     entries = read_entries(path)
-    hits = match_entries(entries, needle)
+    hits = ([i for i, entry in enumerate(entries) if entry == needle]
+            if exact else match_entries(entries, needle))
     if not hits:
         listing = "\n".join(f"  - {e}" for e in entries) or "  (empty)"
         return f"no entry matches {needle!r} in {scope} memory. Entries:\n{listing}"
@@ -273,10 +280,11 @@ def memory_replace(scope: str, slug: str, needle: str, text: str, *,
 
 
 @_serialized_memory
-def memory_remove(scope: str, slug: str, needle: str) -> str | None:
+def memory_remove(scope: str, slug: str, needle: str, *, exact: bool = False) -> str | None:
     path = memory_path(scope, slug)
     entries = read_entries(path)
-    hits = match_entries(entries, needle)
+    hits = ([i for i, entry in enumerate(entries) if entry == needle]
+            if exact else match_entries(entries, needle))
     if not hits:
         return f"no entry matches {needle!r} in {scope} memory."
     if len(hits) > 1:

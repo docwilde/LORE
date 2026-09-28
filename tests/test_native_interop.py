@@ -161,6 +161,34 @@ class NativeInterop(unittest.TestCase):
                             expected={"sha256": review["sha256"], "inode": review["inode"]})
         self.assertEqual(result["status"], "approved", result)
 
+    def test_concurrent_python_native_authors_converge_exact_memory_bytes(self):
+        self.oracle("""
+import json
+from lore_core.memory import memory_add
+assert memory_add('user', '', 'zebra Python author', source_engine='codex') is None
+assert memory_add('user', '', 'éclair Python author', source_engine='codex') is None
+print(json.dumps(True))
+""")
+        for text in ("😀 native author", "Alpha native author"):
+            reviewed = self.value("memory_review_v1", scope="user")
+            result = self.value("memory_action_v1", scope="user", action="add", text=text,
+                                expected={"key": "user", "sha256": reviewed["sha256"]})
+            self.assertEqual(result["status"], "applied")
+        python_ops, native_ops = read_ops(self.python_root), read_ops(self.native_root)
+        for op in reversed(python_ops):
+            self.approve({"kind": "sync", "op": op})
+        result = self.oracle("""
+import json,sys
+from lore_core.store import db_connect
+from lore_core.sync_apply import apply_ops
+conn=db_connect();result=apply_ops(conn,json.load(sys.stdin));conn.commit();conn.close()
+print(json.dumps(result))
+""", list(reversed(native_ops)))
+        self.assertEqual(result["applied"], 2)
+        expected = "- Alpha native author\n- zebra Python author\n- éclair Python author\n- 😀 native author\n".encode()
+        self.assertEqual((self.python_root / "USER.md").read_bytes(), expected)
+        self.assertEqual((self.native_root / "USER.md").read_bytes(), expected)
+
     def test_python_producer_to_native_exact_review_preserves_identity_and_no_echo(self):
         self.oracle('''
 import json
@@ -184,6 +212,35 @@ conn.commit();conn.close();print(json.dumps(True))
         self.assertEqual(len(received), len(ops))
         self.assertEqual({op["op_id"]: op for op in received}, source)
         self.assertEqual(self.value("beliefs_filtered_v1", query="STRASSE", offset=0, limit=1)[0]["claim"], "Straße geometry remains explicit")
+
+    def test_project_portable_keys_replace_remove_without_rewriting_signed_rows(self):
+        ops = []
+        for kind in ("memory", "filemap"):
+            bucket = "project:sender-checkout" if kind == "memory" else "sender-checkout"
+            original = "shared fact" if kind == "memory" else "src.rs — shared purpose"
+            replacement = "updated fact" if kind == "memory" else "src.rs — updated purpose"
+            def key(text):
+                digest = hashlib.sha256(text.strip().lower().encode()).hexdigest()[:20]
+                return f"{kind}:{bucket}:{digest}"
+            for verb, payload in (("add", {"text": original}),
+                                  ("replace", {"old_key": key(original), "text": replacement}),
+                                  ("remove", {"key": key(replacement)})):
+                seq = len(ops) + 1
+                op = {"op_id": f"portable-{seq}", "machine_id": "fixture-sender", "machine_seq": seq,
+                      "lamport": seq, "class": kind, "op": verb, "project_key": "portable-project",
+                      "payload": payload, "created": "2026-01-01T00:00:00Z"}
+                signed = [op[field] for field in ("op_id", "machine_id", "machine_seq", "lamport", "class", "op", "project_key", "payload")]
+                op["mac"] = hmac.new(KEY.encode(), json.dumps(signed, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(), hashlib.sha256).hexdigest()
+                ops.append(op)
+                self.approve({"kind": "sync", "op": op})
+        # Human approval authors pending-decision operations; memory/file-map
+        # replay must retain only the original sender's operations.
+        received = [op for op in read_ops(self.native_root) if op["class"] in ("memory", "filemap")]
+        self.assertEqual(len(received), len(ops))
+        self.assertEqual({op["op_id"]: op for op in received}, {op["op_id"]: op for op in ops})
+        for directory in ("projects", "filemap"):
+            for file in (self.native_root / directory).rglob("*.md"):
+                self.assertEqual(file.read_text(), "")
 
     def test_native_signed_rows_apply_through_python_receiver_and_replay_is_idempotent(self):
         reviewed = self.value("memory_review_v1", scope="user")

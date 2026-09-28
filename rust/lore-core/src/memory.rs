@@ -86,7 +86,12 @@ pub fn match_entries(entries: &[String], needle: &str) -> Vec<usize> {
         .collect()
 }
 pub fn write_entries(path: &Path, entries: &[String], cap: usize) -> Result<()> {
-    let body = render_entries(entries);
+    // Persist a text-ordered set irrespective of local authorship/receipt order.
+    // UTF-8 byte order matches Python's Unicode code point order. Keep reads
+    // and review snapshots faithful to existing files until a successful write.
+    let mut ordered = entries.to_vec();
+    ordered.sort();
+    let body = render_entries(&ordered);
     if body.len() > SOURCE_CAP {
         return Err(Error::TooLarge);
     }
@@ -358,6 +363,14 @@ pub fn mutate_locked(
     if !authority.may_write() {
         return Err(Error::Untrusted);
     }
+    // Reserved internal actions are used only after sync resolved a text key.
+    // Public action/direct_action still accept add/replace/remove exclusively.
+    let exact = matches!(action, "replace-exact" | "remove-exact");
+    let action = match action {
+        "replace-exact" => "replace",
+        "remove-exact" => "remove",
+        other => other,
+    };
     let path = scope.path(cfg, key)?;
     let mut entries = read_entries(&path)?;
     let bucket = scope.bucket(key);
@@ -377,7 +390,15 @@ pub fn mutate_locked(
             None
         }
         "replace" | "remove" => {
-            let hits = match_entries(&entries, needle);
+            let hits = if exact {
+                entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| (entry == needle).then_some(index))
+                    .collect::<Vec<_>>()
+            } else {
+                match_entries(&entries, needle)
+            };
             if hits.len() != 1 {
                 return Err(Error::Changed);
             }
@@ -709,6 +730,61 @@ mod tests {
             engine: "codex".into(),
         }
     }
+    #[test]
+    fn internal_exact_mutation_selects_only_keyed_text_and_reorders_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        let path = cfg.root.join("USER.md");
+        files::atomic_write(&path, b"- shared fact extended\n- shared fact\n").unwrap();
+        mutate(
+            &cfg,
+            Scope::User,
+            "",
+            "replace-exact",
+            "shared fact",
+            "Alpha replacement",
+            "direct",
+            None,
+            Some("codex"),
+            &auth(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"- Alpha replacement\n- shared fact extended\n"
+        );
+        mutate(
+            &cfg,
+            Scope::User,
+            "",
+            "add",
+            "",
+            "shared fact",
+            "direct",
+            None,
+            Some("codex"),
+            &auth(),
+        )
+        .unwrap();
+        mutate(
+            &cfg,
+            Scope::User,
+            "",
+            "remove-exact",
+            "shared fact",
+            "",
+            "direct",
+            None,
+            None,
+            &auth(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"- Alpha replacement\n- shared fact extended\n"
+        );
+    }
+
     #[test]
     fn unicode_cap_duplicate_and_exact_snapshot_are_canonical() {
         let temp = tempfile::tempdir().unwrap();

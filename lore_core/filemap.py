@@ -125,7 +125,7 @@ def normalize_map_path(path: str, root: "str | None") -> str:
 def write_filemap(slug: str, entries: list[str]) -> str | None:
     """Persist the map atomically; returns an error message when over cap
     (nothing written) — same consolidate-first contract as memory."""
-    body = render_entries(entries)
+    body = render_entries(sorted(entries))
     if len(body) > FILEMAP_CAP:
         listing = "\n".join(f"  - {e}" for e in entries)
         return (
@@ -165,7 +165,8 @@ def _serialized_filemap(fn):
 @_serialized_filemap
 def filemap_add(slug: str, path: str, purpose: str,
                 root: "str | None" = None, *, via: str = "direct",
-                writer: "str | None" = None) -> str | None:
+                writer: "str | None" = None,
+                preserve_conflict: bool = False) -> str | None:
     path = one_line(scrub_secrets(str(path)))
     purpose = one_line(scrub_secrets(str(purpose)))
     if not path:
@@ -175,9 +176,13 @@ def filemap_add(slug: str, path: str, purpose: str,
     path = normalize_map_path(path, root)
     entry = f"{path}{SEP}{purpose}"
     entries = read_entries(filemap_path(slug))
+    # A concurrent sync replace must retain both wordings for human review.
+    # Ordinary local adds still update by path; replay dedupes by full text.
+    if preserve_conflict and any(e.lower() == entry.lower() for e in entries):
+        return None
     for i, e in enumerate(entries):
         epath, _, _ = e.partition(SEP)
-        if epath.strip().lower() == path.lower():
+        if not preserve_conflict and epath.strip().lower() == path.lower():
             if e.lower() == entry.lower():
                 return None  # exact duplicate: fine, idempotent
             old = entries[i]
@@ -202,9 +207,10 @@ def filemap_add(slug: str, path: str, purpose: str,
 @_serialized_filemap
 def filemap_replace(slug: str, needle: str, path: str, purpose: str,
                     root: "str | None" = None, *, via: str = "direct",
-                    writer: "str | None" = None) -> str | None:
+                    writer: "str | None" = None, exact: bool = False) -> str | None:
     entries = read_entries(filemap_path(slug))
-    hits = match_entries(entries, needle)
+    hits = ([i for i, entry in enumerate(entries) if entry == needle] if exact
+            else match_entries(entries, needle))
     if not hits:
         listing = "\n".join(f"  - {e}" for e in entries) or "  (empty)"
         return f"no entry matches {needle!r} in the file map. Entries:\n{listing}"
@@ -227,9 +233,10 @@ def filemap_replace(slug: str, needle: str, path: str, purpose: str,
 
 
 @_serialized_filemap
-def filemap_remove(slug: str, needle: str) -> str | None:
+def filemap_remove(slug: str, needle: str, *, exact: bool = False) -> str | None:
     entries = read_entries(filemap_path(slug))
-    hits = match_entries(entries, needle)
+    hits = ([i for i, entry in enumerate(entries) if entry == needle] if exact
+            else match_entries(entries, needle))
     if not hits:
         return f"no entry matches {needle!r} in the file map."
     if len(hits) > 1:

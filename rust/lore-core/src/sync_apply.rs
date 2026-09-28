@@ -562,6 +562,9 @@ fn portable_key(key: &str, kind: &str, bucket: &str) -> Result<String> {
     {
         return Err(Error::InvalidRequest);
     }
+    if kind == "filemap" && prefix.len() == "filemap:".len() {
+        return Err(Error::InvalidRequest);
+    }
     if kind == "memory"
         && !(bucket == "user" && prefix == "memory:user"
             || bucket.starts_with("project:")
@@ -609,11 +612,15 @@ fn conflict(
     bucket: &str,
     key: &str,
     new: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let normalized = portable_key(key, kind, bucket)?;
-    let mut stmt=conn.prepare("SELECT machine_id,payload FROM sync_ops WHERE class=? AND op='replace' AND applied=1 AND op_id!=? LIMIT 10001")?;
+    let mut stmt=conn.prepare("SELECT machine_id,payload FROM sync_ops WHERE class=? AND op='replace' AND applied=1 AND op_id!=? AND project_key IS ? LIMIT 10001")?;
     let mut budget = MAX_PAGE_BYTES;
-    let mut query = stmt.query(params![op["class"].as_str(), op["op_id"].as_str()])?;
+    let mut query = stmt.query(params![
+        op["class"].as_str(),
+        op["op_id"].as_str(),
+        optional(op, "project_key", 2048)?
+    ])?;
     let mut rows = Vec::new();
     while let Some(row) = query.next()? {
         if rows.len() == 10000 {
@@ -636,12 +643,13 @@ fn conflict(
             .and_then(|k| portable_key(k, kind, bucket).ok())
             .as_ref()
             == Some(&normalized)
+            && p["text"].as_str() != Some(new)
         {
             conn.execute("INSERT OR IGNORE INTO sync_conflicts(kind,bucket,old_key,a_text,b_text,op_id,created) VALUES(?,?,?,?,?,?,?)",params![kind,bucket,normalized,fallback(&p,"text","",65536)?,new,text_field(op,"op_id")?,crate::utcnow()])?;
-            break;
+            return Ok(true);
         }
     }
-    Ok(())
+    Ok(false)
 }
 fn file_entries(cfg: &Config, conn: &Connection, op: &Value, kind: &str) -> Result<Applied> {
     let p = &op["payload"];
@@ -688,8 +696,18 @@ fn file_entries(cfg: &Config, conn: &Connection, op: &Value, kind: &str) -> Resu
             if let Some(entry) = keyed_entry(&entries, kind, &bucket, key)? {
                 old = entry
             } else {
-                conflict(conn, op, kind, &bucket, key, &value)?;
-                action = "add";
+                if entries
+                    .iter()
+                    .any(|entry| entry.to_lowercase() == gate::one_line(&value).to_lowercase())
+                {
+                    return Ok(Applied::Complete);
+                }
+                let competing = conflict(conn, op, kind, &bucket, key, &value)?;
+                action = if kind == "filemap" && competing {
+                    "add-conflict"
+                } else {
+                    "add"
+                };
             }
         }
         _ => return Ok(Applied::Unknown),
@@ -697,14 +715,18 @@ fn file_entries(cfg: &Config, conn: &Connection, op: &Value, kind: &str) -> Resu
     if action != "remove" && value.is_empty() {
         return Err(Error::InvalidRequest);
     }
-    if kind == "memory"
-        && action == "add"
+    if matches!(action, "add" | "add-conflict")
         && entries
             .iter()
             .any(|entry| entry.to_lowercase() == gate::one_line(&value).to_lowercase())
     {
         return Ok(Applied::Complete);
     }
+    let action = match action {
+        "replace" => "replace-exact",
+        "remove" => "remove-exact",
+        other => other,
+    };
     let cfg = suppressed(cfg);
     let authority = Authority::Interactive {
         agent: "sync-replay".into(),
@@ -750,7 +772,7 @@ fn file_entries(cfg: &Config, conn: &Connection, op: &Value, kind: &str) -> Resu
             return Err(Error::MayHaveApplied)
         }
     }
-    if action != "remove" {
+    if action != "remove-exact" {
         let safe = gate::one_line(&scrub::scrub(&value)?);
         let mut provenance = json!({"via":via,"writer":p.get("writer").cloned().unwrap_or_else(||json!("unknown")),"at":fallback(op,"created",&crate::utcnow(),128)?});
         if kind == "memory" {
@@ -2042,7 +2064,132 @@ mod tests {
     }
 
     #[test]
+    fn project_keys_translate_and_conflicts_keep_same_path_alternatives() {
+        let (_temp, cfg) = fixture();
+        let conn = store::connect(&cfg).unwrap();
+        conn.execute("INSERT INTO sync_projects(project_key,slug,created) VALUES('repo-a','receiver-a','fixture'),('repo-b','receiver-b','fixture')", []).unwrap();
+        drop(conn);
+        let original = "src.rs — shared";
+        let key = gate::entry_key("filemap", "sender-checkout", original);
+        let seed = op(
+            &cfg,
+            "seed-map",
+            1,
+            "filemap",
+            "add",
+            Some("repo-a"),
+            json!({"text":original}),
+        );
+        let first = op(
+            &cfg,
+            "first-map",
+            2,
+            "filemap",
+            "replace",
+            Some("repo-a"),
+            json!({"old_key":key,"text":"src.rs — first"}),
+        );
+        let mut second = op(
+            &cfg,
+            "second-map",
+            3,
+            "filemap",
+            "replace",
+            Some("repo-a"),
+            json!({"old_key":key,"text":"src.rs — second"}),
+        );
+        second["machine_id"] = json!("other-author");
+        let raw = store::canonical_bytes(&tuple(&second)).unwrap();
+        let mut mac =
+            Hmac::<sha2::Sha256>::new_from_slice(cfg.sync.key.as_ref().unwrap().as_bytes())
+                .unwrap();
+        mac.update(&raw);
+        second["mac"] = json!(mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>());
+        assert_eq!(
+            apply_ops(&cfg, &[seed, first, second]).unwrap()["applied"],
+            3
+        );
+        let entries = memory::read_entries(&filemap::path(&cfg, "receiver-a").unwrap()).unwrap();
+        assert!(
+            entries.contains(&"src.rs — first".into())
+                && entries.contains(&"src.rs — second".into())
+        );
+        let other = op(
+            &cfg,
+            "other-project",
+            4,
+            "filemap",
+            "replace",
+            Some("repo-b"),
+            json!({"old_key":key,"text":"src.rs — isolated"}),
+        );
+        assert_eq!(apply_ops(&cfg, &[other]).unwrap()["applied"], 1);
+        let conn = store::connect(&cfg).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM sync_conflicts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(conn);
+        let mut identical = op(
+            &cfg,
+            "identical-map",
+            5,
+            "filemap",
+            "replace",
+            Some("repo-a"),
+            json!({"old_key":key,"text":"src.rs — first"}),
+        );
+        identical["machine_id"] = json!("third-author");
+        identical["mac"] =
+            json!(
+                store::canonical_mac(&tuple(&identical), cfg.sync.key.as_deref().unwrap()).unwrap()
+            );
+        assert_eq!(apply_ops(&cfg, &[identical]).unwrap()["applied"], 1);
+        assert_eq!(
+            memory::read_entries(&filemap::path(&cfg, "receiver-a").unwrap()).unwrap(),
+            ["src.rs — first", "src.rs — second"]
+        );
+        let conn = store::connect(&cfg).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM sync_conflicts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(conn);
+        let remove = op(
+            &cfg,
+            "remove-alternative",
+            6,
+            "filemap",
+            "remove",
+            Some("repo-a"),
+            json!({"key":gate::entry_key("filemap","sender-checkout","src.rs — first")}),
+        );
+        assert_eq!(apply_ops(&cfg, &[remove]).unwrap()["applied"], 1);
+        assert_eq!(
+            memory::read_entries(&filemap::path(&cfg, "receiver-a").unwrap()).unwrap(),
+            ["src.rs — second"]
+        );
+    }
+
+    #[test]
     fn portable_entry_key_translation_preserves_scope_boundaries() {
+        for bad in [
+            "filemap::0123456789abcdefabcd",
+            "memory:user:0123456789abcdefabcD",
+            "memory:user:0123456789abcdefabc",
+            "belief:user:0123456789abcdefabcd",
+        ] {
+            assert!(portable_key(bad, "filemap", "receiver").is_err());
+        }
         let (_temp, cfg) = fixture();
         let seed = op(
             &cfg,

@@ -30,6 +30,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 import uuid
@@ -146,16 +147,10 @@ def _map_entries(mod, slug):
 
 
 def _align_project(mod, project_key: str, slug: str):
-    """Give `mod` the SAME slug for `project_key` the author uses.
+    """Pin a receiver's local checkout slug for the signed project identity.
 
-    Not a convenience: `entry_key` hashes `kind:bucket:text`, and for the file
-    map the bucket IS the slug (`project:<slug>` for project memory), so a
-    `remove`/`replace` key only matches on a receiver whose slug for that
-    project agrees with the author's. That is the ordinary case -- the slug is
-    a checkout path flattened, and two machines that keep the repository in the
-    same place produce the same one -- and it is what `record_project_identity`
-    records on first sight. Without it the receiver mints `sync-<key>` and
-    nothing keyed by the author's bucket can ever be found.
+    Different-slug and synthetic-slug lookup is covered separately in
+    test_sync_project_keys; a checkout path is never a distributed identity.
     """
     conn = mod.db_connect()
     mod.record_project_identity(conn, project_key, slug)
@@ -373,9 +368,8 @@ class TestCanonicalOrder(unittest.TestCase):
         there so a human can read the log, and for nothing else."
 
         Two adds whose `created` stamps are decades apart in the OPPOSITE
-        order to their lamports. Applied in lamport order, USER.md reads
-        second-then-first by wall clock; applied by `created` it would read
-        the other way round.
+        order to their lamports. Operation order must follow lamports;
+        persisted memory independently follows canonical text order.
         """
         _, tgt = _machine("clock")
         early_clock_late_lamport = _signed(
@@ -389,8 +383,10 @@ class TestCanonicalOrder(unittest.TestCase):
                                  "writer": "terminal"},
             created="2030-01-01T00:00:00Z")
         # Hand them over in wall-clock order, to prove the engine re-sorts.
-        _apply(tgt, [early_clock_late_lamport, late_clock_early_lamport])
-        self.assertEqual(_entries(tgt), ["written in 2030", "written in 2001"])
+        ops = [early_clock_late_lamport, late_clock_early_lamport]
+        self.assertEqual(tgt.canonical_order(ops), [late_clock_early_lamport, early_clock_late_lamport])
+        _apply(tgt, ops)
+        self.assertEqual(_entries(tgt), ["written in 2001", "written in 2030"])
 
     def test_machine_id_breaks_a_lamport_tie(self):
         """The order is a TOTAL one: equal lamports fall back to machine_id,
@@ -426,6 +422,88 @@ class TestCanonicalOrder(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # C) memory / filemap merge rules
 # ---------------------------------------------------------------------------
+
+class TestConcurrentMemoryBytes(unittest.TestCase):
+    def test_exact_key_target_is_not_ambiguous_with_a_text_superset(self):
+        root, mod = _machine("exact-target")
+        self.addCleanup(shutil.rmtree, root)
+        self.assertIsNone(mod.memory_add("user", "", "shared fact"))
+        self.assertIsNone(mod.memory_add("user", "", "shared fact extended"))
+        self.assertIsNone(mod.memory_replace("user", "", "shared fact", "replacement", exact=True))
+        self.assertEqual(_entries(mod), ["replacement", "shared fact extended"])
+        self.assertIsNone(mod.memory_add("user", "", "shared fact"))
+        self.assertIsNone(mod.memory_remove("user", "", "shared fact", exact=True))
+        self.assertEqual(_entries(mod), ["replacement", "shared fact extended"])
+
+    def test_successful_replace_canonicalizes_legacy_without_changing_provenance_or_cap(self):
+        root, mod = _machine("legacy-write")
+        self.addCleanup(shutil.rmtree, root)
+        path = mod.memory_path("user", "")
+        path.write_text("- zebra legacy\n- Alpha legacy\n", encoding="utf-8")
+        self.assertEqual(mod.read_entries(path), ["zebra legacy", "Alpha legacy"])
+        mod.record_entry("memory", "user", "Alpha legacy", via="approved", source_engine="claude")
+        preserved = mod.entry_provenance("memory", "user", "Alpha legacy")
+        self.assertIsNone(mod.memory_replace("user", "", "zebra", "Beta replacement", source_engine="codex"))
+        self.assertEqual(path.read_bytes(), b"- Alpha legacy\n- Beta replacement\n")
+        self.assertEqual(mod.entry_provenance("memory", "user", "Alpha legacy"), preserved)
+        self.assertEqual(mod.entry_provenance("memory", "user", "Beta replacement")["source_engine"], "codex")
+        before = path.read_bytes()
+        self.assertTrue(mod.memory_add("user", "", "x" * 100000).startswith("OVER CAP:"))
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_concurrent_overflow_preserves_each_local_entry_and_stages_received_fact(self):
+        aroot, a = _machine("overflow-a", MACHINE_A)
+        broot, b = _machine("overflow-b", MACHINE_B)
+        self.addCleanup(shutil.rmtree, aroot)
+        self.addCleanup(shutil.rmtree, broot)
+        # Canonical ordering only guarantees equal bytes for equal entry sets:
+        # cap admission must not evict existing local data to force convergence.
+        for mod in (a, b):
+            namespace = mod.memory_add.__wrapped__.__globals__
+            previous = namespace["USER_CAP"]
+            namespace["USER_CAP"] = 10
+            self.addCleanup(namespace.__setitem__, "USER_CAP", previous)
+        self.assertIsNone(a.memory_add("user", "", "AAAA"))
+        self.assertIsNone(b.memory_add("user", "", "BBBB"))
+        aops, bops = _read_ops(a), _read_ops(b)
+        _apply(a, bops)
+        _apply(b, aops)
+        self.assertEqual(aroot.joinpath("USER.md").read_bytes(), b"- AAAA\n")
+        self.assertEqual(broot.joinpath("USER.md").read_bytes(), b"- BBBB\n")
+        for root in (aroot, broot):
+            self.assertEqual(len(list(root.joinpath("pending").glob("*.json"))), 1)
+
+    def test_local_authors_then_reciprocal_pull_converge_user_and_project_bytes(self):
+        aroot, a = _machine("concurrent-a", MACHINE_A)
+        broot, b = _machine("concurrent-b", MACHINE_B)
+        self.addCleanup(shutil.rmtree, aroot)
+        self.addCleanup(shutil.rmtree, broot)
+        project_key = "concurrent-memory-project"
+        _align_project(a, project_key, "same-project")
+        _align_project(b, project_key, "same-project")
+        for scope, slug in (("user", ""), ("project", "same-project")):
+            # Unsorted legacy entries survive the first successful mutation.
+            for mod in (a, b):
+                path = mod.memory_path(scope, slug)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("- legacy z\n- legacy a\n", encoding="utf-8")
+            self.assertIsNone(a.memory_add(scope, slug, "zebra authored A", source_engine="codex"))
+            self.assertIsNone(b.memory_add(scope, slug, "Alpha authored B", source_engine="claude"))
+        aops, bops = _read_ops(a), _read_ops(b)
+        self.assertEqual(_apply(a, bops)["applied"], 2)
+        self.assertEqual(_apply(b, aops)["applied"], 2)
+        for scope, slug in (("user", ""), ("project", "same-project")):
+            abytes = a.memory_path(scope, slug).read_bytes()
+            self.assertEqual(abytes, b.memory_path(scope, slug).read_bytes())
+            self.assertEqual(abytes, b"- Alpha authored B\n- legacy a\n- legacy z\n- zebra authored A\n")
+            bucket = a.memory_bucket(scope, slug)
+            for mod in (a, b):
+                self.assertEqual(mod.entry_provenance("memory", bucket, "zebra authored A")["source_engine"], "codex")
+                self.assertEqual(mod.entry_provenance("memory", bucket, "Alpha authored B")["source_engine"], "claude")
+        before = aroot.joinpath("USER.md").read_bytes()
+        self.assertEqual(_apply(a, bops)["duplicate"], 2)
+        self.assertEqual(aroot.joinpath("USER.md").read_bytes(), before)
+
 
 class TestMemoryMergeRules(unittest.TestCase):
     def setUp(self):

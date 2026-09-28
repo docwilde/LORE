@@ -422,15 +422,10 @@ def _stage_unverified(op: dict, reason: str) -> None:
 # Case 3 (over cap after merge) is handled at the bottom: the production
 # writer's own refusal is the signal.
 #
-# DEVIATION FROM THE PROSE, stated plainly. sync.md says "`replace` is
-# `remove old_key` then `add text`". Implemented literally, a replace would
-# move the entry to the END of the file, so a target replaying a source's log
-# would produce the same SET of entries in a different ORDER -- and
-# test_store_is_a_function_of_its_log asserts USER.md is BYTE-identical, not
-# set-identical. In-place-when-present is byte-faithful to memory_replace
-# (which is what authored the op) and produces the identical outcome in all
-# three conflict cases, because those are exactly the cases where the old_key
-# is absent and the code does fall back to an add.
+# Writers persist complete entry text in canonical Unicode order. Reuse their
+# replace operation for exact removal and provenance, then use add when the
+# old wording is gone; a competing file-map rewrite retains both alternatives.
+# Key translation changes only the receiver's lookup, never signed log bytes.
 
 def _memory_scope(conn: sqlite3.Connection, project_key: "str | None") -> "tuple[str, str]":
     if project_key is None:
@@ -438,7 +433,32 @@ def _memory_scope(conn: sqlite3.Connection, project_key: "str | None") -> "tuple
     return "project", _local_slug(conn, project_key) or ""
 
 
+def _portable_entry_key(kind: str, bucket: str, key: str) -> str:
+    """Translate a signed author's bucket without changing its text digest.
+
+    The envelope's project_key selects the local store. The key's bucket is
+    the author's checkout slug, not a second project identity. Keep the
+    user/project namespace check so a machine-memory key cannot act on USER.
+    Existing log bytes and MACs remain unchanged.
+    """
+    if not isinstance(key, str):
+        raise InvalidOp("entry key must be a string")
+    prefix, separator, digest = key.rpartition(":")
+    if (not separator or not prefix.startswith(f"{kind}:")
+            or len(digest) != 20 or any(c not in "0123456789abcdef" for c in digest)):
+        raise InvalidOp("invalid entry key")
+    if kind == "memory" and not (
+            bucket == "user" and prefix == "memory:user"
+            or bucket.startswith("project:") and prefix.startswith("memory:project:")
+            and len(prefix) > len("memory:project:")):
+        raise InvalidOp("entry key has the wrong memory scope")
+    if kind == "filemap" and prefix == "filemap:":
+        raise InvalidOp("entry key has no file-map bucket")
+    return f"{kind}:{bucket}:{digest}"
+
+
 def _entry_for_key(entries: "list[str]", kind: str, bucket: str, key: str) -> "str | None":
+    key = _portable_entry_key(kind, bucket, key)
     for e in entries:
         if entry_key(kind, bucket, e) == key:
             return e
@@ -474,7 +494,7 @@ def _over_cap(err: "str | None") -> bool:
 
 
 def _record_replace_conflict(conn: sqlite3.Connection, op: dict, kind: str,
-                             bucket: str, old_key: str, text: str) -> None:
+                             bucket: str, old_key: str, text: str) -> bool:
     """sync.md conflict case 1: two machines replaced the SAME entry with
     different wording. Both survive; the pair is surfaced under `lore sync
     status`'s conflicts section until a human removes one.
@@ -485,10 +505,11 @@ def _record_replace_conflict(conn: sqlite3.Connection, op: dict, kind: str,
     pair by definition. Derived from `sync_ops`, which every node holds
     identically, so every node reports the same pairs.
     """
+    old_key = _portable_entry_key(kind, bucket, old_key)
     rows = conn.execute(
         "SELECT machine_id, payload FROM sync_ops WHERE class = ? AND op = 'replace'"
-        " AND applied = ? AND op_id != ?",
-        (op["class"], APPLIED_YES, op["op_id"]),
+        " AND applied = ? AND op_id != ? AND project_key IS ?",
+        (op["class"], APPLIED_YES, op["op_id"], op["project_key"]),
     ).fetchall()
     for machine_id, raw in rows:
         if machine_id == op["machine_id"]:
@@ -497,7 +518,13 @@ def _record_replace_conflict(conn: sqlite3.Connection, op: dict, kind: str,
             other = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             continue
-        if other.get("old_key") != old_key:
+        if not isinstance(other, dict):
+            continue
+        try:
+            other_key = _portable_entry_key(kind, bucket, other.get("old_key"))
+        except InvalidOp:
+            continue
+        if other_key != old_key or other.get("text") == text:
             continue
         conn.execute(
             "INSERT OR IGNORE INTO sync_conflicts(kind, bucket, old_key, a_text,"
@@ -505,7 +532,8 @@ def _record_replace_conflict(conn: sqlite3.Connection, op: dict, kind: str,
             (kind, bucket, old_key, other.get("text") or "", text,
              op["op_id"], utcnow()),
         )
-        return
+        return True
+    return False
 
 
 def _apply_memory(conn: sqlite3.Connection, op: dict) -> bool:
@@ -528,7 +556,7 @@ def _apply_memory(conn: sqlite3.Connection, op: dict) -> bool:
     if verb == "remove":
         gone = _entry_for_key(read_entries(path), "memory", bucket, payload.get("key", ""))
         if gone is not None:
-            memory_remove(scope, slug, gone)
+            memory_remove(scope, slug, gone, exact=True)
         return True  # absent key: a no-op, and already the desired state
 
     if verb == "replace":
@@ -550,7 +578,7 @@ def _apply_memory(conn: sqlite3.Connection, op: dict) -> bool:
 
 def _replace_in_place(conn: sqlite3.Connection, op: dict, kind: str, scope: str,
                       slug: str, old: str, text: str) -> bool:
-    """Rewrite one entry WITHOUT moving it, then re-record provenance from the
+    """Rewrite one exact entry, then re-record provenance from the
     op's own `via`/`writer` -- sync.md: "the ledger on the receiver says what
     the author's ledger said".
 
@@ -562,13 +590,13 @@ def _replace_in_place(conn: sqlite3.Connection, op: dict, kind: str, scope: str,
     if kind == "memory":
         err = memory_replace(scope, slug, old, text, via=via,
                              source_engine=current_engine(op["payload"].get("source_engine") or "unknown"),
-                             writer=op["payload"].get("writer") or "unknown")
+                             writer=op["payload"].get("writer") or "unknown", exact=True)
         if _over_cap(err):
             _stage_overflow(op, "memory", scope, slug, text)
         return True
     path, _, purpose = text.partition(SEP)
     err = filemap_replace(slug, old, path.strip(), purpose.strip(), via=via,
-                          writer=op["payload"].get("writer") or "unknown")
+                          writer=op["payload"].get("writer") or "unknown", exact=True)
     if _over_cap(err):
         _stage_overflow(op, "filemap", scope, slug, text)
     return True
@@ -596,8 +624,7 @@ def _apply_filemap(conn: sqlite3.Connection, op: dict) -> bool:
     if verb == "remove":
         gone = _entry_for_key(entries, "filemap", slug, payload.get("key", ""))
         if gone is not None:
-            epath, _, _ = gone.partition(SEP)
-            filemap_remove(slug, epath.strip())
+            filemap_remove(slug, gone, exact=True)
         return True
 
     if verb == "replace":
@@ -606,11 +633,14 @@ def _apply_filemap(conn: sqlite3.Connection, op: dict) -> bool:
         old = _entry_for_key(entries, "filemap", slug, old_key)
         if old is not None:
             return _replace_in_place(conn, op, "filemap", "project", slug, old, text)
-        _record_replace_conflict(conn, op, "filemap", slug, old_key, text)
+        if any(entry.lower() == text.lower() for entry in entries):
+            return True  # identical rewrite must not overwrite another alternative
+        competing = _record_replace_conflict(conn, op, "filemap", slug, old_key, text)
         path, _, purpose = text.partition(SEP)
         err = filemap_add(slug, path.strip(), purpose.strip(),
                           via=payload.get("via", "direct"),
-                          writer=payload.get("writer") or "unknown")
+                          writer=payload.get("writer") or "unknown",
+                          preserve_conflict=competing)
         if _over_cap(err):
             _stage_overflow(op, "filemap", "project", slug, text)
         return True

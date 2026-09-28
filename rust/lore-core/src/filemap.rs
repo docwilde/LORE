@@ -80,6 +80,12 @@ pub(crate) fn mutate_locked(
     if !authority.may_write() {
         return Err(Error::Untrusted);
     }
+    let exact = matches!(action, "replace-exact" | "remove-exact");
+    let action = match action {
+        "replace-exact" => "replace",
+        "remove-exact" => "remove",
+        other => other,
+    };
     let file = path(cfg, slug)?;
     let mut entries = memory::read_entries(&file)?;
     let map_path = normalize_map_path(&gate::one_line(&crate::scrub::scrub(map_path)?), root);
@@ -88,6 +94,20 @@ pub(crate) fn mutate_locked(
     let mut op = action;
     let mut old = None;
     match action {
+        // Receiver-only fallback: preserve concurrent alternatives for one path.
+        "add-conflict" => {
+            if map_path.is_empty() || purpose.is_empty() {
+                return Err(Error::InvalidRequest);
+            }
+            if entries
+                .iter()
+                .any(|entry| entry.to_lowercase() == text.to_lowercase())
+            {
+                return Ok(());
+            }
+            entries.push(text.clone());
+            op = "add";
+        }
         "add" => {
             if map_path.is_empty() || purpose.is_empty() {
                 return Err(Error::InvalidRequest);
@@ -111,7 +131,15 @@ pub(crate) fn mutate_locked(
             }
         }
         "replace" | "remove" => {
-            let hits = memory::match_entries(&entries, needle);
+            let hits = if exact {
+                entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, entry)| (entry == needle).then_some(i))
+                    .collect()
+            } else {
+                memory::match_entries(&entries, needle)
+            };
             if hits.len() != 1 {
                 return Err(Error::Changed);
             }
