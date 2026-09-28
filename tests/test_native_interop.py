@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import pty
+import termios
 import subprocess
 import sys
 import tempfile
@@ -35,6 +37,33 @@ def environment(base, root, machine):
     if "TMPDIR" in os.environ:
         env["TMPDIR"] = os.environ["TMPDIR"]
     return env
+
+
+def operator_request(text, env, args=None):
+    """A genuine owned PTY is the operator review signal; stdout stays piped."""
+    master, slave = pty.openpty()
+    attributes = termios.tcgetattr(slave)
+    attributes[3] = (attributes[3] | termios.ICANON) & ~termios.ECHO
+    attributes[6][termios.VEOF] = b"\x04"
+    termios.tcsetattr(slave, termios.TCSANOW, attributes)
+    child = subprocess.Popen([str(BINARY), *(args or ["bridge"])], stdin=slave,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             env=env, start_new_session=True)
+    os.close(slave)
+    try:
+        payload = text.encode()
+        if len(payload) > 4095:
+            raise ValueError("owned canonical PTY fixture request exceeds its line bound")
+        os.write(master, payload + b"\x04")
+        output, error = child.communicate(timeout=8)
+        return subprocess.CompletedProcess(child.args, child.returncode, output.decode(), error.decode())
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid, 9)
+            child.wait(timeout=3)
+        if child.stdout: child.stdout.close()
+        if child.stderr: child.stderr.close()
+        os.close(master)
 
 
 def read_ops(root):
@@ -137,8 +166,7 @@ class NativeInterop(unittest.TestCase):
         return json.loads(child.stdout)
 
     def request(self, op, **args):
-        child = subprocess.run([str(BINARY), "bridge"], input=json.dumps({"id": 1, "op": op, "cwd": str(self.cwd), **args}) + "\n",
-                               text=True, capture_output=True, env=self.native_env, timeout=8)
+        child = operator_request(json.dumps({"id": 1, "op": op, "cwd": str(self.cwd), **args}) + "\n", self.native_env)
         self.assertEqual(child.returncode, 0, child.stderr)
         frames = [json.loads(line) for line in child.stdout.splitlines()]
         self.assertEqual(frames[0]["type"], "hello")
@@ -160,6 +188,40 @@ class NativeInterop(unittest.TestCase):
         result = self.value("resolve_reviewed_v1", pid=pid, decision="approve",
                             expected={"sha256": review["sha256"], "inode": review["inode"]})
         self.assertEqual(result["status"], "approved", result)
+
+    def test_detached_public_bridge_never_claims_human_review(self):
+        review = self.value("memory_review_v1", scope="user")
+        request = {"id": 1, "op": "memory_action_v1", "cwd": str(self.cwd),
+                   "scope": "user", "action": "add", "text": "owned staged fixture",
+                   "authority": "human", "expected": {"key": "user", "sha256": review["sha256"]}}
+        child = subprocess.run([str(BINARY), "bridge"], input=json.dumps(request) + "\n",
+                               text=True, capture_output=True, env=dict(self.native_env, AI_AGENT="claude-code_harness"), timeout=8)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        frames = [json.loads(line) for line in child.stdout.splitlines()]
+        self.assertEqual(frames[1]["value"]["status"], "staged")
+        self.assertFalse((self.native_root / "USER.md").exists())
+
+    def test_native_terminal_approval_reviews_exact_proposal_and_model_pipe_refuses(self):
+        pending = self.native_root / "pending"
+        pending.mkdir(parents=True)
+        pid = "owned-terminal-proposal"
+        path = pending / (pid + ".json")
+        item = {"kind": "memory", "scope": "user", "text": "owned terminal-reviewed fact",
+                "writer": "model", "source_engine": "claude"}
+        path.write_text(json.dumps(item))
+        detached = subprocess.run([str(BINARY), "approve", pid, "--cwd", str(self.cwd)],
+                                  text=True, capture_output=True, input="a\n",
+                                  env=dict(self.native_env, AI_AGENT="claude-code_harness"), timeout=8)
+        self.assertNotEqual(detached.returncode, 0)
+        self.assertTrue(path.exists())
+        self.assertFalse((self.native_root / "USER.md").exists())
+        operator = operator_request("a\n", self.native_env, ["approve", pid, "--cwd", str(self.cwd)])
+        self.assertEqual(operator.returncode, 0, operator.stderr)
+        self.assertEqual(json.loads(operator.stdout)["status"], "approved")
+        self.assertIn('"complete": true', operator.stderr)
+        self.assertIn('"memory_before": []', operator.stderr)
+        self.assertFalse(path.exists())
+        self.assertEqual((self.native_root / "USER.md").read_text(), "- owned terminal-reviewed fact\n")
 
     def test_concurrent_python_native_authors_converge_exact_memory_bytes(self):
         self.oracle("""

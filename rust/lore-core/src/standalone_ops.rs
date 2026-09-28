@@ -147,7 +147,105 @@ fn review_one(cfg: &Config, req: &Value) -> Result<Value> {
     .map_err(|_| Error::MayHaveApplied)?;
     Ok(result)
 }
+fn prefix_hash(file: &std::fs::File, size: u64) -> Result<String> {
+    use sha2::Digest;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        let mut digest = sha2::Sha256::new();
+        let mut offset = 0;
+        let mut buffer = [0u8; 32768];
+        while offset < size {
+            let limit = ((size - offset) as usize).min(buffer.len());
+            let n = file.read_at(&mut buffer[..limit], offset)?;
+            if n == 0 {
+                return Err(Error::Changed);
+            }
+            digest.update(&buffer[..n]);
+            offset += n as u64;
+        }
+        Ok(format!("{:x}", digest.finalize()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, size);
+        Err(Error::Unsupported)
+    }
+}
 pub fn review(cfg: &Config, req: &Value) -> Result<Value> {
+    if config::disabled("LORE_DISABLE_REVIEW")
+        || std::env::var("LORE_SKIP").is_ok_and(|s| !s.is_empty())
+    {
+        return Ok(json!({"skipped":true}));
+    }
+    let Some(mut req) = prepare_review(cfg, req)? else {
+        return Ok(json!({"skipped":true,"reason":"no_transcript"}));
+    };
+    let path = Path::new(req["transcript"].as_str().ok_or(Error::InvalidRequest)?);
+    let (file, proof) = crate::review::snapshot_source(path)?;
+    let count = crate::review::parse_review_fd(
+        &file,
+        proof["size"].as_u64().ok_or(Error::InvalidRequest)?,
+        req["engine"] == "codex",
+    )?
+    .len();
+    let sid = req["session_id"].as_str().ok_or(Error::InvalidRequest)?;
+    let stamp = cfg
+        .root
+        .join(".derived")
+        .join(config::project_slug(gate::cwd(&req)?))
+        .join(format!("{sid}.json"));
+    let _lock = if req["dry_run"] != true {
+        Some(files::Locks::acquire(
+            &cfg.root,
+            &[stamp.clone()],
+            cfg.timeout,
+        )?)
+    } else {
+        None
+    };
+    if req["incremental"] == true && req["full"] != true {
+        let previous: Value = if stamp.try_exists()? {
+            serde_json::from_slice(&files::read_regular(&stamp, 4096)?)
+                .map_err(|_| Error::InvalidRequest)?
+        } else {
+            json!({})
+        };
+        let previous_size = previous["size"].as_u64().unwrap_or(0);
+        let previous_count = previous["count"].as_u64().unwrap_or(0) as usize;
+        let lo = if previous_size <= proof["size"].as_u64().unwrap_or(0)
+            && previous_count <= count
+            && previous["sha256"].as_str().is_some_and(|hash| {
+                prefix_hash(&file, previous_size).is_ok_and(|actual| hash == actual)
+            }) {
+            previous_count
+        } else {
+            0
+        };
+        if lo == count {
+            return Ok(json!({"skipped":true,"reason":"no_new_messages"}));
+        }
+        req["span"] = json!([lo, count]);
+    }
+    if req.get("expected_source").is_none() {
+        req["expected_source"] = proof.clone();
+    }
+    let result = review_prepared(cfg, &req)?;
+    if req["dry_run"] != true
+        && result["skipped"] != true
+        && result["failed"].as_u64().unwrap_or(0) == 0
+    {
+        let mut watermark = proof;
+        watermark["count"] = json!(count);
+        files::atomic_write(
+            &stamp,
+            &serde_json::to_vec(&watermark).map_err(|_| Error::MayHaveApplied)?,
+        )
+        .map_err(|_| Error::MayHaveApplied)?;
+    }
+    Ok(result)
+}
+fn review_prepared(cfg: &Config, req: &Value) -> Result<Value> {
     let Some(req) = prepare_review(cfg, req)? else {
         return Ok(json!({"skipped":true,"reason":"no_transcript"}));
     };
@@ -1219,7 +1317,7 @@ pub fn setup(cfg: &Config, req: &Value, auth: &Authority) -> Result<Value> {
     let allow = settings["permissions"]["allow"]
         .as_array_mut()
         .ok_or(Error::InvalidRequest)?;
-    let permission = "Bash(*/plugins/lore/*/bin/lore *)";
+    let permission = "Bash(*/plugins/*/bin/lore *)";
     if !allow.iter().any(|p| p == permission) {
         allow.push(json!(permission));
     }

@@ -19,7 +19,11 @@ pub fn required(args: &[String]) -> bool {
     matches!(
         args.first().map(String::as_str),
         Some("review" | "backfill" | "dream")
-    ) || args.first().is_some_and(|a| a == "graph") && args.get(1).is_some_and(|a| a == "derive")
+    ) || args.first().is_some_and(|a| a == "sync")
+        && args
+            .get(1)
+            .is_some_and(|a| matches!(a.as_str(), "pull" | "push" | "bootstrap"))
+        || args.first().is_some_and(|a| a == "graph") && args.get(1).is_some_and(|a| a == "derive")
         || args.first().is_some_and(|a| a == "hook")
             && args.windows(2).any(|a| {
                 a[0] == "--event" && matches!(a[1].as_str(), "pre-compact" | "session-end")
@@ -66,6 +70,27 @@ pub fn enter_worker() -> Result<bool> {
 #[cfg(target_os = "linux")]
 pub fn run(args: &[String]) -> Result<i32> {
     use std::os::unix::process::CommandExt;
+    let background = std::env::var("LORE_NATIVE_BACKGROUND_REVIEW").is_ok_and(|v| v == "1");
+    let pull = std::env::var("LORE_NATIVE_BACKGROUND_PULL").is_ok_and(|v| v == "1");
+    let _background_slot = if background || pull {
+        let cfg = crate::config::Config::from_env(Duration::from_secs(3))?;
+        let mut acquired = None;
+        for slot in 0..if background { 4 } else { 1 } {
+            let path = cfg.root.join(".native-jobs").join(format!(
+                "{}-{slot}",
+                if background { "review" } else { "pull" }
+            ));
+            if let Ok(lock) =
+                crate::files::Locks::acquire(&cfg.root, &[path], Duration::from_millis(1))
+            {
+                acquired = Some(lock);
+                break;
+            }
+        }
+        Some(acquired.ok_or(Error::Timeout)?)
+    } else {
+        None
+    };
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) } != 0 {
         return Err(Error::Untrusted);
     }

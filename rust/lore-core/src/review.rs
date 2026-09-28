@@ -648,6 +648,12 @@ fn neighbourhood(cfg: &Config, slug: &str, messages: &[Message]) -> Result<Strin
     }
     Ok(rows.join("\n"))
 }
+/// Pin and hash owned source bytes for standalone incremental review.
+pub(crate) fn snapshot_source(path: &Path) -> Result<(File, Value)> {
+    let (file, source) = open_source(path)?;
+    let proof = json!({"sha256":source.hash,"inode":source.inode,"device":source.device,"size":source.size,"ctime":source.ctime,"ctime_nsec":source.ctime_nsec});
+    Ok((file, proof))
+}
 pub fn build_review_job(
     cfg: &Config,
     req: &Value,

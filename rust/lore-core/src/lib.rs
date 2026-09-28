@@ -99,3 +99,5 @@ pub fn utcnow() -> String {
 pub mod standalone_graph;
 
 pub mod supervisor;
+
+pub mod standalone_hooks;

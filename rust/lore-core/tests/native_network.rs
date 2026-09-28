@@ -351,3 +351,79 @@ fn failed_receipt_retains_cursor_and_retry_receives_missing_operation() {
         .unwrap();
     assert_eq!(cursor, "1");
 }
+#[test]
+fn session_start_schedules_only_native_pull_and_rate_limits_following_starts() {
+    let (t, cfg) = config();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut socket = loop {
+            match listener.accept() {
+                Ok((s, _)) => break s,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "native hook pull did not connect"
+                    );
+                    thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => panic!("owned fixture accept: {e}"),
+            }
+        };
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        let mut request = String::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            assert!(request.len() + line.len() < 16384);
+            request.push_str(&line);
+        }
+        let payload = b"{\"ops\":[],\"next\":null}";
+        write!(socket,"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n",payload.len()).unwrap();
+        socket.write_all(payload).unwrap();
+        request
+    });
+    let hook = || {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lore-rs"))
+            .args(["hook", "--engine", "claude", "--event", "session-start"])
+            .env_clear()
+            .env("HOME", t.path())
+            .env("LORE_ROOT", &cfg.root)
+            .env("LORE_PROJECTS_DIR", &cfg.projects)
+            .env("LORE_CODEX_SESSIONS_DIR", &cfg.codex_sessions)
+            .env("LORE_SYNC_PEER", &url)
+            .env("LORE_CLAUDE_BIN", "/a/model/must/never/run/from/inject")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        write!(
+            child.stdin.as_mut().unwrap(),
+            "{}",
+            json!({"cwd":t.path(),"session_id":"owned-pull-hook"})
+        )
+        .unwrap();
+        drop(child.stdin.take());
+        child.wait_with_output().unwrap()
+    };
+    let first = hook();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let request = server.join().unwrap();
+    assert!(request.contains("GET /v1/ops?since=0"));
+    let stamp = std::fs::read(cfg.root.join(".sync/pull")).unwrap();
+    assert!(hook().status.success());
+    assert_eq!(std::fs::read(cfg.root.join(".sync/pull")).unwrap(), stamp);
+}

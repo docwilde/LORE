@@ -109,6 +109,7 @@ fn parse(args: &[String]) -> Result<(Value, Vec<String>)> {
                         | "latest"
                         | "foreground"
                         | "full"
+                        | "incremental"
                         | "list"
                         | "cluster"
                         | "include_dormant"
@@ -200,7 +201,7 @@ fn validate_flags(group: &str, sub: &str, req: &Value) -> Result<()> {
         ("session",_) => "session_id grep context limit trunc offset",
         ("index",_) => "force live",
         ("history",_) => "limit offset prefix session_id",
-        ("review",_) => "transcript latest foreground dry_run workers full engine session_id model",
+        ("review",_) => "transcript latest foreground dry_run workers full incremental engine session_id model",
         ("backfill",_) => "project list jobs force dry_run",
         ("pending",_) => "pid all cluster limit",
         ("approve"|"reject",_) => "pid expected",
@@ -467,9 +468,17 @@ pub fn run(args: &[String]) -> Result<()> {
             crate::pending::review(&cfg, &req)?
         }
         (decision @ ("approve" | "reject"), _) => {
+            if p.len() > 1 {
+                return Err(Error::InvalidRequest);
+            }
             pos(&mut req, "pid", &p, false)?;
             req["decision"] = json!(decision);
             req["op"] = json!("resolve_reviewed_v1");
+            if req.get("expected").is_none() {
+                if !terminal_review(&cfg, &mut req, &auth)? {
+                    return output(json!({"status":"cancelled"}));
+                }
+            }
             core.execute(&req)?
         }
         ("consult", _) => {
@@ -522,7 +531,7 @@ pub fn run(args: &[String]) -> Result<()> {
         ("motd", _) => crate::standalone_ops::motd(&cfg, &req)?,
         ("statusline", _) => crate::standalone_ops::statusline(&cfg)?,
         ("teardown", _) => crate::standalone_ops::teardown(&cfg, &req, &auth)?,
-        ("doctor", _) => doctor(&cfg)?,
+        ("doctor", _) => doctor(&cfg, &req)?,
         ("setup", _) => crate::standalone_ops::setup(&cfg, &req, &auth)?,
         ("config", _) => configuration(&cfg, sub, &req, &p)?,
         ("sync", _) => sync(&cfg, sub, &req, &p)?,
@@ -538,6 +547,68 @@ pub fn run(args: &[String]) -> Result<()> {
         return Err(Error::MayHaveApplied);
     }
     Ok(())
+}
+fn terminal_review(cfg: &Config, req: &mut Value, auth: &Authority) -> Result<bool> {
+    auth.require_review()?;
+    let review = crate::pending::review(cfg, req)?;
+    if review["complete"] != true {
+        return Err(Error::Untrusted);
+    }
+    let item: Value = serde_json::from_str(review["raw"].as_str().ok_or(Error::InvalidRequest)?)
+        .map_err(|_| Error::InvalidRequest)?;
+    let mut display = json!({"review":review,"proposal_after":item});
+    if item["kind"] == "memory" {
+        let mut current = req.clone();
+        current["scope"] = item["scope"].clone();
+        if let Some(host) = item.get("host") {
+            current["host"] = host.clone();
+        }
+        let scope =
+            crate::memory::Scope::parse(item["scope"].as_str().ok_or(Error::InvalidRequest)?)?;
+        let key = if scope == crate::memory::Scope::Machine {
+            crate::memory::resolve_machine(cfg, item["host"].as_str())
+        } else {
+            item["project"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or(config::project_slug(crate::gate::cwd(req)?))
+        };
+        let entries = crate::memory::read_entries(&scope.path(cfg, &key)?)?;
+        display["memory_before"] = json!(entries
+            .iter()
+            .map(|text| crate::scrub::scrub(text))
+            .collect::<Result<Vec<_>>>()?);
+    } else if item["kind"] == "filemap" {
+        display["filemap_before"] = crate::filemap::show(cfg, req)?;
+    }
+    let text = serde_json::to_string_pretty(&display).map_err(|_| Error::Unavailable)?;
+    if text.len() > crate::MAX_FRAME_BYTES {
+        return Err(Error::TooLarge);
+    }
+    let mut stderr = io::stderr().lock();
+    writeln!(stderr, "{text}")?;
+    writeln!(
+        stderr,
+        "a = approve this exact proposal; r = reject it; c = cancel"
+    )?;
+    stderr.flush()?;
+    drop(stderr);
+    let mut answer = Vec::new();
+    io::stdin().lock().take(17).read_until(b'\n', &mut answer)?;
+    if answer.len() > 16 {
+        return Err(Error::InvalidRequest);
+    }
+    let answer = std::str::from_utf8(&answer)
+        .map_err(|_| Error::InvalidRequest)?
+        .trim();
+    match answer {
+        "a" => req["decision"] = json!("approve"),
+        "r" => req["decision"] = json!("reject"),
+        "c" | "" => return Ok(false),
+        _ => return Err(Error::InvalidRequest),
+    }
+    req["expected"] = json!({"sha256":review["sha256"],"inode":review["inode"]});
+    Ok(true)
 }
 fn own_process_group() -> Result<()> {
     #[cfg(unix)]
@@ -595,16 +666,103 @@ fn status(cfg: &Config, req: &Value) -> Result<Value> {
         json!({"root":cfg.root,"version":env!("CARGO_PKG_VERSION"),"counts":counts,"memory":crate::memory::usage(cfg,req)?,"pending":crate::pending::ids(cfg)?.len(),"sync":crate::sync::state(cfg)?}),
     )
 }
-fn doctor(cfg: &Config) -> Result<Value> {
-    let mut checks = json!({"native":true,"root_absolute":cfg.root.is_absolute(),"sync_key_configured":cfg.sync.key.is_some(),"version":env!("CARGO_PKG_VERSION")});
-    checks["store"] = json!(match crate::store::read_only(cfg) {
-        Ok(conn) => conn
-            .query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
-            .unwrap_or_else(|_| "unavailable".into()),
-        Err(e) => e.code().into(),
-    });
+fn doctor(cfg: &Config, req: &Value) -> Result<Value> {
+    let mut checks = json!({"native":true,"root_absolute":cfg.root.is_absolute(),"sync_key_configured":cfg.sync.key.is_some(),"version":env!("CARGO_PKG_VERSION"),"runtime":config::runtime(cfg),"transcripts_present":cfg.projects.is_dir(),"stream_index_enabled":config::disabled("LORE_STREAM_INDEX"),"mid_session_review_secs":std::env::var("LORE_REVIEW_SECS").ok().and_then(|s|s.parse::<u64>().ok()).filter(|n|*n>0),"refresh_on_change":!std::env::var("LORE_REFRESH_ON_CHANGE").is_ok_and(|v|v=="0")});
+    let provider = std::env::var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+    let available = if provider.contains('/') {
+        Path::new(&provider).is_file()
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .take(128)
+            .any(|p| p.join(&provider).is_file())
+    };
+    checks["provider_available"] = json!(available);
+    let mut reviewed = std::collections::BTreeSet::new();
+    match crate::store::read_only(cfg) {
+        Ok(conn) => {
+            checks["store"] = json!(conn
+                .query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
+                .unwrap_or_else(|_| "unavailable".into()));
+            let active = conn.query_row(
+                "SELECT count(*) FROM beliefs WHERE status='active'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?;
+            let edges = conn.query_row("SELECT count(*) FROM belief_edges", [], |r| {
+                r.get::<_, i64>(0)
+            })?;
+            let asserted = conn.query_row(
+                "SELECT count(*) FROM belief_edges WHERE source='derived'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?;
+            let missing=conn.query_row("SELECT count(*) FROM beliefs b WHERE b.superseded_by IS NOT NULL AND NOT EXISTS(SELECT 1 FROM belief_edges e WHERE e.src=b.id AND e.dst=b.superseded_by AND e.rel='supersedes')",[],|r|r.get::<_,i64>(0))?;
+            checks["graph"] = json!({"active":active,"edges":edges,"asserted":asserted,"missing_supersedes":missing,"structural_fix":"lore graph backfill","asserted_preview":"lore graph derive --dry-run"});
+            let mut stmt = conn.prepare("SELECT session_id FROM reviewed LIMIT 100001")?;
+            for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+                if reviewed.len() >= 100000 {
+                    return Err(Error::TooLarge);
+                }
+                reviewed.insert(row?);
+            }
+        }
+        Err(error) => {
+            checks["store"] = json!(error.code());
+        }
+    }
+    let mut backlog = std::collections::BTreeMap::new();
+    if cfg.projects.try_exists()? {
+        for project in crate::files::directory_names(&cfg.projects, 10000)? {
+            let path = cfg.projects.join(&project);
+            if !path.is_dir() {
+                continue;
+            }
+            let mut count = 0;
+            for name in crate::files::directory_names(&path, 10000)? {
+                let Some(id) = Path::new(&name).file_stem().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if Path::new(&name).extension().is_some_and(|e| e == "jsonl")
+                    && !reviewed.contains(id)
+                {
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                backlog.insert(project.to_string_lossy().to_string(), count);
+            }
+        }
+    }
+    checks["unreviewed_backlog"] = json!(backlog);
+    let path = settings()?;
+    if path.try_exists()? {
+        let data: Value =
+            serde_json::from_slice(&crate::files::read_regular(&path, crate::MAX_FRAME_BYTES)?)
+                .map_err(|_| Error::InvalidRequest)?;
+        checks["auto_memory_enabled"] = data["autoMemoryEnabled"].clone();
+        checks["native_permission_configured"] =
+            json!(data["permissions"]["allow"].as_array().is_some_and(|a| a
+                .iter()
+                .any(|p| p.as_str().is_some_and(|s| s.contains("bin/lore ")))));
+    }
+    let slug = config::project_slug(crate::gate::cwd(req)?);
+    let auto = cfg.projects.join(slug).join("memory");
+    let count = if auto.try_exists()? {
+        crate::files::directory_names(&auto, 10000)?
+            .into_iter()
+            .filter(|n| {
+                n.to_str()
+                    .is_some_and(|n| n.ends_with(".md") && !n.starts_with("lore-export-"))
+            })
+            .count()
+    } else {
+        0
+    };
+    checks["auto_memory_source_files"] = json!(count);
+    checks["migration_preview"] = json!("lore setup --dry-run");
     Ok(checks)
 }
+
 fn settings() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").ok_or(Error::Unavailable)?;
     Ok(std::env::var_os("CLAUDE_CONFIG_DIR")
@@ -614,7 +772,15 @@ fn settings() -> Result<PathBuf> {
 }
 fn configuration(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
     if matches!(sub, "" | "show") {
-        return Ok(crate::config::runtime(cfg));
+        let mut runtime = crate::config::runtime(cfg);
+        runtime["caps"] = json!({"user":cfg.user_cap,"project":cfg.project_cap,"machine":cfg.machine_cap,"filemap":cfg.filemap_cap});
+        runtime["models"] = json!({"deriver":std::env::var("LORE_DERIVER_MODEL").unwrap_or_else(|_|"haiku".into()),"dreamer":std::env::var("LORE_DREAMER_MODEL").unwrap_or_else(|_|"sonnet".into()),"dialectic":std::env::var("LORE_DIALECTIC_MODEL").ok()});
+        runtime["sync"] = json!({"enabled":cfg.sync.enabled,"classes":cfg.sync.classes,"key_configured":cfg.sync.key.is_some(),"hub_configured":std::env::var("LORE_SYNC_URL").is_ok_and(|v|!v.is_empty()),"peer_configured":std::env::var("LORE_SYNC_PEER").is_ok_and(|v|!v.is_empty())});
+        runtime["stream_index"] = json!(config::disabled("LORE_STREAM_INDEX"));
+        runtime["review_secs"] = json!(std::env::var("LORE_REVIEW_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok()));
+        return Ok(runtime);
     }
     let var = req["var"]
         .as_str()
@@ -1023,6 +1189,7 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
     }
     match event {
         "session-start" => {
+            let _ = crate::standalone_hooks::pull_at_start(cfg, cwd);
             if std::env::var("LORE_DISABLE_INJECT").is_ok_and(|s| !matches!(s.as_str(), "" | "0")) {
                 return Ok(());
             }
@@ -1032,6 +1199,7 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
             )
         }
         "prompt" => {
+            let _ = crate::standalone_hooks::review_at_prompt(cfg, &input, cwd, session, engine);
             if engine == "claude"
                 && ["LORE_LIVE_INDEX", "LORE_STREAM_INDEX"]
                     .iter()
@@ -1067,8 +1235,13 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
             if let Some(thread) = input["provider_thread"].as_str() {
                 req["provider_thread"] = json!(thread);
             }
+            if event == "pre-compact" && config::disabled("LORE_DISABLE_PRECOMPACT") {
+                return Ok(());
+            }
+            req["engine"] = json!(engine);
+            req["incremental"] = json!(true);
             own_process_group()?;
-            crate::worker::run(cfg, &req, engine)
+            crate::standalone_ops::review(cfg, &req).map(|_| ())
         }
         _ => Err(Error::InvalidRequest),
     }

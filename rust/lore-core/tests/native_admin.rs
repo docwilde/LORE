@@ -211,7 +211,10 @@ fn native_hook_injection_never_calls_provider() {
     std::fs::write(cfg.root.join("USER.md"), "- Hook fixture memory\n").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_lore-rs"))
         .args(["hook", "--engine", "claude", "--event", "session-start"])
+        .env_clear()
+        .env("HOME", t.path())
         .env("LORE_ROOT", &cfg.root)
+        .env("LORE_PROJECTS_DIR", &cfg.projects)
         .env("LORE_CLAUDE_BIN", "/this/provider/must/never/be/launched")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -714,4 +717,122 @@ fn graph_explicit_output_never_replaces_curated_or_other_existing_files() {
     )
     .status
     .success());
+}
+#[test]
+fn incremental_review_skips_idle_work_and_prompt_scheduler_starts_clock_without_model() {
+    use std::{io::Write, os::unix::fs::PermissionsExt};
+    let (t, cfg) = config();
+    let cwd = t.path().join("project");
+    std::fs::create_dir(&cwd).unwrap();
+    let slug = lore_core::config::project_slug(&cwd);
+    let source = cfg.projects.join(&slug).join("tick-session.jsonl");
+    let rows=(0..3).map(|i|format!("{}\n",json!({"type":"user","cwd":cwd,"message":{"content":format!("Original owned fixture user turn {i}")}}))).collect::<String>();
+    lore_core::files::atomic_write(&source, rows.as_bytes()).unwrap();
+    let provider = t.path().join("owned-provider");
+    let calls = t.path().join("provider-calls");
+    let prompt = t.path().join("provider-prompt");
+    lore_core::files::atomic_write(&provider,b"#!/usr/bin/python3\nimport os,sys,pathlib,json\nprompt=sys.stdin.read()\npathlib.Path(os.environ['OWNED_PROMPT']).write_text(prompt)\nwith pathlib.Path(os.environ['OWNED_CALLS']).open('a') as file:file.write('call\\n')\nprint(json.dumps({'memory':[],'filemap':[],'skills':[],'conclusions':[]}))\n").unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let command = |args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore-rs"));
+        cmd.args(args)
+            .env_clear()
+            .env("HOME", t.path())
+            .env("LORE_ROOT", &cfg.root)
+            .env("LORE_PROJECTS_DIR", &cfg.projects)
+            .env("LORE_CODEX_SESSIONS_DIR", &cfg.codex_sessions)
+            .env("LORE_CLAUDE_BIN", &provider)
+            .env("LORE_DEFER_DREAM", "1")
+            .env("OWNED_PROMPT", &prompt)
+            .env("OWNED_CALLS", &calls);
+        cmd
+    };
+    let args = [
+        "review",
+        "--latest",
+        "--incremental",
+        "--cwd",
+        cwd.to_str().unwrap(),
+    ];
+    let first = command(&args).output().unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
+    let idle = command(&args).output().unwrap();
+    assert!(idle.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&idle.stdout).unwrap()["reason"],
+        "no_new_messages"
+    );
+    assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
+    let append = |text: &str| {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&source)
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"user","cwd":cwd,"message":{"content":text}})
+        )
+        .unwrap();
+    };
+    append("Fresh appended native fixture turn");
+    let second = command(&args).output().unwrap();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let latest = std::fs::read_to_string(&prompt).unwrap();
+    assert!(latest.contains("Fresh appended native fixture turn"));
+    assert!(!latest.contains("Original owned fixture user turn"));
+    let event = json!({"cwd":cwd,"session_id":"tick-session","transcript_path":source,"prompt":"fixture prompt"});
+    let hook = || {
+        let mut child = command(&["hook", "--engine", "claude", "--event", "prompt"])
+            .env("LORE_REVIEW_SECS", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        write!(child.stdin.as_mut().unwrap(), "{event}").unwrap();
+        drop(child.stdin.take());
+        child.wait_with_output().unwrap()
+    };
+    let first_prompt = hook();
+    assert!(
+        first_prompt.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first_prompt.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 2);
+    assert!(cfg.root.join(".midreview/tick-session").exists());
+    append("Second fresh delta scheduled natively");
+    lore_core::files::atomic_write(&cfg.root.join(".midreview/tick-session"), b"0").unwrap();
+    assert!(hook().status.success());
+    let watermark = cfg
+        .root
+        .join(".derived")
+        .join(&slug)
+        .join("tick-session.json");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let value: Value = serde_json::from_slice(&std::fs::read(&watermark).unwrap()).unwrap();
+        if value["count"] == 5 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "native scheduled review did not settle"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 3);
+    assert!(std::fs::read_to_string(&prompt)
+        .unwrap()
+        .contains("Second fresh delta scheduled natively"));
 }
