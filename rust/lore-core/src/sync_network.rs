@@ -69,34 +69,137 @@ fn port() -> u16 {
         .filter(|n| *n > 0)
         .unwrap_or(8765)
 }
+fn normalized_base(base: &str) -> Result<Url> {
+    let mut base = Url::parse(base.trim()).map_err(|_| Error::InvalidRequest)?;
+    if !matches!(base.scheme(), "http" | "https")
+        || base.host_str().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+    {
+        return Err(Error::InvalidRequest);
+    }
+    let path = base.path().trim_end_matches('/');
+    let path = if path.ends_with("/v1") {
+        path.to_owned()
+    } else {
+        format!("{path}/v1")
+    };
+    base.set_path(&format!("{path}/"));
+    Ok(base)
+}
+fn cursor_identity(base: &Url, credential: Option<&str>, peer: &str) -> Result<String> {
+    let owner = store::canonical_bytes(&json!([base.as_str(), credential]))?;
+    let cursor_key = format!(
+        "transport:v1:{}:{}",
+        if peer == "hub" { "hub" } else { "peer" },
+        crate::digest(&owner)
+    );
+    Ok(cursor_key)
+}
+fn hub_settings() -> Result<(String, Option<String>)> {
+    let url = std::env::var("LORE_SYNC_URL").map_err(|_| Error::InvalidRequest)?;
+    let auth = std::env::var("LORE_SYNC_AUTH")
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let auth = if auth.is_empty() { "token" } else { &auth };
+    let token = if auth == "token" {
+        Some(
+            std::env::var("LORE_SYNC_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .ok_or(Error::Untrusted)?,
+        )
+    } else if auth == "tailscale" {
+        None
+    } else {
+        return Err(Error::InvalidRequest);
+    };
+    Ok((url, token))
+}
+fn peer_settings(spec: &str) -> Result<(String, Option<String>, String)> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err(Error::InvalidRequest);
+    }
+    let raw = if spec.contains("://") {
+        spec.to_owned()
+    } else if spec.starts_with('[') {
+        if spec.contains("]:") {
+            format!("http://{spec}")
+        } else {
+            format!("http://{spec}:{}", port())
+        }
+    } else if spec.matches(':').count() > 1 {
+        format!("http://[{spec}]:{}", port())
+    } else if spec
+        .rsplit_once(':')
+        .is_some_and(|(_, p)| p.parse::<u16>().is_ok())
+    {
+        format!("http://{spec}")
+    } else {
+        format!("http://{spec}:{}", port())
+    };
+    let url = Url::parse(&raw).map_err(|_| Error::InvalidRequest)?;
+    let host = url
+        .host_str()
+        .ok_or(Error::InvalidRequest)?
+        .trim_matches(['[', ']'])
+        .to_lowercase();
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    let p = url.port_or_known_default().ok_or(Error::InvalidRequest)?;
+    // Legacy host keys depend on mutable default-port configuration and
+    // cannot prove which endpoint owns their opaque cursor. Leave those
+    // rows intact and replay into an unambiguous endpoint namespace.
+    let path = url.path().trim_end_matches('/');
+    let path = path.strip_suffix("/v1").unwrap_or(path);
+    let key = format!("peer:v1:{}://{host}:{p}{path}/v1", url.scheme());
+    Ok((
+        raw,
+        std::env::var("LORE_SYNC_PEER_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty()),
+        key,
+    ))
+}
+/// Local status identity lookup: no HTTP clients, network calls or store writes.
+pub fn configured_cursor_keys() -> Result<(Option<String>, BTreeSet<String>)> {
+    let mut hub = None;
+    let mut pull = BTreeSet::new();
+    if std::env::var("LORE_SYNC_URL").is_ok_and(|s| !s.trim().is_empty()) {
+        let (url, credential) = hub_settings()?;
+        let key = cursor_identity(&normalized_base(&url)?, credential.as_deref(), "hub")?;
+        pull.insert(key.clone());
+        hub = Some(key);
+    }
+    for peer in std::env::var("LORE_SYNC_PEER")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let (url, credential, label) = peer_settings(peer)?;
+        pull.insert(cursor_identity(
+            &normalized_base(&url)?,
+            credential.as_deref(),
+            &label,
+        )?);
+    }
+    if pull.is_empty() {
+        return Err(Error::InvalidRequest);
+    }
+    Ok((hub, pull))
+}
 impl Transport {
     pub fn new(base: &str, credential: Option<String>, peer: String) -> Result<Self> {
-        let mut base = Url::parse(base.trim()).map_err(|_| Error::InvalidRequest)?;
-        if !matches!(base.scheme(), "http" | "https")
-            || base.host_str().is_none()
-            || !base.username().is_empty()
-            || base.password().is_some()
-            || base.query().is_some()
-            || base.fragment().is_some()
-        {
-            return Err(Error::InvalidRequest);
-        }
-        let path = base.path().trim_end_matches('/');
-        let path = if path.ends_with("/v1") {
-            path.to_owned()
-        } else {
-            format!("{path}/v1")
-        };
-        base.set_path(&format!("{path}/"));
-        // Neither a display label nor a URL alone identifies an account's
-        // stream. A token rotation/account switch safely replays from zero.
-        // Keep endpoints and credentials out of public status diagnostics.
-        let owner = store::canonical_bytes(&json!([base.as_str(), credential.as_deref()]))?;
-        let cursor_key = format!(
-            "transport:v1:{}:{}",
-            if peer == "hub" { "hub" } else { "peer" },
-            crate::digest(&owner)
-        );
+        let base = normalized_base(base)?;
+        let cursor_key = cursor_identity(&base, credential.as_deref(), &peer)?;
         let client = Client::builder()
             .timeout(timeout())
             .connect_timeout(timeout())
@@ -116,74 +219,12 @@ impl Transport {
         &self.cursor_key
     }
     pub fn hub() -> Result<Self> {
-        let url = std::env::var("LORE_SYNC_URL").map_err(|_| Error::InvalidRequest)?;
-        let auth = std::env::var("LORE_SYNC_AUTH")
-            .unwrap_or_default()
-            .trim()
-            .to_lowercase();
-        let auth = if auth.is_empty() { "token" } else { &auth };
-        let token = if auth == "token" {
-            Some(
-                std::env::var("LORE_SYNC_TOKEN")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .ok_or(Error::Untrusted)?,
-            )
-        } else if auth == "tailscale" {
-            None
-        } else {
-            return Err(Error::InvalidRequest);
-        };
+        let (url, token) = hub_settings()?;
         Self::new(&url, token, "hub".into())
     }
     pub fn peer(spec: &str) -> Result<Self> {
-        let spec = spec.trim();
-        if spec.is_empty() {
-            return Err(Error::InvalidRequest);
-        }
-        let raw = if spec.contains("://") {
-            spec.to_owned()
-        } else if spec.starts_with('[') {
-            if spec.contains("]:") {
-                format!("http://{spec}")
-            } else {
-                format!("http://{spec}:{}", port())
-            }
-        } else if spec.matches(':').count() > 1 {
-            format!("http://[{spec}]:{}", port())
-        } else if spec
-            .rsplit_once(':')
-            .is_some_and(|(_, p)| p.parse::<u16>().is_ok())
-        {
-            format!("http://{spec}")
-        } else {
-            format!("http://{spec}:{}", port())
-        };
-        let url = Url::parse(&raw).map_err(|_| Error::InvalidRequest)?;
-        let host = url
-            .host_str()
-            .ok_or(Error::InvalidRequest)?
-            .trim_matches(['[', ']'])
-            .to_lowercase();
-        let host = if host.contains(':') {
-            format!("[{host}]")
-        } else {
-            host
-        };
-        let p = url.port_or_known_default().ok_or(Error::InvalidRequest)?;
-        // Legacy host keys depend on mutable default-port configuration and
-        // cannot prove which endpoint owns their opaque cursor. Leave those
-        // rows intact and replay into an unambiguous endpoint namespace.
-        let path = url.path().trim_end_matches('/');
-        let path = path.strip_suffix("/v1").unwrap_or(path);
-        let key = format!("peer:v1:{}://{host}:{p}{path}/v1", url.scheme());
-        Self::new(
-            &raw,
-            std::env::var("LORE_SYNC_PEER_SECRET")
-                .ok()
-                .filter(|s| !s.is_empty()),
-            key,
-        )
+        let (url, credential, key) = peer_settings(spec)?;
+        Self::new(&url, credential, key)
     }
     pub fn request(
         &self,

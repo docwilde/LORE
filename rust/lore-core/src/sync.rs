@@ -46,32 +46,39 @@ pub fn state(cfg: &Config) -> Result<Value> {
     }
 }
 fn read_state(cfg: &Config) -> Result<Value> {
+    let (hub, active) = crate::sync_network::configured_cursor_keys()?;
     let conn = store::read_only(cfg)?;
     let mine = conn
         .query_row("SELECT machine_id FROM sync_machine LIMIT 1", [], |r| {
             r.get::<_, String>(0)
         })
         .optional()?;
-    let unpushed = if let Some(mine) = mine {
-        conn.query_row("SELECT count(*) FROM sync_ops WHERE machine_id=? AND seq>(SELECT coalesce(max(pushed_seq),0) FROM sync_peers)",[mine],|r|crate::beliefs::sql_count(r,0))?
+    let unpushed = if let (Some(mine), Some(hub)) = (mine, hub) {
+        conn.query_row("SELECT count(*) FROM sync_ops WHERE machine_id=? AND seq>(SELECT coalesce((SELECT pushed_seq FROM sync_peers WHERE peer=?),0))",params![mine,hub],|r|crate::beliefs::sql_count(r,0))?
     } else {
         0
     };
     let unverified = conn.query_row("SELECT count(*) FROM sync_ops WHERE applied=2", [], |r| {
         crate::beliefs::sql_count(r, 0)
     })?;
-    let stamp = conn.query_row("SELECT max(last_pull) FROM sync_peers", [], |r| {
-        r.get::<_, Option<String>>(0)
-    })?;
-    let age = stamp
-        .and_then(|stamp| {
+    let mut latest = None;
+    let mut pull = conn.prepare("SELECT last_pull FROM sync_peers WHERE peer=?")?;
+    for key in active {
+        let stamp = pull
+            .query_row([key], |r| r.get::<_, Option<String>>(0))
+            .optional()?
+            .flatten();
+        if let Some(when) = stamp.and_then(|stamp| {
             time::OffsetDateTime::parse(&stamp, &time::format_description::well_known::Rfc3339).ok()
-        })
-        .map(|when| {
-            (time::OffsetDateTime::now_utc() - when)
-                .as_seconds_f64()
-                .max(0.)
-        });
+        }) {
+            latest = Some(latest.map_or(when, |previous: time::OffsetDateTime| previous.max(when)));
+        }
+    }
+    let age = latest.map(|when| {
+        (time::OffsetDateTime::now_utc() - when)
+            .as_seconds_f64()
+            .max(0.)
+    });
     let mut conflicts = 0u64;
     let mut stmt = conn.prepare(
         "SELECT kind,bucket,a_text,b_text FROM sync_conflicts ORDER BY created,bucket LIMIT 4097",

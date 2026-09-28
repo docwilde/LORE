@@ -971,3 +971,154 @@ fn hub_url_and_auth_switches_never_borrow_another_stream_cursor() {
     assert!(!rotated.cursor_key().contains("different-account-token"));
     assert!(!rotated.cursor_key().contains(&url_b));
 }
+
+fn native_status(
+    cfg: &Config,
+    home: &std::path::Path,
+    hub: Option<&str>,
+    peer: Option<&str>,
+    token: Option<&str>,
+) -> Value {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_lore-rs"));
+    command
+        .args(["sync", "status"])
+        .env_clear()
+        .env("HOME", home)
+        .env("LORE_ROOT", &cfg.root)
+        .env("LORE_PROJECTS_DIR", &cfg.projects)
+        .env("LORE_CODEX_SESSIONS_DIR", &cfg.codex_sessions);
+    if let Some(url) = hub {
+        command.env("LORE_SYNC_URL", url);
+    }
+    if let Some(url) = peer {
+        command.env("LORE_SYNC_PEER", url);
+    }
+    if let Some(token) = token {
+        command.env("LORE_SYNC_TOKEN", token);
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn native_cli_status_uses_only_active_hub_backlog_and_pull_freshness() {
+    let (t, cfg) = config();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let peer_url = format!("{url}/peer-store");
+    let token = "status-fixture-token";
+    let hub = Transport::new(&url, Some(token.into()), "hub".into()).unwrap();
+    let peer = Transport::new(&peer_url, None, "peer:fixture".into()).unwrap();
+    let mut conn = store::connect(&cfg).unwrap();
+    let tx = conn.transaction().unwrap();
+    store::append_op(
+        &cfg,
+        &tx,
+        "memory",
+        "add",
+        None,
+        &json!({"text":"One unsent owned fixture operation"}),
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    conn.execute(
+        "INSERT INTO sync_peers(peer,pushed_seq,pulled_cursor,last_pull) VALUES('hub',99,'9000',?)",
+        [lore_core::utcnow()],
+    )
+    .unwrap();
+    let status = native_status(&cfg, t.path(), Some(&url), None, Some(token));
+    assert_eq!(status["unpushed"], 1);
+    assert!(status["last_pull_age_s"].is_null());
+    let now = time::OffsetDateTime::now_utc();
+    let stamp = |hours: i64| {
+        (now - time::Duration::hours(hours))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    };
+    conn.execute(
+        "INSERT INTO sync_peers(peer,pushed_seq,last_pull) VALUES(?,0,?)",
+        rusqlite::params![hub.cursor_key(), stamp(1)],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sync_peers(peer,pushed_seq,last_pull) VALUES(?,999,?)",
+        rusqlite::params![peer.cursor_key(), stamp(2)],
+    )
+    .unwrap();
+    let status = native_status(&cfg, t.path(), Some(&url), Some(&peer_url), Some(token));
+    assert_eq!(status["unpushed"], 1);
+    assert!((3600.0..3610.0).contains(&status["last_pull_age_s"].as_f64().unwrap()));
+    conn.execute(
+        "UPDATE sync_peers SET pushed_seq=1 WHERE peer=?",
+        [hub.cursor_key()],
+    )
+    .unwrap();
+    assert_eq!(
+        native_status(&cfg, t.path(), Some(&url), None, Some(token))["unpushed"],
+        0
+    );
+    assert_eq!(
+        native_status(
+            &cfg,
+            t.path(),
+            Some(&url),
+            None,
+            Some("rotated-fixture-token")
+        )["unpushed"],
+        1
+    );
+    conn.execute(
+        "UPDATE sync_peers SET last_pull='malformed-time' WHERE peer=?",
+        [hub.cursor_key()],
+    )
+    .unwrap();
+    let status = native_status(&cfg, t.path(), Some(&url), Some(&peer_url), Some(token));
+    assert!((7200.0..7210.0).contains(&status["last_pull_age_s"].as_f64().unwrap()));
+    let peer_only = native_status(&cfg, t.path(), None, Some(&peer_url), None);
+    assert_eq!(peer_only["unpushed"], 0);
+    assert!((7200.0..7210.0).contains(&peer_only["last_pull_age_s"].as_f64().unwrap()));
+    assert!(native_status(&cfg, t.path(), None, None, None).is_null());
+    assert!(native_status(&cfg, t.path(), Some("file:///invalid"), None, Some(token)).is_null());
+    assert!(native_status(&cfg, t.path(), Some(&url), None, None).is_null());
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT pushed_seq FROM sync_peers WHERE peer='hub'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        99
+    );
+}
+
+#[test]
+fn native_cli_status_never_creates_store_or_contacts_configured_transport() {
+    let (t, cfg) = config();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    assert!(!cfg.root.exists());
+    assert!(native_status(
+        &cfg,
+        t.path(),
+        Some(&url),
+        None,
+        Some("status-fixture-token")
+    )
+    .is_null());
+    assert!(!cfg.root.exists());
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
