@@ -55,6 +55,12 @@ impl ResolvedSettings {
         }
         Ok(Self { saved })
     }
+    /// Identify the source without exposing its value.
+    pub fn source(&self, name: &str) -> Option<&'static str> {
+        if env::var_os(name).is_some() { Some("environment") }
+        else if self.saved.contains_key(name) { Some("settings") }
+        else { None }
+    }
     /// Process overrides, including empty values, always win.
     pub fn get(&self, name: &str) -> std::result::Result<String, env::VarError> {
         match env::var(name) {
@@ -383,6 +389,14 @@ mod persisted_tests {
         std::os::unix::fs::symlink(&path,&link).unwrap();
         assert!(matches!(ResolvedSettings::from_file(&link),Err(Error::UnsafePath)));
         std::fs::remove_file(&link).unwrap();
+        let fifo = dir.path().join("fifo");
+        let raw = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(),0o600) },0);
+        assert!(matches!(ResolvedSettings::from_file(&fifo),Err(Error::UnsafePath)));
+        let oversized=dir.path().join("oversized");
+        let file=std::fs::File::create(&oversized).unwrap();
+        file.set_len(crate::MAX_FRAME_BYTES as u64+1).unwrap();
+        assert!(matches!(ResolvedSettings::from_file(&oversized),Err(Error::TooLarge)));
         std::fs::hard_link(&path,&link).unwrap();
         assert!(matches!(ResolvedSettings::from_file(&path),Err(Error::UnsafePath)));
     }
