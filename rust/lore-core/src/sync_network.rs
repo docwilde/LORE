@@ -54,7 +54,7 @@ pub struct Transport {
 }
 fn timeout() -> Duration {
     Duration::from_secs_f64(
-        std::env::var("LORE_SYNC_TIMEOUT")
+        crate::config::var("LORE_SYNC_TIMEOUT")
             .ok()
             .and_then(|x| x.parse::<f64>().ok())
             .filter(|n| n.is_finite() && *n > 0.)
@@ -63,7 +63,7 @@ fn timeout() -> Duration {
     )
 }
 fn port() -> u16 {
-    std::env::var("LORE_SYNC_PEER_PORT")
+    crate::config::var("LORE_SYNC_PEER_PORT")
         .ok()
         .and_then(|x| x.parse().ok())
         .filter(|n| *n > 0)
@@ -99,15 +99,15 @@ fn cursor_identity(base: &Url, credential: Option<&str>, peer: &str) -> Result<S
     Ok(cursor_key)
 }
 fn hub_settings() -> Result<(String, Option<String>)> {
-    let url = std::env::var("LORE_SYNC_URL").map_err(|_| Error::InvalidRequest)?;
-    let auth = std::env::var("LORE_SYNC_AUTH")
+    let url = crate::config::var("LORE_SYNC_URL").map_err(|_| Error::InvalidRequest)?;
+    let auth = crate::config::var("LORE_SYNC_AUTH")
         .unwrap_or_default()
         .trim()
         .to_lowercase();
     let auth = if auth.is_empty() { "token" } else { &auth };
     let token = if auth == "token" {
         Some(
-            std::env::var("LORE_SYNC_TOKEN")
+            crate::config::var("LORE_SYNC_TOKEN")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .ok_or(Error::Untrusted)?,
@@ -162,7 +162,7 @@ fn peer_settings(spec: &str) -> Result<(String, Option<String>, String)> {
     let key = format!("peer:v1:{}://{host}:{p}{path}/v1", url.scheme());
     Ok((
         raw,
-        std::env::var("LORE_SYNC_PEER_SECRET")
+        crate::config::var("LORE_SYNC_PEER_SECRET")
             .ok()
             .filter(|s| !s.is_empty()),
         key,
@@ -172,13 +172,13 @@ fn peer_settings(spec: &str) -> Result<(String, Option<String>, String)> {
 pub fn configured_cursor_keys() -> Result<(Option<String>, BTreeSet<String>)> {
     let mut hub = None;
     let mut pull = BTreeSet::new();
-    if std::env::var("LORE_SYNC_URL").is_ok_and(|s| !s.trim().is_empty()) {
+    if crate::config::var("LORE_SYNC_URL").is_ok_and(|s| !s.trim().is_empty()) {
         let (url, credential) = hub_settings()?;
         let key = cursor_identity(&normalized_base(&url)?, credential.as_deref(), "hub")?;
         pull.insert(key.clone());
         hub = Some(key);
     }
-    for peer in std::env::var("LORE_SYNC_PEER")
+    for peer in crate::config::var("LORE_SYNC_PEER")
         .unwrap_or_default()
         .split(',')
         .map(str::trim)
@@ -324,11 +324,11 @@ pub fn configured_targets(only_peer: Option<&str>) -> Result<Vec<Transport>> {
     if let Some(peer) = only_peer {
         targets.push(Transport::peer(peer)?);
     } else {
-        if std::env::var("LORE_SYNC_URL").is_ok_and(|s| !s.trim().is_empty()) {
+        if crate::config::var("LORE_SYNC_URL").is_ok_and(|s| !s.trim().is_empty()) {
             targets.push(Transport::hub()?);
             seen.insert("hub".to_owned());
         }
-        for peer in std::env::var("LORE_SYNC_PEER")
+        for peer in crate::config::var("LORE_SYNC_PEER")
             .unwrap_or_default()
             .split(',')
             .map(str::trim)
@@ -946,20 +946,20 @@ impl PeerServer {
         if !cfg.sync.enabled {
             return Err(Error::Untrusted);
         }
-        let auth = std::env::var("LORE_SYNC_PEER_AUTH")
+        let auth = crate::config::var("LORE_SYNC_PEER_AUTH")
             .unwrap_or_else(|_| "tailscale".into())
             .trim()
             .to_lowercase();
         if !matches!(auth.as_str(), "tailscale" | "none") || !loopback && auth != "none" {
             return Err(Error::Untrusted);
         }
-        let allow = std::env::var("LORE_SYNC_PEER_ALLOW")
+        let allow = crate::config::var("LORE_SYNC_PEER_ALLOW")
             .unwrap_or_default()
             .split(',')
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
             .collect();
-        let secret = std::env::var("LORE_SYNC_PEER_SECRET")
+        let secret = crate::config::var("LORE_SYNC_PEER_SECRET")
             .ok()
             .filter(|s| !s.is_empty());
         if auth != "none" && secret.is_none() {

@@ -34,7 +34,7 @@ Sync pulls configured sources; bootstrap requires one source (or --peer).
 Review uses the Claude CLI; source --engine identifies the transcript provider.
 "#;
 pub fn authority() -> Authority {
-    let engine = std::env::var("LORE_ENGINE").unwrap_or_else(|_| "unknown".into());
+    let engine = crate::config::var("LORE_ENGINE").unwrap_or_else(|_| "unknown".into());
     let marker = std::env::var("AI_AGENT").unwrap_or_default();
     let claude = std::env::var("CLAUDECODE").is_ok_and(|s| !s.is_empty())
         || marker.starts_with("claude-code");
@@ -49,7 +49,7 @@ pub fn authority() -> Authority {
     }
     if marker.ends_with("_agent")
         || claude
-        || std::env::var("LORE_WRITE_GATE")
+        || crate::config::var("LORE_WRITE_GATE")
             .is_ok_and(|s| matches!(s.as_str(), "off" | "0" | "false"))
     {
         return Authority::Interactive { agent, engine };
@@ -658,7 +658,7 @@ fn dream(cfg: &Config, req: &Value) -> Result<Value> {
         return Ok(json!(job.prompt()));
     }
     own_process_group()?;
-    let program = std::env::var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+    let program = crate::config::var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
     let output = crate::worker::review_provider(
         &program,
         "LORE_DREAMER_MODEL",
@@ -688,8 +688,8 @@ fn status(cfg: &Config, req: &Value) -> Result<Value> {
     )
 }
 fn doctor(cfg: &Config, req: &Value) -> Result<Value> {
-    let mut checks = json!({"native":true,"root_absolute":cfg.root.is_absolute(),"sync_key_configured":cfg.sync.key.is_some(),"version":env!("CARGO_PKG_VERSION"),"runtime":config::runtime(cfg),"transcripts_present":cfg.projects.is_dir(),"stream_index_enabled":config::disabled("LORE_STREAM_INDEX"),"mid_session_review_secs":std::env::var("LORE_REVIEW_SECS").ok().and_then(|s|s.parse::<u64>().ok()).filter(|n|*n>0),"refresh_on_change":!std::env::var("LORE_REFRESH_ON_CHANGE").is_ok_and(|v|v=="0")});
-    let provider = std::env::var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+    let mut checks = json!({"native":true,"root_absolute":cfg.root.is_absolute(),"sync_key_configured":cfg.sync.key.is_some(),"version":env!("CARGO_PKG_VERSION"),"runtime":config::runtime(cfg),"transcripts_present":cfg.projects.is_dir(),"stream_index_enabled":config::disabled("LORE_STREAM_INDEX"),"mid_session_review_secs":crate::config::var("LORE_REVIEW_SECS").ok().and_then(|s|s.parse::<u64>().ok()).filter(|n|*n>0),"refresh_on_change":!crate::config::var("LORE_REFRESH_ON_CHANGE").is_ok_and(|v|v=="0")});
+    let provider = crate::config::var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
     let available = if provider.contains('/') {
         Path::new(&provider).is_file()
     } else {
@@ -795,10 +795,10 @@ fn configuration(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<V
     if matches!(sub, "" | "show") {
         let mut runtime = crate::config::runtime(cfg);
         runtime["caps"] = json!({"user":cfg.user_cap,"project":cfg.project_cap,"machine":cfg.machine_cap,"filemap":cfg.filemap_cap});
-        runtime["models"] = json!({"deriver":std::env::var("LORE_DERIVER_MODEL").unwrap_or_else(|_|"haiku".into()),"dreamer":std::env::var("LORE_DREAMER_MODEL").unwrap_or_else(|_|"sonnet".into()),"dialectic":std::env::var("LORE_DIALECTIC_MODEL").ok()});
-        runtime["sync"] = json!({"enabled":cfg.sync.enabled,"classes":cfg.sync.classes,"key_configured":cfg.sync.key.is_some(),"hub_configured":std::env::var("LORE_SYNC_URL").is_ok_and(|v|!v.is_empty()),"peer_configured":std::env::var("LORE_SYNC_PEER").is_ok_and(|v|!v.is_empty())});
+        runtime["models"] = json!({"deriver":crate::config::var("LORE_DERIVER_MODEL").unwrap_or_else(|_|"haiku".into()),"dreamer":crate::config::var("LORE_DREAMER_MODEL").unwrap_or_else(|_|"sonnet".into()),"dialectic":crate::config::var("LORE_DIALECTIC_MODEL").ok()});
+        runtime["sync"] = json!({"enabled":cfg.sync.enabled,"classes":cfg.sync.classes,"key_configured":cfg.sync.key.is_some(),"hub_configured":crate::config::var("LORE_SYNC_URL").is_ok_and(|v|!v.is_empty()),"peer_configured":crate::config::var("LORE_SYNC_PEER").is_ok_and(|v|!v.is_empty())});
         runtime["stream_index"] = json!(config::disabled("LORE_STREAM_INDEX"));
-        runtime["review_secs"] = json!(std::env::var("LORE_REVIEW_SECS")
+        runtime["review_secs"] = json!(crate::config::var("LORE_REVIEW_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok()));
         return Ok(runtime);
@@ -1009,7 +1009,7 @@ fn sync(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
             let port = req["port"]
                 .as_u64()
                 .or_else(|| {
-                    std::env::var("LORE_SYNC_PEER_PORT")
+                    crate::config::var("LORE_SYNC_PEER_PORT")
                         .ok()
                         .and_then(|p| p.parse().ok())
                 })
@@ -1147,7 +1147,7 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
     if !input.is_object() {
         return Err(Error::InvalidRequest);
     }
-    if std::env::var("LORE_SKIP").is_ok_and(|s| !s.is_empty()) {
+    if crate::config::var("LORE_SKIP").is_ok_and(|s| !s.is_empty()) {
         return Ok(());
     }
     let cwd = input["cwd"]
@@ -1171,7 +1171,7 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
     match event {
         "session-start" => {
             let _ = crate::standalone_hooks::pull_at_start(cfg, cwd);
-            if std::env::var("LORE_DISABLE_INJECT").is_ok_and(|s| !matches!(s.as_str(), "" | "0")) {
+            if crate::config::var("LORE_DISABLE_INJECT").is_ok_and(|s| !matches!(s.as_str(), "" | "0")) {
                 return Ok(());
             }
             let snapshot = crate::context::snapshot(cfg, &req)?;

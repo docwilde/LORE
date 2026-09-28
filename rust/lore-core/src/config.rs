@@ -5,6 +5,69 @@ use std::{
     time::Duration,
 };
 
+/// Shared, bounded settings lookup. Values and credentials are never Debug output.
+#[derive(Clone, Default)]
+pub struct ResolvedSettings {
+    saved: std::collections::HashMap<String, String>,
+}
+impl ResolvedSettings {
+    pub fn from_env() -> Result<Self> {
+        let home = env::var_os("HOME").map(PathBuf::from).ok_or(Error::Unavailable)?;
+        let directory = env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".claude"));
+        let root = env::var_os("LORE_ROOT").filter(|v| !v.is_empty()).map(PathBuf::from);
+        // An isolated store must never inherit the host's saved credentials.
+        if root.as_ref().is_some_and(|r| r != &directory.join("lore")) {
+            return Ok(Self::default());
+        }
+        Self::from_file(&directory.join("settings.json"))
+    }
+    /// Load a caller-selected settings file without consulting or changing env.
+    pub fn from_file(path: &Path) -> Result<Self> {
+        let mut file = match crate::files::open_regular(path, crate::MAX_FRAME_BYTES) {
+            Ok(file) => file,
+            Err(Error::Unavailable) if !path.try_exists().unwrap_or(true) => return Ok(Self::default()),
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        use std::io::Read;
+        file.by_ref().take(crate::MAX_FRAME_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > crate::MAX_FRAME_BYTES { return Err(Error::TooLarge); }
+        let data: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| Error::InvalidRequest)?;
+        if !data.is_object() { return Err(Error::InvalidRequest); }
+        let mut saved = std::collections::HashMap::new();
+        if let Some(values) = data.get("env") {
+            let values = values.as_object().ok_or(Error::InvalidRequest)?;
+            for (name, value) in values.iter().filter(|(name, _)| name.starts_with("LORE_")) {
+                let value = value.as_str().ok_or(Error::InvalidRequest)?;
+                saved.insert(name.clone(), value.to_owned());
+            }
+        }
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            if saved.keys().any(|name| name.contains("KEY") || name.contains("TOKEN") || name.contains("SECRET"))
+                && file.metadata()?.permissions().mode() & 0o077 != 0 {
+                return Err(Error::UnsafePath);
+            }
+        }
+        Ok(Self { saved })
+    }
+    /// Process overrides, including empty values, always win.
+    pub fn get(&self, name: &str) -> std::result::Result<String, env::VarError> {
+        match env::var(name) {
+            Err(env::VarError::NotPresent) => self.saved.get(name).cloned().ok_or(env::VarError::NotPresent),
+            value => value,
+        }
+    }
+}
+/// Environment-compatible shared lookup for standalone runtime consumers.
+pub fn var(name: &str) -> std::result::Result<String, env::VarError> {
+    match env::var(name) {
+        Err(env::VarError::NotPresent) => ResolvedSettings::from_env().unwrap_or_default().get(name),
+        value => value,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub root: PathBuf,
@@ -35,8 +98,11 @@ impl std::fmt::Debug for SyncConfig {
 }
 impl SyncConfig {
     pub fn from_env() -> Self {
-        let enabled = std::env::var("LORE_DISABLE_SYNC").map_or(true, |s| s.is_empty() || s == "0");
-        let classes = std::env::var("LORE_SYNC_CLASSES")
+        Self::from_settings(&ResolvedSettings::from_env().unwrap_or_default())
+    }
+    fn from_settings(saved: &ResolvedSettings) -> Self {
+        let enabled = saved.get("LORE_DISABLE_SYNC").map_or(true, |s| s.is_empty() || s == "0");
+        let classes = saved.get("LORE_SYNC_CLASSES")
             .unwrap_or_else(|_| "memory,filemap,beliefs,pending,skills,sessions".into())
             .split(',')
             .map(str::trim)
@@ -46,7 +112,7 @@ impl SyncConfig {
         Self {
             enabled,
             classes,
-            key: std::env::var("LORE_SYNC_HMAC_KEY")
+            key: saved.get("LORE_SYNC_HMAC_KEY")
                 .ok()
                 .filter(|s| !s.is_empty()),
         }
@@ -54,6 +120,7 @@ impl SyncConfig {
 }
 impl Config {
     pub fn from_env(timeout: Duration) -> Result<Self> {
+        let saved = ResolvedSettings::from_env()?;
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or(Error::Unavailable)?;
@@ -88,12 +155,12 @@ impl Config {
             skills,
             projects,
             codex_sessions,
-            user_cap: cap("LORE_USER_CAP", 9000)?,
-            project_cap: cap("LORE_MEMORY_CAP", 8800)?,
-            machine_cap: cap("LORE_MACHINE_CAP", 4400)?,
-            filemap_cap: cap("LORE_FILEMAP_CAP", 4400)?,
+            user_cap: cap(&saved, "LORE_USER_CAP", 9000)?,
+            project_cap: cap(&saved, "LORE_MEMORY_CAP", 8800)?,
+            machine_cap: cap(&saved, "LORE_MACHINE_CAP", 4400)?,
+            filemap_cap: cap(&saved, "LORE_FILEMAP_CAP", 4400)?,
             timeout,
-            sync: SyncConfig::from_env(),
+            sync: SyncConfig::from_settings(&saved),
         })
     }
     pub fn for_root(root: PathBuf) -> Self {
@@ -107,12 +174,12 @@ impl Config {
             machine_cap: 4400,
             filemap_cap: 4400,
             timeout: Duration::from_secs(3),
-            sync: SyncConfig::from_env(),
+            sync: SyncConfig::from_settings(&ResolvedSettings::default()),
         }
     }
 }
-fn cap(name: &str, default: usize) -> Result<usize> {
-    match env::var(name) {
+fn cap(saved: &ResolvedSettings, name: &str, default: usize) -> Result<usize> {
+    match saved.get(name) {
         Ok(raw) => raw
             .trim()
             .parse::<usize>()
@@ -244,7 +311,7 @@ pub fn normalize_origin(raw: &str) -> String {
 
 /// Canonical stage switch semantics shared with the compatible Python plugin.
 pub fn disabled(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| !matches!(value.as_str(), "" | "0"))
+    var(name).is_ok_and(|value| !matches!(value.as_str(), "" | "0"))
 }
 pub fn runtime(cfg: &Config) -> serde_json::Value {
     let stages = [
@@ -255,4 +322,45 @@ pub fn runtime(cfg: &Config) -> serde_json::Value {
         ("skills", "LORE_DISABLE_SKILLS"),
     ];
     serde_json::json!({"root":cfg.root,"projects_dir":cfg.projects,"version":env!("CARGO_PKG_VERSION"),"disabled_stages":stages.into_iter().filter(|(_,name)|disabled(name)).map(|(stage,_)|stage).collect::<Vec<_>>()})
+}
+
+#[cfg(test)]
+mod persisted_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    fn settings(text: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        (dir, path)
+    }
+    #[test]
+    fn saved_caps_signing_and_transport() {
+        let (_dir, path) = settings(r#"{"env":{"LORE_MEMORY_CAP":"17600","LORE_FILEMAP_CAP":"8800","LORE_SYNC_HMAC_KEY":"fixture-key","LORE_SYNC_URL":"https://example.invalid","LORE_SYNC_TOKEN":"fixture-token","LORE_SYNC_CLASSES":"memory","LORE_DISABLE_SYNC":"1"}}"#);
+        let saved = ResolvedSettings::from_file(&path).unwrap();
+        assert_eq!(cap(&saved,"LORE_MEMORY_CAP",8800).unwrap(),17600);
+        assert_eq!(cap(&saved,"LORE_FILEMAP_CAP",4400).unwrap(),8800);
+        let sync = SyncConfig::from_settings(&saved);
+        assert!(sync.key.is_some());
+        assert!(!sync.enabled);
+        assert!(sync.classes.contains("memory"));
+        assert_eq!(saved.get("LORE_SYNC_URL").unwrap(),"https://example.invalid");
+        assert!(saved.get("LORE_SYNC_TOKEN").is_ok());
+    }
+    #[test]
+    fn rejects_malformed_and_unsafe_settings() {
+        let (dir,path) = settings("{");
+        assert!(matches!(ResolvedSettings::from_file(&path),Err(Error::InvalidRequest)));
+        std::fs::write(&path,r#"{"env":{"LORE_SYNC_HMAC_KEY":"fixture"}}"#).unwrap();
+        std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(ResolvedSettings::from_file(&path),Err(Error::UnsafePath)));
+        std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link=dir.path().join("link.json");
+        std::os::unix::fs::symlink(&path,&link).unwrap();
+        assert!(matches!(ResolvedSettings::from_file(&link),Err(Error::UnsafePath)));
+        std::fs::remove_file(&link).unwrap();
+        std::fs::hard_link(&path,&link).unwrap();
+        assert!(matches!(ResolvedSettings::from_file(&path),Err(Error::UnsafePath)));
+    }
 }
