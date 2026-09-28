@@ -213,6 +213,32 @@ conn.commit();conn.close();print(json.dumps(True))
         self.assertEqual({op["op_id"]: op for op in received}, source)
         self.assertEqual(self.value("beliefs_filtered_v1", query="STRASSE", offset=0, limit=1)[0]["claim"], "Straße geometry remains explicit")
 
+    def test_project_portable_keys_replace_remove_without_rewriting_signed_rows(self):
+        ops = []
+        for kind in ("memory", "filemap"):
+            bucket = "project:sender-checkout" if kind == "memory" else "sender-checkout"
+            original = "shared fact" if kind == "memory" else "src.rs — shared purpose"
+            replacement = "updated fact" if kind == "memory" else "src.rs — updated purpose"
+            def key(text):
+                digest = hashlib.sha256(text.strip().lower().encode()).hexdigest()[:20]
+                return f"{kind}:{bucket}:{digest}"
+            for verb, payload in (("add", {"text": original}),
+                                  ("replace", {"old_key": key(original), "text": replacement}),
+                                  ("remove", {"key": key(replacement)})):
+                seq = len(ops) + 1
+                op = {"op_id": f"portable-{seq}", "machine_id": "fixture-sender", "machine_seq": seq,
+                      "lamport": seq, "class": kind, "op": verb, "project_key": "portable-project",
+                      "payload": payload, "created": "2026-01-01T00:00:00Z"}
+                signed = [op[field] for field in ("op_id", "machine_id", "machine_seq", "lamport", "class", "op", "project_key", "payload")]
+                op["mac"] = hmac.new(KEY.encode(), json.dumps(signed, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(), hashlib.sha256).hexdigest()
+                ops.append(op)
+                self.approve({"kind": "sync", "op": op})
+        received = read_ops(self.native_root)
+        self.assertEqual({op["op_id"]: op for op in received}, {op["op_id"]: op for op in ops})
+        for directory in ("projects", "filemap"):
+            for file in (self.native_root / directory).rglob("*.md"):
+                self.assertEqual(file.read_text(), "")
+
     def test_native_signed_rows_apply_through_python_receiver_and_replay_is_idempotent(self):
         reviewed = self.value("memory_review_v1", scope="user")
         self.assertEqual(self.value("memory_action_v1", scope="user", action="add", text="Café geometry uses Unicode Straße",
