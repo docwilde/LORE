@@ -202,3 +202,22 @@ pub fn view(cfg: &Config, req: &Value, mode: &str) -> Result<Value> {
         _ => Err(Error::InvalidRequest),
     }
 }
+/// CLI relation readback admits history and global subjects. Mutation and host
+/// review APIs keep their separate canonical identity and scope checks.
+pub fn edges(cfg: &Config, req: &Value) -> Result<Value> {
+    let id = req["belief_id"].as_i64().ok_or(Error::InvalidRequest)?;
+    let conn = store::connect(cfg)?;
+    let exists = conn.query_row("SELECT count(*) FROM beliefs WHERE id=?", [id], |r| {
+        r.get::<_, i64>(0)
+    })?;
+    if exists != 1 {
+        return Err(Error::Changed);
+    }
+    let mut rows = Vec::new();
+    let mut budget = 8 * 1024 * 1024;
+    for (direction,sql) in [("out","SELECT e.src,e.dst,e.rel,e.source,e.session_id,e.note,b.subject,b.claim,b.status FROM belief_edges e JOIN beliefs b ON b.id=e.dst WHERE e.src=? ORDER BY e.rel,e.dst LIMIT 1001"),("in","SELECT e.src,e.dst,e.rel,e.source,e.session_id,e.note,b.subject,b.claim,b.status FROM belief_edges e JOIN beliefs b ON b.id=e.src WHERE e.dst=? ORDER BY e.rel,e.src LIMIT 1001")] {
+        let mut stmt=conn.prepare(sql)?;let mut cursor=stmt.query([id])?;
+        while let Some(row)=cursor.next()?{if rows.len()>=1000{return Err(Error::TooLarge)}let src=row.get::<_,i64>(0)?;let dst=row.get::<_,i64>(1)?;let rel=graph::db_text(row,2,32,&mut budget)?;rows.push(json!({"direction":direction,"src":src,"dst":dst,"rel":crate::scrub::scrub(&rel)?,"source":crate::scrub::scrub(&graph::db_text(row,3,64,&mut budget)?)?,"session_id":graph::db_optional_text(row,4,134,&mut budget)?.map(|s|crate::scrub::scrub(&s)).transpose()?,"note":graph::db_optional_text(row,5,65536,&mut budget)?.map(|s|crate::scrub::scrub(&s)).transpose()?,"subject":crate::scrub::scrub(&graph::db_text(row,6,4096,&mut budget)?)?,"claim":crate::scrub::scrub(&graph::db_text(row,7,65536,&mut budget)?)?,"status":graph::db_text(row,8,32,&mut budget)?,"independent_assertions":graph::edge_support(&conn,src,dst,&rel)?}));}
+    }
+    Ok(json!(rows))
+}

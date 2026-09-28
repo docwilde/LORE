@@ -359,7 +359,7 @@ pub fn run(args: &[String]) -> Result<()> {
             if sub == "review" {
                 crate::beliefs::review(&cfg, &req)?
             } else {
-                crate::beliefs::display(&cfg, &req)?
+                crate::standalone_ops::belief_show(&cfg, &req)?
             }
         }
         ("belief", "add" | "insert") => {
@@ -407,8 +407,7 @@ pub fn run(args: &[String]) -> Result<()> {
         }
         ("belief", "edges") => {
             id(&mut req, &p)?;
-            req["browser"] = json!(false);
-            crate::graph::read(&cfg, &req)?
+            crate::standalone_graph::edges(&cfg, &req)?
         }
         ("evidence", _) => {
             id(&mut req, &p)?;

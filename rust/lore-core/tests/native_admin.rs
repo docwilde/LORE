@@ -892,6 +892,22 @@ fn standalone_ask_and_consult_preserve_no_model_global_matches_and_calibration_g
         consult["related_by_structure"][0]["citation_status"],
         "structure_only"
     );
+    let foreign = native(&t, &cfg, &["belief", "show", &ids[1].to_string()]);
+    assert!(foreign.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&foreign.stdout).unwrap()["subject"],
+        "project:other-fixture"
+    );
+    conn.execute("UPDATE beliefs SET status='dormant' WHERE id=?", [ids[2]])
+        .unwrap();
+    let historical = native(&t, &cfg, &["belief", "show", &ids[2].to_string()]);
+    assert!(historical.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&historical.stdout).unwrap()["status"],
+        "dormant"
+    );
+    conn.execute("UPDATE beliefs SET status='active' WHERE id=?", [ids[2]])
+        .unwrap();
     let result = native(&t, &cfg, &["ask", "ownership"]);
     assert!(
         result.status.success(),

@@ -1739,3 +1739,40 @@ pub fn pending_list(cfg: &Config, req: &Value) -> Result<Value> {
         json!({"memory_clusters":groups.into_iter().map(|(_,rows)|rows).collect::<Vec<_>>(),"other":others}),
     )
 }
+pub fn belief_show(cfg: &Config, req: &Value) -> Result<Value> {
+    let id = req["belief_id"].as_i64().ok_or(Error::InvalidRequest)?;
+    let conn = store::connect(cfg)?;
+    let mut stmt=conn.prepare("SELECT id,uid,subject,claim,confidence,status,writer,via,source_engine,created,updated,superseded_by FROM beliefs WHERE id=?")?;
+    let mut cursor = stmt.query([id])?;
+    let row = cursor.next()?.ok_or(Error::Changed)?;
+    let mut budget = 8 * 1024 * 1024;
+    let mut result = json!({"id":row.get::<_,i64>(0)?,"uid":crate::graph::db_optional_text(row,1,134,&mut budget)?,"subject":crate::scrub::scrub(&crate::graph::db_text(row,2,4096,&mut budget)?)?,"claim":crate::scrub::scrub(&crate::graph::db_text(row,3,65536,&mut budget)?)?,"confidence":row.get::<_,f64>(4)?,"status":crate::graph::db_text(row,5,32,&mut budget)?,"writer":crate::graph::db_optional_text(row,6,64,&mut budget)?,"via":crate::graph::db_optional_text(row,7,64,&mut budget)?,"source_engine":crate::graph::db_optional_text(row,8,64,&mut budget)?,"created":crate::graph::db_optional_text(row,9,128,&mut budget)?,"updated":crate::graph::db_optional_text(row,10,128,&mut budget)?,"superseded_by":row.get::<_,Option<i64>>(11)?});
+    for key in [
+        "uid",
+        "writer",
+        "via",
+        "source_engine",
+        "created",
+        "updated",
+        "status",
+    ] {
+        if let Some(value) = result[key].as_str() {
+            let text = crate::scrub::scrub(value)?;
+            result[key] = json!(text);
+        }
+    }
+    drop(cursor);
+    drop(stmt);
+    let (c, x, s) = beliefs::outcome_counts(&conn, id)?;
+    result["outcomes"] = json!({"confirmed":c,"contradicted":x,"stale":s});
+    if c + x + s >= 3 {
+        result["calibrated_confidence"] = json!(beliefs::calibrated_confidence(
+            result["confidence"].as_f64().ok_or(Error::InvalidRequest)?,
+            c,
+            x
+        ));
+    }
+    result["evidence"] = beliefs::evidence(cfg, req)?;
+    result["relations"] = crate::standalone_graph::edges(cfg, req)?;
+    Ok(result)
+}
