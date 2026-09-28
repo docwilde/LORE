@@ -463,7 +463,7 @@ pub fn render_graph_context(rows: &[Value], skills: &[Value], cap: usize) -> Res
     Ok(measured_graph(cap, count, matched, reached, &body))
 }
 pub fn graph_context_block(cfg: &Config, req: &Value, skills: &[Value]) -> Result<String> {
-    if std::env::var("LORE_GRAPH_CONTEXT").map_or(true, |value| {
+    if cfg.var("LORE_GRAPH_CONTEXT").map_or(true, |value| {
         matches!(value.as_str(), "" | "0" | "off" | "false")
     }) || cfg.disabled("LORE_DISABLE_BELIEFS")
     {
@@ -477,12 +477,12 @@ pub fn graph_context_block(cfg: &Config, req: &Value, skills: &[Value]) -> Resul
     if prompt.chars().count() > 8192 {
         return Err(Error::TooLarge);
     }
-    let cap = std::env::var("LORE_GRAPH_CONTEXT_CAP")
+    let cap = cfg.var("LORE_GRAPH_CONTEXT_CAP")
         .ok()
         .map_or(Some(1200), |value| value.parse::<usize>().ok())
         .filter(|value| *value <= 65536)
         .ok_or(Error::InvalidRequest)?;
-    let hops = std::env::var("LORE_GRAPH_CONTEXT_HOPS")
+    let hops = cfg.var("LORE_GRAPH_CONTEXT_HOPS")
         .ok()
         .map_or(Some(1), |value| value.parse::<usize>().ok())
         .filter(|value| *value <= 4)
@@ -526,7 +526,7 @@ pub fn refresh(cfg: &Config, req: &Value) -> Result<Value> {
     refresh_with_skills(cfg, req, &skills)
 }
 pub fn refresh_with_skills(cfg: &Config, req: &Value, skills: &[Value]) -> Result<Value> {
-    if std::env::var("LORE_SKIP").is_ok_and(|value| !value.is_empty())
+    if cfg.var("LORE_SKIP").is_ok_and(|value| !value.is_empty())
         || cfg.disabled("LORE_DISABLE_INJECT")
     {
         return Ok(Value::Null);

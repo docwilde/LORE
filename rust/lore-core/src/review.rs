@@ -661,7 +661,7 @@ pub fn build_review_job(
 ) -> Result<Option<ReviewJob>> {
     require_derived(authority)?;
     if cfg.disabled("LORE_DISABLE_REVIEW")
-        || std::env::var("LORE_SKIP").is_ok_and(|value| !value.is_empty())
+        || cfg.var("LORE_SKIP").is_ok_and(|value| !value.is_empty())
     {
         return Ok(None);
     }

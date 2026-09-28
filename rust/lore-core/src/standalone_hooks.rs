@@ -77,14 +77,14 @@ fn spawn(args: &[String], defer: bool) -> Result<()> {
 }
 pub fn pull_at_start(cfg: &Config, cwd: &str) -> Result<()> {
     if !cfg.sync.enabled
-        || std::env::var("LORE_SYNC_PULL_AT_START").is_ok_and(|v| matches!(v.as_str(), "" | "0"))
+        || cfg.var("LORE_SYNC_PULL_AT_START").is_ok_and(|v| matches!(v.as_str(), "" | "0"))
         || !["LORE_SYNC_URL", "LORE_SYNC_PEER"]
             .iter()
             .any(|key| std::env::var(key).is_ok_and(|v| !v.trim().is_empty()))
     {
         return Ok(());
     }
-    let interval = std::env::var("LORE_SYNC_PULL_SECS")
+    let interval = cfg.var("LORE_SYNC_PULL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(120)
@@ -107,7 +107,7 @@ pub fn review_at_prompt(
     if cfg.disabled("LORE_DISABLE_REVIEW") {
         return Ok(());
     }
-    let Some(interval) = std::env::var("LORE_REVIEW_SECS")
+    let Some(interval) = cfg.var("LORE_REVIEW_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0 && *v <= 86400 * 30)

@@ -365,6 +365,11 @@ mod persisted_tests {
         assert!(sync.classes.contains("memory"));
         assert_eq!(saved.get("LORE_SYNC_URL").unwrap(),"https://example.invalid");
         assert!(saved.get("LORE_SYNC_TOKEN").is_ok());
+        let targets = crate::sync_network::configured_targets_with_settings(&saved,None).unwrap();
+        assert_eq!(targets.len(),1);
+        assert_eq!(targets[0].peer,"hub");
+        let (hub, _) = crate::sync_network::configured_cursor_keys_with_settings(&saved).unwrap();
+        assert_eq!(hub.as_deref(),Some(targets[0].cursor_key()));
     }
     #[test]
     fn rejects_malformed_and_unsafe_settings() {

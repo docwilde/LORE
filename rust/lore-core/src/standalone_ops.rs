@@ -125,7 +125,7 @@ fn review_one(cfg: &Config, req: &Value) -> Result<Value> {
     let result = crate::review::process_result(cfg, &job, &response)?;
     if result["beliefs"]["derived"].as_u64().unwrap_or(0) > 0
         && req["defer_dream"] != true
-        && !std::env::var("LORE_DEFER_DREAM").is_ok_and(|s| !matches!(s.as_str(), "" | "0"))
+        && !cfg.var("LORE_DEFER_DREAM").is_ok_and(|s| !matches!(s.as_str(), "" | "0"))
     {
         if let Some(dream) =
             crate::dream::build(cfg, gate::cwd(req)?, &auth).map_err(|_| Error::MayHaveApplied)?
@@ -174,7 +174,7 @@ fn prefix_hash(file: &std::fs::File, size: u64) -> Result<String> {
 }
 pub fn review(cfg: &Config, req: &Value) -> Result<Value> {
     if cfg.disabled("LORE_DISABLE_REVIEW")
-        || std::env::var("LORE_SKIP").is_ok_and(|s| !s.is_empty())
+        || cfg.var("LORE_SKIP").is_ok_and(|s| !s.is_empty())
     {
         return Ok(json!({"skipped":true}));
     }
@@ -319,7 +319,7 @@ fn review_prepared(cfg: &Config, req: &Value) -> Result<Value> {
 }
 
 pub fn live_index(cfg: &Config, path: &str) -> Result<Value> {
-    if std::env::var("LORE_DISABLE_INDEX").is_ok_and(|s| !matches!(s.as_str(), "" | "0")) {
+    if cfg.var("LORE_DISABLE_INDEX").is_ok_and(|s| !matches!(s.as_str(), "" | "0")) {
         return Ok(json!({"disabled":true}));
     }
     let path = if path.is_empty() {

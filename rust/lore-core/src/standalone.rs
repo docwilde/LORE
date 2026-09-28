@@ -688,8 +688,8 @@ fn status(cfg: &Config, req: &Value) -> Result<Value> {
     )
 }
 fn doctor(cfg: &Config, req: &Value) -> Result<Value> {
-    let mut checks = json!({"native":true,"root_absolute":cfg.root.is_absolute(),"sync_key_configured":cfg.sync.key.is_some(),"version":env!("CARGO_PKG_VERSION"),"runtime":config::runtime(cfg),"transcripts_present":cfg.projects.is_dir(),"stream_index_enabled":cfg.disabled("LORE_STREAM_INDEX"),"mid_session_review_secs":crate::config::var("LORE_REVIEW_SECS").ok().and_then(|s|s.parse::<u64>().ok()).filter(|n|*n>0),"refresh_on_change":!crate::config::var("LORE_REFRESH_ON_CHANGE").is_ok_and(|v|v=="0")});
-    let provider = crate::config::var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+    let mut checks = json!({"native":true,"root_absolute":cfg.root.is_absolute(),"sync_key_configured":cfg.sync.key.is_some(),"version":env!("CARGO_PKG_VERSION"),"runtime":config::runtime(cfg),"transcripts_present":cfg.projects.is_dir(),"stream_index_enabled":cfg.disabled("LORE_STREAM_INDEX"),"mid_session_review_secs":cfg.var("LORE_REVIEW_SECS").ok().and_then(|s|s.parse::<u64>().ok()).filter(|n|*n>0),"refresh_on_change":!cfg.var("LORE_REFRESH_ON_CHANGE").is_ok_and(|v|v=="0")});
+    let provider = cfg.var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
     let available = if provider.contains('/') {
         Path::new(&provider).is_file()
     } else {
@@ -1010,7 +1010,7 @@ fn sync(cfg: &Config, sub: &str, req: &Value, p: &[String]) -> Result<Value> {
             let port = req["port"]
                 .as_u64()
                 .or_else(|| {
-                    crate::config::var("LORE_SYNC_PEER_PORT")
+                    cfg.var("LORE_SYNC_PEER_PORT")
                         .ok()
                         .and_then(|p| p.parse().ok())
                 })
@@ -1148,7 +1148,7 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
     if !input.is_object() {
         return Err(Error::InvalidRequest);
     }
-    if crate::config::var("LORE_SKIP").is_ok_and(|s| !s.is_empty()) {
+    if cfg.var("LORE_SKIP").is_ok_and(|s| !s.is_empty()) {
         return Ok(());
     }
     let cwd = input["cwd"]
@@ -1172,7 +1172,7 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
     match event {
         "session-start" => {
             let _ = crate::standalone_hooks::pull_at_start(cfg, cwd);
-            if crate::config::var("LORE_DISABLE_INJECT").is_ok_and(|s| !matches!(s.as_str(), "" | "0")) {
+            if cfg.var("LORE_DISABLE_INJECT").is_ok_and(|s| !matches!(s.as_str(), "" | "0")) {
                 return Ok(());
             }
             let snapshot = crate::context::snapshot(cfg, &req)?;
