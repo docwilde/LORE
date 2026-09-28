@@ -233,7 +233,10 @@ conn.commit();conn.close();print(json.dumps(True))
                 op["mac"] = hmac.new(KEY.encode(), json.dumps(signed, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(), hashlib.sha256).hexdigest()
                 ops.append(op)
                 self.approve({"kind": "sync", "op": op})
-        received = read_ops(self.native_root)
+        # Human approval authors pending-decision operations; memory/file-map
+        # replay must retain only the original sender's operations.
+        received = [op for op in read_ops(self.native_root) if op["class"] in ("memory", "filemap")]
+        self.assertEqual(len(received), len(ops))
         self.assertEqual({op["op_id"]: op for op in received}, {op["op_id"]: op for op in ops})
         for directory in ("projects", "filemap"):
             for file in (self.native_root / directory).rglob("*.md"):
