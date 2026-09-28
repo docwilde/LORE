@@ -27,7 +27,10 @@ impl ResolvedSettings {
                 .map(PathBuf::from)
         });
         // An isolated store must never inherit the host's saved credentials.
-        if root.as_ref().is_some_and(|r| r != &directory.join("lore")) {
+        if root
+            .as_ref()
+            .is_some_and(|r| r != &home.join(".claude/lore") && r != &directory.join("lore"))
+        {
             return Ok(Self::default());
         }
         Self::from_file(&directory.join("settings.json"))

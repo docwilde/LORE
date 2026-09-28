@@ -53,3 +53,66 @@ fn persisted_cli_precedence_and_isolation() {
     assert_eq!(isolated["sync"]["hub_configured"], false);
     assert!(isolated["disabled_stages"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn custom_settings_directory_preserves_default_root_consistency() {
+    if std::env::var_os("OWNED_CUSTOM_SETTINGS_CHILD").is_some() {
+        let cfg = lore_core::config::Config::from_env(std::time::Duration::from_secs(3)).unwrap();
+        assert_eq!(
+            cfg.root,
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".claude/lore")
+        );
+        assert_eq!(cfg.project_cap, 17600);
+        let saved = cfg.settings().unwrap();
+        assert_eq!(
+            saved.get("LORE_SYNC_URL").unwrap(),
+            "https://example.invalid"
+        );
+        assert_eq!(saved.get("LORE_DISABLE_REVIEW").unwrap(), "1");
+        assert!(cfg.disabled("LORE_DISABLE_REVIEW"));
+        assert_eq!(
+            lore_core::sync_network::configured_targets_with_settings(&saved, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let directory = home.path().join("custom-claude");
+    lore_core::files::atomic_write(&directory.join("settings.json"),json!({"env":{
+        "LORE_MEMORY_CAP":"17600","LORE_DISABLE_REVIEW":"1","LORE_SYNC_URL":"https://example.invalid"
+    }}).to_string().as_bytes()).unwrap();
+    let shown = show(
+        home.path(),
+        &[("CLAUDE_CONFIG_DIR", directory.to_str().unwrap())],
+    );
+    assert_eq!(shown["caps"]["project"], 17600);
+    assert_eq!(
+        shown["root"],
+        home.path().join(".claude/lore").to_str().unwrap()
+    );
+    assert_eq!(shown["sync"]["hub_configured"], true);
+    assert!(shown["disabled_stages"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("review")));
+    let child = Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .env("HOME", home.path())
+        .env("TMPDIR", home.path())
+        .env("CLAUDE_CONFIG_DIR", &directory)
+        .env("OWNED_CUSTOM_SETTINGS_CHILD", "1")
+        .args([
+            "--exact",
+            "custom_settings_directory_preserves_default_root_consistency",
+            "--test-threads=1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "{}",
+        String::from_utf8_lossy(&child.stdout)
+    );
+}
