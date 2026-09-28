@@ -12,14 +12,13 @@ if [ -n "${LORE_RS:-}" ]; then
   matches "$LORE_RS" || { printf 'LORE_RS must name native LORE %s.\n' "$version" >&2; exit 1; }
   exec "$LORE_RS" "$@"
 fi
-for candidate in "$root/target/release/lore-rs" "$root/target/debug/lore-rs" "$(command -v lore-rs || :)"; do
-  if [ -n "$candidate" ] && matches "$candidate"; then exec "$candidate" "$@"; fi
-done
+candidate=$(command -v lore-rs || :)
+if [ -n "$candidate" ] && matches "$candidate"; then exec "$candidate" "$@"; fi
 cache=${LORE_NATIVE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/lore/native}
 case "$cache" in /*) : ;; *) printf 'LORE native cache must be absolute.\n' >&2; exit 1 ;; esac
 [ ! -L "$cache" ] || { printf 'LORE native cache must not be a symlink.\n' >&2; exit 1; }
 # Source changes invalidate the carrier even in unpacked plugin installations.
-fingerprint=$({ find "$root/rust/lore-core" -type f -name '*.rs' -exec sha256sum {} +; sha256sum "$root/rust/lore-core/Cargo.toml" "$root/Cargo.lock"; } | LC_ALL=C sort | sha256sum | cut -d' ' -f1)
+fingerprint=$({ find "$root/rust/lore-core/src" -type f -exec sha256sum {} +; sha256sum "$root/Cargo.toml" "$root/rust/lore-core/Cargo.toml" "$root/Cargo.lock"; } | LC_ALL=C sort | sha256sum | cut -d' ' -f1)
 target=$cache/$fingerprint
 binary=$target/release/lore-rs
 if matches "$binary"; then exec "$binary" "$@"; fi

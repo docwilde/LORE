@@ -52,7 +52,7 @@ case "$mode" in
     printf 'Installed native LORE at %s/lore\n' "$bin"
     ;;
   run) cargo build --locked --manifest-path "$root/Cargo.toml" --package lore-core --bin lore-rs; exec "$cache/debug/lore-rs" "$@" ;;
-  setup) exec "$root/bin/lore" setup "$@" ;;
+  setup) cargo build --release --locked --manifest-path "$root/Cargo.toml" --package lore-core --bin lore-rs; LORE_RS="$cache/release/lore-rs" exec "$root/bin/lore" setup "$@" ;;
   test) cargo test --locked --manifest-path "$root/Cargo.toml" ;;
   help|-h|--help) printf '%s\n' './task build | install | run [LORE arguments] | setup | test' ;;
   *) printf 'Unknown task: %s\n' "$mode" >&2; exit 1 ;;

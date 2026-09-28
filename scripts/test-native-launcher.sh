@@ -15,4 +15,6 @@ HOME="$scratch/home" LORE_ROOT="$scratch/store" "$root/bin/lore" hook --engine c
 EOF
 # Even with no toolchain or scripting interpreter on PATH the installed
 # carrier must execute; missing hooks must refuse before attempting a build.
-HOME="$scratch/home" LORE_ROOT="$scratch/store" PATH=/bin "$root/bin/lore" --version
+mkdir "$scratch/tools"
+for name in dirname sed head; do ln -s "$(command -v "$name")" "$scratch/tools/$name"; done
+HOME="$scratch/home" LORE_ROOT="$scratch/store" PATH="$scratch/tools" "$root/bin/lore" --version
