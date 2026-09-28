@@ -658,8 +658,9 @@ fn dream(cfg: &Config, req: &Value) -> Result<Value> {
         return Ok(json!(job.prompt()));
     }
     own_process_group()?;
-    let program = crate::config::var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+    let program = cfg.var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
     let output = crate::worker::review_provider(
+        cfg,
         &program,
         "LORE_DREAMER_MODEL",
         "sonnet",

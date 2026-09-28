@@ -39,8 +39,7 @@ fn provider(
     model_env: &str,
     default: &str,
 ) -> Result<String> {
-    let _ = cfg;
-    let program = std::env::var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+    let program = cfg.var("LORE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
     if let Some(model) = req["model"].as_str() {
         return crate::worker::review_with_model(
             &program,
@@ -50,6 +49,7 @@ fn provider(
         );
     }
     crate::worker::review_provider(
+        cfg,
         &program,
         model_env,
         default,
