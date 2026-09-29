@@ -13,6 +13,8 @@
 
 - Expose **`pending_cluster_v1`** through the native dispatcher using the
   existing CLI clustering rules; individual review and approval stay exact.
+- Fix **`pending::archive_uid`** to match portable identities as data keys.
+  Resolve 46 previously failed signed operations without changing trust gates.
 
 ## 0.62.3 — 2026-09-29
 
