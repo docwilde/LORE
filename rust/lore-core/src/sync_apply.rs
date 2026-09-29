@@ -35,6 +35,17 @@ const CLASSES: &[&str] = &[
 ];
 pub const MAX_PAGE: usize = 512;
 pub const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
+// Older compatible clients authored whole session message snapshots larger
+// than an ordinary frame. Only this exact data-only operation gets a larger
+// envelope; row count/content limits and signed authority remain unchanged.
+pub const MAX_SESSION_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+fn payload_limit(op: &Value) -> usize {
+    if op["class"] == "session" && op["op"] == "msgs" {
+        MAX_SESSION_PAYLOAD_BYTES
+    } else {
+        crate::MAX_FRAME_BYTES
+    }
+}
 const MAX_DIRECTORY: usize = 10000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Applied {
@@ -108,7 +119,7 @@ pub fn validate_envelope(op: &Value) -> Result<()> {
     if serde_json::to_vec(&op["payload"])
         .map_err(|_| Error::InvalidRequest)?
         .len()
-        > crate::MAX_FRAME_BYTES
+        > payload_limit(op)
     {
         return Err(Error::TooLarge);
     }
@@ -152,7 +163,14 @@ pub fn verify_mac(op: &Value, key: Option<&str>) -> bool {
         };
         bytes[index] = byte;
     }
-    let Ok(raw) = store::canonical_bytes(&tuple(op)) else {
+    // The tuple includes bounded envelope fields as well as the payload.
+    // Preserve the ordinary signing cap for every other operation.
+    let canonical_limit = if payload_limit(op) > crate::MAX_FRAME_BYTES {
+        payload_limit(op) + 8192
+    } else {
+        crate::MAX_FRAME_BYTES
+    };
+    let Ok(raw) = store::canonical_bytes_bounded(&tuple(op), canonical_limit) else {
         return false;
     };
     let Ok(mut verifier) = Hmac::<sha2::Sha256>::new_from_slice(key.as_bytes()) else {

@@ -1122,3 +1122,164 @@ fn native_cli_status_never_creates_store_or_contacts_configured_transport() {
         std::io::ErrorKind::WouldBlock
     );
 }
+
+// Legacy clients signed complete session snapshots. Keep this synthetic (no
+// transcript fixtures or user data), with every row below the existing cap.
+fn large_session_op(lamport: i64, bytes: usize) -> Value {
+    let mut value = op("placeholder", lamport);
+    value["class"] = json!("session");
+    value["op"] = json!("msgs");
+    let mut rows = Vec::new();
+    let mut remaining = bytes;
+    while remaining > 0 {
+        let size = remaining.min(60000);
+        rows.push(json!({"ts":"2026-09-29T00:00:00Z","role":"user","content":"Synthetic bounded session text. ".repeat(size / 32 + 1)[..size].to_owned()}));
+        remaining -= size;
+    }
+    value["payload"] = json!({"session_id":"synthetic-large-session","rows":rows});
+    let tuple = json!([
+        value["op_id"],
+        value["machine_id"],
+        value["machine_seq"],
+        value["lamport"],
+        value["class"],
+        value["op"],
+        value["project_key"],
+        value["payload"]
+    ]);
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(KEY.as_bytes()).unwrap();
+    mac.update(&store::canonical_bytes_bounded(&tuple, 6 * 1024 * 1024).unwrap());
+    value["mac"] = json!(mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>());
+    value
+}
+fn cursor(cfg: &Config, transport: &Transport) -> String {
+    store::read_only(cfg)
+        .unwrap()
+        .query_row(
+            "SELECT coalesce(pulled_cursor, '0') FROM sync_peers WHERE peer=?",
+            [transport.cursor_key()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+#[test]
+fn large_signed_session_hub_pull_keeps_memory_order_signature_and_duplicates() {
+    let (_temp, mut cfg) = config();
+    cfg.sync.classes.insert("sessions".into());
+    let mut before = op("Before large session", 1);
+    let mut session = large_session_op(2, 2_650_000);
+    let mut after = op("After large session", 3);
+    before["hub_seq"] = json!(1);
+    session["hub_seq"] = json!(2);
+    after["hub_seq"] = json!(3);
+    assert!(lore_core::sync_apply::verify_mac(&session, Some(KEY)));
+    let (url, handle) = fixture(vec![
+        (
+            200,
+            json!({"ops":[before.clone(),session.clone()],"next":2}),
+        ),
+        (200, json!({"ops":[after.clone()],"next":null})),
+        (200, json!({"ops":[before,session,after],"next":null})),
+    ]);
+    let transport = Transport::new(&url, Some("fixture-token".into()), "hub".into()).unwrap();
+    let report = net::pull(&cfg, &transport).unwrap();
+    assert_eq!(report["applied"], 3);
+    assert_eq!(report["failed"], 0);
+    assert_eq!(report["unverified"], 0);
+    assert_eq!(cursor(&cfg, &transport), "3");
+    assert_eq!(
+        lore_core::memory::read_entries(&cfg.root.join("USER.md")).unwrap(),
+        ["After large session", "Before large session"]
+    );
+    let conn = store::read_only(&cfg).unwrap();
+    let bytes: i64 = conn
+        .query_row("SELECT sum(length(content)) FROM msg", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(bytes, 2_650_000);
+    let repeated = net::pull_from(&cfg, &transport, Some(0), false).unwrap();
+    assert_eq!(repeated["duplicate"], 3);
+    assert_eq!(repeated["applied"], 0);
+    assert_eq!(
+        conn.query_row("SELECT sum(length(content)) FROM msg", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        bytes
+    );
+    assert_eq!(cursor(&cfg, &transport), "3");
+    handle.join().unwrap();
+}
+#[test]
+fn oversized_session_and_other_classes_refuse_before_effects() {
+    for mut rejected in [
+        large_session_op(2, 4 * 1024 * 1024),
+        large_session_op(2, 2_650_000),
+    ] {
+        // The second case cannot obtain the larger bound merely by carrying
+        // session-shaped fields under a memory or different session verb.
+        if lore_core::sync_apply::validate_envelope(&rejected).is_ok() {
+            rejected["class"] = json!("memory");
+        }
+        assert!(matches!(
+            lore_core::sync_apply::validate_envelope(&rejected),
+            Err(Error::TooLarge)
+        ));
+        let (_temp, cfg) = config();
+        let mut before = op("Must remain absent", 1);
+        before["hub_seq"] = json!(1);
+        rejected["hub_seq"] = json!(2);
+        let (url, handle) = fixture(vec![(200, json!({"ops":[before,rejected],"next":null}))]);
+        let transport = Transport::new(&url, None, "hub".into()).unwrap();
+        assert!(matches!(net::pull(&cfg, &transport), Err(Error::TooLarge)));
+        assert!(!cfg.root.join("USER.md").exists());
+        assert_eq!(cursor(&cfg, &transport), "0");
+        assert_eq!(
+            store::read_only(&cfg)
+                .unwrap()
+                .query_row("SELECT count(*) FROM sync_ops", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        handle.join().unwrap();
+    }
+    let mut other = large_session_op(2, 2_650_000);
+    other["op"] = json!("upsert");
+    assert!(matches!(
+        lore_core::sync_apply::validate_envelope(&other),
+        Err(Error::TooLarge)
+    ));
+}
+#[test]
+fn large_session_bad_signature_never_writes_messages_or_banks_cursor() {
+    let (_temp, mut cfg) = config();
+    cfg.sync.classes.insert("sessions".into());
+    let mut session = large_session_op(2, 2_650_000);
+    // Editing a signed class/payload never transfers the original authority.
+    let mut spoofed = session.clone();
+    spoofed["class"] = json!("memory");
+    assert!(!lore_core::sync_apply::verify_mac(&spoofed, Some(KEY)));
+    session["payload"]["rows"][0]["content"] = json!("Changed bounded session text. ".repeat(2000));
+    assert!(!lore_core::sync_apply::verify_mac(&session, Some(KEY)));
+    let mut before = op("Safe signed memory", 1);
+    before["hub_seq"] = json!(1);
+    session["hub_seq"] = json!(2);
+    let (url, handle) = fixture(vec![(200, json!({"ops":[before,session],"next":null}))]);
+    let transport = Transport::new(&url, None, "hub".into()).unwrap();
+    let report = net::pull(&cfg, &transport).unwrap();
+    assert_eq!(report["applied"], 1);
+    assert_eq!(report["failed"], 1);
+    assert_eq!(cursor(&cfg, &transport), "0");
+    assert_eq!(
+        store::read_only(&cfg)
+            .unwrap()
+            .query_row("SELECT count(*) FROM msg", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    handle.join().unwrap();
+}
