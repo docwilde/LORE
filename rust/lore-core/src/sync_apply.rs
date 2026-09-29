@@ -334,7 +334,7 @@ fn proposal_files(cfg: &Config, archive: bool) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 fn stage(cfg: &Config, item: &Value, uid: &str) -> Result<bool> {
-    if !item.is_object() || uid.is_empty() || uid.len() > 128 {
+    if !item.is_object() || !pending::valid_portable_uid(uid) {
         return Err(Error::InvalidRequest);
     }
     let dir = cfg.root.join("pending");
@@ -1101,6 +1101,9 @@ fn transcript(cfg: &Config, conn: &Connection, op: &Value) -> Result<Applied> {
 fn pending_op(cfg: &Config, op: &Value) -> Result<Applied> {
     let p = &op["payload"];
     let uid = text(p, "uid", 128)?;
+    if !pending::valid_portable_uid(uid) {
+        return Err(Error::InvalidRequest);
+    }
     match text(op, "op", 64)? {
         "stage" => {
             if !p["item"].is_object() {
@@ -1951,6 +1954,99 @@ mod tests {
                 == "shared-proposal"
         ));
     }
+    #[test]
+    fn portable_pending_uids_are_exact_data_keys_not_filenames() {
+        let (temp, cfg) = fixture();
+        let outside = temp.path().join("outside.json");
+        fs::write(&outside, "owned outside sentinel").unwrap();
+        for (index, uid) in ["sync:legacy:portable", "sync:雪", "../../outside.json"]
+            .into_iter()
+            .enumerate()
+        {
+            let base = (index as i64) * 4 + 1;
+            let staged = op(
+                &cfg,
+                &format!("stage-{index}"),
+                base,
+                "pending",
+                "stage",
+                None,
+                json!({"uid":uid,"item":{"kind":"memory","scope":"user","text":"owned fixture","writer":"model","source_engine":"codex"}}),
+            );
+            assert_eq!(apply_ops(&cfg, &[staged]).unwrap()["applied"], 1);
+            let resolve_wrong = op(
+                &cfg,
+                &format!("wrong-{index}"),
+                base + 1,
+                "pending",
+                "resolve",
+                None,
+                json!({"uid":format!("{uid}-other"),"status":"rejected"}),
+            );
+            assert_eq!(apply_ops(&cfg, &[resolve_wrong]).unwrap()["applied"], 1);
+            assert_eq!(proposal_files(&cfg, false).unwrap().len(), 1);
+            let resolved = op(
+                &cfg,
+                &format!("resolve-{index}"),
+                base + 2,
+                "pending",
+                "resolve",
+                None,
+                json!({"uid":uid,"status":"rejected"}),
+            );
+            assert_eq!(apply_ops(&cfg, &[resolved.clone()]).unwrap()["applied"], 1);
+            assert_eq!(apply_ops(&cfg, &[resolved]).unwrap()["duplicate"], 1);
+            let repeated = op(
+                &cfg,
+                &format!("again-{index}"),
+                base + 3,
+                "pending",
+                "resolve",
+                None,
+                json!({"uid":uid,"status":"rejected"}),
+            );
+            assert_eq!(apply_ops(&cfg, &[repeated]).unwrap()["applied"], 1);
+            assert!(proposal_files(&cfg, false).unwrap().is_empty());
+        }
+        assert_eq!(fs::read_to_string(outside).unwrap(), "owned outside sentinel");
+        assert!(!cfg.root.join("USER.md").exists());
+        let archived = proposal_files(&cfg, true).unwrap();
+        assert_eq!(archived.len(), 3);
+        for file in archived {
+            assert!(file.starts_with(cfg.root.join("pending/archive")));
+            assert!(config::valid_id(file.file_stem().unwrap().to_str().unwrap()));
+        }
+    }
+    #[test]
+    fn portable_pending_uid_bounds_and_controls_fail_closed() {
+        for (index, uid) in [
+            "".to_owned(),
+            "x".repeat(129),
+            "x\0y".to_owned(),
+            "x\ny".to_owned(),
+            "x\u{0085}y".to_owned(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (_temp, cfg) = fixture();
+            for (offset, verb) in ["stage", "resolve"].into_iter().enumerate() {
+                let incoming = op(
+                    &cfg,
+                    &format!("bad-{index}-{offset}"),
+                    offset as i64 + 1,
+                    "pending",
+                    verb,
+                    None,
+                    json!({"uid":uid,"status":"rejected","item":{"kind":"memory","scope":"user","text":"owned fixture"}}),
+                );
+                assert_eq!(apply_ops(&cfg, &[incoming]).unwrap()["failed"], 1);
+                assert!(proposal_files(&cfg, false).unwrap().is_empty());
+            }
+        }
+    }
+
+
     #[test]
     fn human_approval_refuses_changed_identity_model_and_missing_dependency() {
         let (_temp, cfg) = fixture();

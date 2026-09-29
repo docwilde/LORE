@@ -555,10 +555,15 @@ fn archive_inner(
     }
     Ok(())
 }
+/// Portable identities are equality keys, never local filenames. Preserve the
+/// wire byte bound while refusing control characters in a human review identity.
+pub(crate) fn valid_portable_uid(uid: &str) -> bool {
+    !uid.is_empty() && uid.len() <= 128 && !uid.chars().any(char::is_control)
+}
 /// Internal MAC-verified sync replay only; does not apply proposal content or
 /// infer human authority from its stored fields. The dispatcher owns admission.
 pub(crate) fn archive_uid(cfg: &Config, uid: &str, status: &str) -> Result<bool> {
-    if !valid_id(uid) || !matches!(status, "approved" | "rejected") {
+    if !valid_portable_uid(uid) || !matches!(status, "approved" | "rejected") {
         return Err(Error::InvalidRequest);
     }
     let matches = ids(cfg)?
