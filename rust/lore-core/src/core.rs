@@ -21,6 +21,7 @@ impl Core {
             "scrub",
             "snapshot",
             "pending",
+            "pending_cluster_v1",
             "sync_state",
             "refresh",
             "filemap",
@@ -90,6 +91,11 @@ impl Core {
                 json!({"projects_dir":config.projects,"slug":crate::config::project_slug(crate::gate::cwd(req)?)})
             }
             "pending" => crate::pending::list(config, req)?,
+            "pending_cluster_v1" => {
+                let mut request = req.clone();
+                request["cluster"] = json!(true);
+                crate::standalone_ops::pending_list(config, &request)?
+            }
             "pending_review_v1" => crate::pending::review(config, req)?,
             "resolve_reviewed_v1" => match crate::pending::resolve(config, req, auth, &Applier) {
                 Ok(value) => value,
