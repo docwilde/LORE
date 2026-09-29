@@ -2,6 +2,31 @@ use lore_core::{config::Config, gate::Authority, memory, store, sync_admin, sync
 use serde_json::{json, Value};
 use std::{path::PathBuf, process::Command};
 const KEY: &str = "lore-sync-protocol-test-key-DO-NOT-USE-IN-PRODUCTION";
+
+#[test]
+fn clustered_pending_bridge_reuses_canonical_groups_without_mutations() {
+    let (_t, cfg) = config();
+    let cwd = "/synthetic/project";
+    for item in [
+        json!({"kind":"memory","action":"add","scope":"user","text":"Rust builds use two worker jobs"}),
+        json!({"kind":"memory","action":"add","scope":"user","text":"Rust builds use two concurrent worker jobs"}),
+        json!({"kind":"skill","name":"fixture-skill","action":"add","body":"Unrelated skill"}),
+        json!({"kind":"memory","action":"add","scope":"project","project":"other-project","text":"Hidden project entry"}),
+    ] {
+        lore_core::gate::stage(&cfg, &item, &Authority::Interactive { agent: "fixture".into(), engine: "test".into() }).unwrap();
+    }
+    let before = lore_core::pending::ids(&cfg).unwrap();
+    let mut core = lore_core::Core::new(cfg.clone(), Authority::Interactive { agent: "fixture".into(), engine: "test".into() });
+    assert!(lore_core::Core::capabilities().contains(&"pending_cluster_v1"));
+    let actual = core.execute(&json!({"op":"pending_cluster_v1","cwd":cwd})).unwrap();
+    let expected = lore_core::standalone_ops::pending_list(&cfg, &json!({"cwd":cwd,"cluster":true})).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual["memory_clusters"].as_array().unwrap().len(), 1);
+    assert_eq!(actual["memory_clusters"][0].as_array().unwrap().len(), 2);
+    assert_eq!(actual["other"].as_array().unwrap().len(), 1);
+    assert_eq!(lore_core::pending::ids(&cfg).unwrap(), before);
+    assert!(!cfg.root.join("USER.md").exists());
+}
 fn config() -> (tempfile::TempDir, Config) {
     let t = tempfile::tempdir().unwrap();
     let mut c = Config::for_root(t.path().join("root"));
