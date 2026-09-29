@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.62.4 — 2026-09-29
+
+**Session sync**
+
+- Fix **`sync_apply::validate_envelope`** to receive signed session message
+  snapshots up to 4 MiB; keep per-row limits and signature checks.
+- Preserve failed cursors when oversized unsigned data cannot enter review.
+  Historical unsigned operations still require reconciliation.
+
+**Pending review**
+
+- Expose **`pending_cluster_v1`** through the native dispatcher using the
+  existing CLI clustering rules; individual review and approval stay exact.
+
 ## 0.62.3 — 2026-09-29
 
 **Shared native settings**
