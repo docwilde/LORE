@@ -455,7 +455,7 @@ pub fn exchange(cfg: &Config, targets: &[Transport], push_hub: bool) -> Result<V
     Ok(reports)
 }
 fn empty_report() -> Value {
-    json!({"applied":0,"deferred":0,"unverified":0,"duplicate":0,"unknown":0,"failed":0,"skipped":0,"may_have_applied":0,"staged":0})
+    json!({"applied":0,"deferred":0,"quarantined":0,"unverified":0,"duplicate":0,"unknown":0,"failed":0,"skipped":0,"may_have_applied":0,"staged":0})
 }
 /// All framing is checked before the first receiver call. Split by bytes and
 /// count only after canonical ordering, retaining cross-page merge ordering.
@@ -870,7 +870,7 @@ pub fn export_bundle(cfg: &Config, path: &Path) -> Result<Value> {
         .map(|s| s.to_string())
         .collect::<BTreeSet<_>>();
     let mut stmt = conn.prepare(&format!(
-        "{SELECT} WHERE applied IN (0,1) AND class IN ('memory','filemap','belief','pending','skill') ORDER BY lamport,machine_id,machine_seq LIMIT 100001"
+        "{SELECT} WHERE applied IN (0,1,5) AND class IN ('memory','filemap','belief','pending','skill') ORDER BY lamport,machine_id,machine_seq LIMIT 100001"
     ))?;
     let mut ops = Vec::new();
     let mut budget = 0;

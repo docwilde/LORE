@@ -64,6 +64,9 @@ fn read_state(cfg: &Config) -> Result<Value> {
     let unverified = conn.query_row("SELECT count(*) FROM sync_ops WHERE applied=2", [], |r| {
         crate::beliefs::sql_count(r, 0)
     })?;
+    let quarantined = conn.query_row("SELECT count(*) FROM sync_ops WHERE applied=5", [], |r| {
+        crate::beliefs::sql_count(r, 0)
+    })?;
     let mut latest = None;
     let mut pull = conn.prepare("SELECT last_pull FROM sync_peers WHERE peer=?")?;
     for key in active {
@@ -126,7 +129,7 @@ fn read_state(cfg: &Config) -> Result<Value> {
         }
     }
     Ok(
-        json!({"last_pull_age_s":age,"unpushed":unpushed,"conflicts":conflicts,"unverified":unverified}),
+        json!({"last_pull_age_s":age,"unpushed":unpushed,"conflicts":conflicts,"unverified":unverified,"quarantined":quarantined}),
     )
 }
 pub fn record(cfg: &Config, req: &Value, authority: &Authority) -> Result<Value> {

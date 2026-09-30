@@ -22,6 +22,9 @@ pub const APPLIED_YES: i64 = 1;
 pub const APPLIED_UNVERIFIED: i64 = 2;
 pub const APPLIED_UNKNOWN: i64 = 3;
 pub const APPLIED_FAILED: i64 = 4;
+/// Authenticated historical belief data with a missing required UID reference.
+/// Keep the original operation for audit/export, but never replay it.
+pub const APPLIED_QUARANTINED: i64 = 5;
 const CLASSES: &[&str] = &[
     "memory",
     "filemap",
@@ -58,6 +61,7 @@ enum Applied {
 struct Report {
     applied: usize,
     deferred: usize,
+    quarantined: usize,
     unverified: usize,
     duplicate: usize,
     unknown: usize,
@@ -68,7 +72,7 @@ struct Report {
 }
 impl Report {
     fn value(&self) -> Value {
-        json!({"applied":self.applied,"deferred":self.deferred,"unverified":self.unverified,"duplicate":self.duplicate,"unknown":self.unknown,"failed":self.failed,"skipped":self.skipped,"may_have_applied":self.partial,"staged":self.staged})
+        json!({"applied":self.applied,"deferred":self.deferred,"quarantined":self.quarantined,"unverified":self.unverified,"duplicate":self.duplicate,"unknown":self.unknown,"failed":self.failed,"skipped":self.skipped,"may_have_applied":self.partial,"staged":self.staged})
     }
 }
 fn text<'a>(v: &'a Value, key: &str, cap: usize) -> Result<&'a str> {
@@ -577,6 +581,23 @@ fn belief(cfg: &Config, conn: &Connection, op: &Value) -> Result<Applied> {
         }
         _ => Ok(Applied::Unknown),
     }
+}
+/// Only absent/null *required references* are quarantined. An unknown UID may
+/// arrive in a later page and remains deferred; malformed non-null values keep
+/// their normal validation failure path. The optional outcome UID is not a ref.
+fn missing_required_belief_uid(op: &Value) -> bool {
+    if op["class"] != "belief" {
+        return false;
+    }
+    let required: &[&str] = match op["op"].as_str() {
+        Some("insert" | "reinforce" | "retract" | "status") => &["uid"],
+        Some("supersede") => &["uid", "by_uid"],
+        Some("edge") => &["src_uid", "dst_uid"],
+        Some("outcome") => &["belief_uid"],
+        Some("dream_reviewed") => &["a_uid", "b_uid"],
+        _ => return false,
+    };
+    required.iter().any(|field| op["payload"].get(*field).is_none_or(Value::is_null))
 }
 fn portable_key(key: &str, kind: &str, bucket: &str) -> Result<String> {
     let Some((prefix, digest)) = key.rsplit_once(':') else {
@@ -1272,8 +1293,10 @@ pub fn apply_ops(cfg: &Config, ops: &[Value]) -> Result<Value> {
             continue;
         }
         let unknown = !CLASSES.contains(&text(&op, "class", 64)?);
+        let quarantine = missing_required_belief_uid(&op);
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !record(&tx, &op, if unknown { APPLIED_UNKNOWN } else { APPLIED_NO })? {
+        let initial = if unknown { APPLIED_UNKNOWN } else if quarantine { APPLIED_QUARANTINED } else { APPLIED_NO };
+        if !record(&tx, &op, initial)? {
             report.duplicate += 1;
             tx.commit()?;
             continue;
@@ -1288,6 +1311,10 @@ pub fn apply_ops(cfg: &Config, ops: &[Value]) -> Result<Value> {
         tx.commit()?;
         if unknown {
             report.unknown += 1;
+            continue;
+        }
+        if quarantine {
+            report.quarantined += 1;
             continue;
         }
         match effect(cfg, &mut conn, &op) {
@@ -1341,6 +1368,11 @@ fn retry_with_connection(cfg: &Config, conn: &mut Connection) -> Result<usize> {
                 progress = true;
                 continue;
             }
+            if missing_required_belief_uid(&op) {
+                mark(conn, &op, APPLIED_QUARANTINED)?;
+                progress = true;
+                continue;
+            }
             // Only previously authenticated/approved state zero is eligible.
             // A rotated or removed key cannot turn it into an unverified op.
             match effect(cfg, conn, &op) {
@@ -1373,6 +1405,9 @@ pub fn retry_deferred(cfg: &Config) -> Result<usize> {
 pub fn approve(cfg: &Config, op: &Value, authority: &Authority) -> Result<()> {
     authority.require_review()?;
     validate_envelope(op)?;
+    if missing_required_belief_uid(op) {
+        return Err(Error::InvalidRequest);
+    }
     if disabled(cfg, text(op, "class", 64)?) {
         return Err(Error::Untrusted);
     }
@@ -2347,5 +2382,69 @@ mod tests {
             memory::read_entries(&cfg.root.join("USER.md")).unwrap(),
             ["same visible fact"]
         );
+    }
+
+    #[test]
+    fn signed_missing_belief_references_are_quarantined_without_rewriting_or_effects() {
+        let (_temp, cfg) = fixture();
+        let cases = [
+            ("insert", json!({"uid":null,"claim":"must not create","confidence":0.9})),
+            ("reinforce", json!({"uid":null,"confidence":0.9})),
+            ("supersede", json!({"uid":"unknown","by_uid":null})),
+            ("retract", json!({"uid":null})),
+            ("status", json!({"status":"active"})),
+            ("edge", json!({"src_uid":null,"dst_uid":"unknown","rel":"depends_on"})),
+            ("outcome", json!({"belief_uid":null,"uid":"optional-outcome-id"})),
+            ("dream_reviewed", json!({"a_uid":"unknown","b_uid":null})),
+        ];
+        let ops = cases.iter().enumerate().map(|(i, (verb, payload))| {
+            op(&cfg, &format!("quarantine-{i}"), i as i64 + 1, "belief", verb, None, payload.clone())
+        }).collect::<Vec<_>>();
+        let report = apply_ops(&cfg, &ops).unwrap();
+        assert_eq!(report["quarantined"], cases.len());
+        assert_eq!(report["applied"], 0);
+        assert_eq!(report["deferred"], 0);
+        assert_eq!(retry_deferred(&cfg).unwrap(), 0);
+        let conn = store::connect(&cfg).unwrap();
+        for original in &ops {
+            assert_eq!(state(&conn, original).unwrap(), Some(APPLIED_QUARANTINED));
+            let stored = imported(&conn).into_iter().find(|row| row["op_id"] == original["op_id"]).unwrap();
+            assert_eq!(stored["payload"], original["payload"]);
+            assert_eq!(stored["mac"], original["mac"]);
+        }
+        assert_eq!(conn.query_row("SELECT count(*) FROM beliefs", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        drop(conn);
+        assert_eq!(apply_ops(&cfg, &ops).unwrap()["duplicate"], cases.len());
+        let path = _temp.path().join("quarantined-export.json");
+        assert_eq!(crate::sync_network::export_bundle(&cfg, &path).unwrap()["count"], cases.len());
+        let bundle: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for original in &ops {
+            assert!(bundle["ops"].as_array().unwrap().iter().any(|row| row["op_id"] == original["op_id"] && row["mac"] == original["mac"]));
+        }
+    }
+
+    #[test]
+    fn retry_migrates_legacy_null_refs_but_unknown_dependencies_stay_deferred() {
+        let (_temp, cfg) = fixture();
+        let legacy = op(&cfg, "legacy-null", 1, "belief", "edge", None,
+            json!({"src_uid":"known-later","dst_uid":null,"rel":"depends_on"}));
+        let unknown = op(&cfg, "unknown-ref", 2, "belief", "reinforce", None,
+            json!({"uid":"known-later","confidence":0.8}));
+        let conn = store::connect(&cfg).unwrap();
+        assert!(record(&conn, &legacy, APPLIED_NO).unwrap());
+        drop(conn);
+        assert_eq!(retry_deferred(&cfg).unwrap(), 0);
+        let conn = store::connect(&cfg).unwrap();
+        assert_eq!(state(&conn, &legacy).unwrap(), Some(APPLIED_QUARANTINED));
+        drop(conn);
+        assert_eq!(apply_ops(&cfg, &[unknown.clone()]).unwrap()["deferred"], 1);
+        let conn = store::connect(&cfg).unwrap();
+        assert_eq!(state(&conn, &unknown).unwrap(), Some(APPLIED_NO));
+        drop(conn);
+        let mut forged = op(&cfg, "forged-null", 3, "belief", "retract", None, json!({"uid":null}));
+        forged["mac"] = json!("0".repeat(64));
+        assert_eq!(apply_ops(&cfg, &[forged.clone()]).unwrap()["unverified"], 1);
+        let conn = store::connect(&cfg).unwrap();
+        assert_eq!(state(&conn, &forged).unwrap(), Some(APPLIED_UNVERIFIED));
     }
 }

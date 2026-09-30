@@ -652,7 +652,8 @@ fn large_bundle_uses_receiver_byte_budget_and_empty_report_is_complete() {
     net::export_bundle(&src, &empty).unwrap();
     let report = net::import_bundle(&cfg, &empty).unwrap();
     assert_eq!(report["unverified"], 0);
-    assert_eq!(report.as_object().unwrap().len(), 9);
+    assert_eq!(report["quarantined"], 0);
+    assert_eq!(report.as_object().unwrap().len(), 10);
 }
 
 #[test]
