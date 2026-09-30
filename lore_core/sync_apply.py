@@ -164,8 +164,10 @@ MAX_SIGNED_64 = 2 ** 63
 # oversized payload into a file on disk that nothing ever cleans up. 1 MiB is
 # far above every class that has a writer -- a memory entry is capped at
 # thousands of characters and a skill is a SKILL.md -- and far below the size
-# at which a pull is an attack.
+# at which a pull is an attack. Older session message snapshots can exceed
+# this ordinary frame size; match the native receiver's narrow 4 MiB exception.
 MAX_OP_BYTES = 1024 * 1024
+MAX_SESSION_OP_BYTES = 4 * 1024 * 1024
 
 
 class InvalidOp(ValueError):
@@ -1426,8 +1428,10 @@ def _envelope_error(op: object) -> "str | None":
         size = len(json.dumps(op["payload"], sort_keys=True).encode("utf-8"))
     except (TypeError, ValueError) as exc:
         return f"payload does not encode as JSON ({exc})"
-    if size > MAX_OP_BYTES:
-        return f"payload is {size} bytes, over the {MAX_OP_BYTES}-byte cap"
+    limit = (MAX_SESSION_OP_BYTES if op["class"] == "session"
+             and op["op"] == "msgs" else MAX_OP_BYTES)
+    if size > limit:
+        return f"payload is {size} bytes, over the {limit}-byte cap"
     return None
 
 

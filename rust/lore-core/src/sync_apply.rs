@@ -590,7 +590,7 @@ fn missing_required_belief_uid(op: &Value) -> bool {
         return false;
     }
     let required: &[&str] = match op["op"].as_str() {
-        Some("insert" | "reinforce" | "retract" | "status") => &["uid"],
+        Some("reinforce" | "retract" | "status") => &["uid"],
         Some("supersede") => &["uid", "by_uid"],
         Some("edge") => &["src_uid", "dst_uid"],
         Some("outcome") => &["belief_uid"],
@@ -2388,7 +2388,6 @@ mod tests {
     fn signed_missing_belief_references_are_quarantined_without_rewriting_or_effects() {
         let (_temp, cfg) = fixture();
         let cases = [
-            ("insert", json!({"uid":null,"claim":"must not create","confidence":0.9})),
             ("reinforce", json!({"uid":null,"confidence":0.9})),
             ("supersede", json!({"uid":"unknown","by_uid":null})),
             ("retract", json!({"uid":null})),
