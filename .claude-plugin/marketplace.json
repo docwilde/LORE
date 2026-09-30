@@ -9,7 +9,7 @@
       "name": "lore",
       "source": "./",
       "description": "Shared memory for Claude Code, Codex, and DOXA: capped curated facts, evidence-backed beliefs, FTS5 session search, staged review, learned skills, and signed sync.",
-      "version": "0.62.8"
+      "version": "0.62.9"
     }
   ]
 }

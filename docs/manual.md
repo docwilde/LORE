@@ -31,6 +31,12 @@ or the installed `lore` command:
 
 `inject` · `snapshot` · `memory` · `filemap` · `search` · `session` · `index` · `review` · `backfill` · `pending` · `approve` · `reject` · `belief` · `ask` · `outcome` · `audit` · `consult` · `stats` · `dream` · `crosscheck` · `status` · `motd` · `statusline` · `provenance` · `config` · `doctor` · `sync` · `teardown` · `reset`
 
+`lore status` reports the pending count across the whole store. `lore pending
+list` and the DOXA browser show global proposals plus those bound to the
+current project; they do not include proposals for unrelated projects. A
+file-map, skill, or belief proposal with a project identity is reviewed only
+from that project.
+
 ## Six stores
 
 | Store | Location | Cap | Gate |
