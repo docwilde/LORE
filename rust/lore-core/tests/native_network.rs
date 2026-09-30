@@ -1215,6 +1215,20 @@ fn large_signed_session_hub_pull_keeps_memory_order_signature_and_duplicates() {
     handle.join().unwrap();
 }
 #[test]
+fn newer_session_snapshot_does_not_read_prior_large_payload() {
+    let (_temp, mut cfg) = config();
+    cfg.sync.classes.insert("sessions".into());
+    let prior = large_session_op(1, 2_650_000);
+    let next = large_session_op(2, 800);
+    assert_eq!(lore_core::sync_apply::apply_ops(&cfg, &[prior]).unwrap()["applied"], 1);
+    let report = lore_core::sync_apply::apply_ops(&cfg, &[next]).unwrap();
+    assert_eq!(report["applied"], 1);
+    assert_eq!(report["failed"], 0);
+    let conn = store::read_only(&cfg).unwrap();
+    let bytes: i64 = conn.query_row("SELECT sum(length(content)) FROM msg", [], |r| r.get(0)).unwrap();
+    assert_eq!(bytes, 800);
+}
+#[test]
 fn oversized_session_and_other_classes_refuse_before_effects() {
     for mut rejected in [
         large_session_op(2, 4 * 1024 * 1024),

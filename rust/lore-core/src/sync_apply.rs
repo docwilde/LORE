@@ -847,13 +847,21 @@ fn prior_ops(conn: &Connection, class: &str, verb: &str) -> Result<Vec<Value>> {
     stored_wire_rows(&mut stmt, params![class, verb])
 }
 fn newer(conn: &Connection, op: &Value, verb: &str, field: &str, identity: &str) -> Result<bool> {
-    Ok(prior_ops(conn, text(op, "class", 64)?, verb)?
-        .iter()
-        .any(|old| {
-            old["op_id"] != op["op_id"]
-                && old["payload"][field] == identity
-                && order(old) > order(op)
-        }))
+    let path = match field {
+        "session_id" => "$.session_id",
+        "name" => "$.name",
+        _ => return Err(Error::InvalidRequest),
+    };
+    let (lamport, machine, sequence) = order(op);
+    let present = conn.query_row(
+        "SELECT 1 FROM sync_ops WHERE applied=? AND class=? AND op=? AND op_id<>? \
+         AND CASE WHEN json_valid(payload) THEN json_extract(payload, ?) END=? \
+         AND (lamport,machine_id,machine_seq)>(?,?,?) LIMIT 1",
+        params![APPLIED_YES, text(op, "class", 64)?, verb, text(op, "op_id", 128)?,
+            path, identity, lamport, machine, sequence],
+        |row| row.get::<_, i64>(0),
+    ).optional()?;
+    Ok(present.is_some())
 }
 fn session(conn: &Connection, op: &Value) -> Result<Applied> {
     let p = &op["payload"];
