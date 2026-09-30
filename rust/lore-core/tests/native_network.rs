@@ -9,9 +9,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
+    sync::Mutex,
     thread,
 };
 const KEY: &str = "lore-sync-protocol-test-key-DO-NOT-USE-IN-PRODUCTION";
+static PEER_ENV_LOCK: Mutex<()> = Mutex::new(());
 fn config() -> (tempfile::TempDir, Config) {
     let t = tempfile::tempdir().unwrap();
     let mut c = Config::for_root(t.path().join("root"));
@@ -682,6 +684,7 @@ fn peer_identity_alone_never_authenticates_embedded_server() {
 
 #[test]
 fn peer_cursor_keys_preserve_ports_paths_and_endpoint_aliases() {
+    let _guard = PEER_ENV_LOCK.lock().unwrap();
     assert_eq!(
         Transport::peer("host.test").unwrap().peer,
         Transport::peer("http://host.test:8765/v1").unwrap().peer
@@ -702,6 +705,7 @@ fn peer_cursor_keys_preserve_ports_paths_and_endpoint_aliases() {
 
 #[test]
 fn configured_sources_deduplicate_and_bootstrap_requires_one() {
+    let _guard = PEER_ENV_LOCK.lock().unwrap();
     struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -842,6 +846,7 @@ fn native_cli_import_reports_possible_effects_within_first_chunk() {
 
 #[test]
 fn changing_default_peer_port_cannot_reuse_another_endpoint_cursor() {
+    let _guard = PEER_ENV_LOCK.lock().unwrap();
     struct Restore(Option<std::ffi::OsString>);
     impl Drop for Restore {
         fn drop(&mut self) {

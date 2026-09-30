@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.62.6 — 2026-09-30
+
+**Historical session replay**
+
+- Fix **`sync_apply::newer`** to compare session snapshot order in SQLite without
+  loading prior payloads under the smaller generic text limit.
+- Receive large signed session snapshots in sequence. Historical null belief
+  references still fail closed and require source repair.
+
+**Network tests**
+
+- Serialize environment-changing peer tests so parallel runs retain their
+  configured endpoint identity.
+
 ## 0.62.5 — 2026-09-30
 
 **Historical sync repair**
