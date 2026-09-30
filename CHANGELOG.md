@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.62.8 — 2026-09-30
+
+**Credential scrubbing**
+
+- Fix **`scrub::replacement`** to recognize only redaction markers LORE emits.
+  Unknown marker text in a secret field is redacted during replay and ingestion.
+
 ## 0.62.7 — 2026-09-30
 
 **Historical sync convergence**
