@@ -470,6 +470,8 @@ def pull_summary(report: dict, peer: str = HUB_PEER) -> str:
         parts.append(f"{report['duplicate']} already held")
     if report.get("deferred"):
         parts.append(f"{report['deferred']} waiting for a dependency")
+    if report.get("quarantined"):
+        parts.append(f"{report['quarantined']} quarantined (missing UID reference)")
     if report.get("unverified"):
         parts.append(f"{report['unverified']} unverified (staged, NOT applied)")
     if report.get("unknown"):

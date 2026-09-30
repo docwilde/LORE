@@ -16,7 +16,8 @@ from pathlib import Path
 
 from .store import db_connect
 from .sync_apply import (
-    APPLIED_NO, APPLIED_YES, _envelope_error, apply_ops, verify_mac,
+    APPLIED_NO, APPLIED_YES, APPLIED_QUARANTINED,
+    _envelope_error, apply_ops, verify_mac,
 )
 from .sync_oplog import class_enabled, hmac_key
 
@@ -67,9 +68,9 @@ def _wire_ops(conn: sqlite3.Connection, classes: set[str]) -> list[dict]:
     rows = conn.execute(
         "SELECT op_id, machine_id, machine_seq, lamport, class, op,"
         " project_key, payload, mac, created FROM sync_ops"
-        f" WHERE class IN ({placeholders}) AND applied IN (?, ?)"
+        f" WHERE class IN ({placeholders}) AND applied IN (?, ?, ?)"
         " ORDER BY lamport, machine_id, machine_seq",
-        (*sorted(classes), APPLIED_NO, APPLIED_YES),
+        (*sorted(classes), APPLIED_NO, APPLIED_YES, APPLIED_QUARANTINED),
     )
     try:
         return [
@@ -202,4 +203,7 @@ def cmd_sync_import(args) -> int:
         print("unverified ops were staged; inspect `lore pending`", file=sys.stderr)
     if report["failed"]:
         print("verified ops failed to apply; inspect the errors above", file=sys.stderr)
-    return 1 if report["unverified"] or report["failed"] else 0
+    if report["quarantined"]:
+        print("belief ops without required UID references were"
+              " quarantined; inspect `lore sync status`", file=sys.stderr)
+    return 1 if report["unverified"] or report["failed"] or report["quarantined"] else 0

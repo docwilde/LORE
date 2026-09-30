@@ -157,6 +157,7 @@ def cmd_sync_status(args) -> int:
     # containment count -- ops whose MAC was missing or wrong, staged as
     # pending proposals and applied by nothing but a human.
     waiting, unverified = deferred_op_count(conn), unverified_op_count(conn)
+    quarantined = quarantined_op_count(conn)
     failed = failed_op_count(conn)
     if waiting:
         print(f"waiting:      {waiting} op(s) held for a missing dependency"
@@ -164,6 +165,9 @@ def cmd_sync_status(args) -> int:
     if unverified:
         print(f"unverified:   {unverified} op(s) staged, NOT applied —"
               " review with `lore pending`")
+    if quarantined:
+        print(f"quarantined:  {quarantined} belief op(s) missing a"
+              " required UID reference — preserved, NOT applied or retried")
     # The terminal state per-op isolation writes: verified, of a class this
     # build implements, and the applier refused or raised. Nothing retries
     # these and nothing stages them, so this line is the only place they are
