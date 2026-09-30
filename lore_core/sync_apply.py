@@ -109,6 +109,7 @@ __all__ = [
     'APPLIED_UNVERIFIED',
     'APPLIED_UNKNOWN',
     'APPLIED_FAILED',
+    'APPLIED_QUARANTINED',
     'MAX_SIGNED_64',
     'MAX_OP_BYTES',
     'InvalidOp',
@@ -123,10 +124,11 @@ __all__ = [
     'deferred_op_count',
     'unverified_op_count',
     'failed_op_count',
+    'quarantined_op_count',
 ]
 
 
-# `sync_ops.applied`, five states rather than the schema's implied two.
+# `sync_ops.applied`, six states rather than the schema's implied two.
 # sync.md fixes the meaning of 0 and 1 ("an edge whose endpoint uid is unknown
 # is held in sync_ops with applied = 0 and retried after the next pull"), and
 # an op staged as unverified is neither: it must never be retried by the
@@ -145,6 +147,7 @@ APPLIED_YES = 1         # applied to the local store
 APPLIED_UNVERIFIED = 2  # MAC missing or wrong: staged as a proposal, never applied
 APPLIED_UNKNOWN = 3     # verified, but of a class this build does not implement
 APPLIED_FAILED = 4      # verified and known, but applying it was refused or raised
+APPLIED_QUARANTINED = 5 # admitted belief op with a missing required UID reference
 
 # The receiver's bound on the two integers of the canonical key. SQLite stores
 # an INTEGER in at most 8 bytes, so a `lamport` of 2**63 is not a large clock,
@@ -161,8 +164,10 @@ MAX_SIGNED_64 = 2 ** 63
 # oversized payload into a file on disk that nothing ever cleans up. 1 MiB is
 # far above every class that has a writer -- a memory entry is capped at
 # thousands of characters and a skill is a SKILL.md -- and far below the size
-# at which a pull is an attack.
+# at which a pull is an attack. Older session message snapshots can exceed
+# this ordinary frame size; match the native receiver's narrow 4 MiB exception.
 MAX_OP_BYTES = 1024 * 1024
+MAX_SESSION_OP_BYTES = 4 * 1024 * 1024
 
 
 class InvalidOp(ValueError):
@@ -182,6 +187,29 @@ _KNOWN_CLASSES = {
     "memory", "filemap", "belief", "pending", "skill", "session",
     "transcript", "tabset", "worktree",
 }
+
+# An absent reference cannot arrive in a later page: the signed payload will
+# always name nothing. Keep such ops intact in the log for audit and relay,
+# but do not repeatedly dispatch them or infer a UID from claim text.
+_BELIEF_UID_REFERENCES = {
+    "reinforce": ("uid",),
+    "supersede": ("uid", "by_uid"),
+    "retract": ("uid",),
+    "status": ("uid",),
+    "edge": ("src_uid", "dst_uid"),
+    "outcome": ("belief_uid",),
+    "dream_reviewed": ("a_uid", "b_uid"),
+}
+
+
+def _missing_belief_uid_reference(op: dict) -> "str | None":
+    if op["class"] != "belief":
+        return None
+    payload = op["payload"]
+    for field in _BELIEF_UID_REFERENCES.get(op["op"], ()):
+        if payload.get(field) is None:
+            return field
+    return None
 
 
 def canonical_key(op: dict) -> tuple:
@@ -1229,12 +1257,13 @@ def apply_ops(conn: sqlite3.Connection, ops: "list[dict]", *,
     pending proposal and nothing else, and in particular it earns no place in
     the log's ordering.
 
-    Returns {"applied", "deferred", "unverified", "duplicate", "unknown",
-    "failed", "skipped"}.
+    Returns {"applied", "deferred", "quarantined", "unverified",
+    "duplicate", "unknown", "failed", "skipped"}.
     """
     key = hmac_key() if key is None else key
-    report = {"applied": 0, "deferred": 0, "unverified": 0, "duplicate": 0,
-              "unknown": 0, "failed": 0, "skipped": 0}
+    report = {"applied": 0, "deferred": 0, "quarantined": 0,
+              "unverified": 0, "duplicate": 0, "unknown": 0,
+              "failed": 0, "skipped": 0}
     machine_id, _label = get_or_create_machine(conn)
     deferred_ids: "set[str]" = set()
 
@@ -1287,6 +1316,13 @@ def apply_ops(conn: sqlite3.Connection, ops: "list[dict]", *,
             conn.commit()
             continue
 
+        missing_ref = _missing_belief_uid_reference(op)
+        if missing_ref is not None:
+            _mark(conn, op["op_id"], APPLIED_QUARANTINED)
+            report["quarantined"] += 1
+            conn.commit()
+            continue
+
         # Apply
         outcome = _dispatch_isolated(conn, op)
         if outcome is True:
@@ -1306,16 +1342,17 @@ def apply_ops(conn: sqlite3.Connection, ops: "list[dict]", *,
         retry_deferred(conn, key=key)
         # Count outcomes for THIS page's held ops: retry also drains earlier
         # pages, and a held op can fail terminally instead of landing.
-        applied, failed, still = _deferred_outcomes(conn, deferred_ids)
+        applied, failed, quarantined, still = _deferred_outcomes(conn, deferred_ids)
         report["applied"] += applied
         report["failed"] += failed
+        report["quarantined"] += quarantined
         report["deferred"] = still
     return report
 
 
-def _deferred_outcomes(conn: sqlite3.Connection, op_ids: "set[str]") -> tuple[int, int, int]:
-    """Final applied, failed, and held counts for this page's deferred ops."""
-    applied = failed = held = 0
+def _deferred_outcomes(conn: sqlite3.Connection, op_ids: "set[str]") -> tuple[int, int, int, int]:
+    """Final applied, failed, quarantined, and held counts for this page."""
+    applied = failed = quarantined = held = 0
     for op_id in op_ids:
         row = conn.execute("SELECT applied FROM sync_ops WHERE op_id = ?",
                            (op_id,)).fetchone()
@@ -1323,9 +1360,11 @@ def _deferred_outcomes(conn: sqlite3.Connection, op_ids: "set[str]") -> tuple[in
             applied += 1
         elif row and row[0] == APPLIED_FAILED:
             failed += 1
+        elif row and row[0] == APPLIED_QUARANTINED:
+            quarantined += 1
         elif row and row[0] == APPLIED_NO:
             held += 1
-    return applied, failed, held
+    return applied, failed, quarantined, held
 
 
 def _log_refusal(what: str, why: str) -> None:
@@ -1389,8 +1428,10 @@ def _envelope_error(op: object) -> "str | None":
         size = len(json.dumps(op["payload"], sort_keys=True).encode("utf-8"))
     except (TypeError, ValueError) as exc:
         return f"payload does not encode as JSON ({exc})"
-    if size > MAX_OP_BYTES:
-        return f"payload is {size} bytes, over the {MAX_OP_BYTES}-byte cap"
+    limit = (MAX_SESSION_OP_BYTES if op["class"] == "session"
+             and op["op"] == "msgs" else MAX_OP_BYTES)
+    if size > limit:
+        return f"payload is {size} bytes, over the {limit}-byte cap"
     return None
 
 
@@ -1443,6 +1484,11 @@ def retry_deferred(conn: sqlite3.Connection, *, key: "str | None" = None) -> int
             })
         progress, applied = 0, 0
         for op in canonical_order(pending_ops):
+            if _missing_belief_uid_reference(op) is not None:
+                _mark(conn, op["op_id"], APPLIED_QUARANTINED)
+                progress += 1
+                conn.commit()
+                continue
             if _class_disabled(op["class"]):
                 # The receive allow-list may have changed since this verified
                 # op was held. Keep it held so re-enabling the class can retry.
@@ -1507,6 +1553,11 @@ def apply_op_after_approval(op: dict) -> "str | None":
         observe_lamport(conn, machine_id, op["lamport"])
         outcome = _dispatch_isolated(conn, op)
         if outcome is False:
+            if _missing_belief_uid_reference(op) is not None:
+                _mark(conn, op["op_id"], APPLIED_QUARANTINED)
+                conn.commit()
+                return ("the op has no required belief UID reference;"
+                        " it is quarantined and will not be retried")
             # APPLIED_NO, not the `applied = 2` this row was staged at: 2 is
             # the one state `retry_deferred` never selects, so the promise this
             # message makes -- "it will apply after the next pull" -- was one
@@ -1565,6 +1616,12 @@ def _both_present(kind: str, bucket: str, a_text: str, b_text: str) -> bool:
 def deferred_op_count(conn: sqlite3.Connection) -> int:
     return conn.execute(
         "SELECT count(*) FROM sync_ops WHERE applied = ?", (APPLIED_NO,)).fetchone()[0]
+
+
+def quarantined_op_count(conn: sqlite3.Connection) -> int:
+    return conn.execute(
+        "SELECT count(*) FROM sync_ops WHERE applied = ?",
+        (APPLIED_QUARANTINED,)).fetchone()[0]
 
 
 def unverified_op_count(conn: sqlite3.Connection) -> int:

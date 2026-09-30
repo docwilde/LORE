@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.62.7 — 2026-09-30
+
+**Historical sync convergence**
+
+- Fix **`sync_apply`** to quarantine signed belief operations with missing UID
+  references. Keep their original payloads and MACs for audit and relay.
+- Fix **`sync_apply._envelope_error`** to accept signed session message snapshots
+  up to 4 MiB, matching the native receiver; other operations retain the 1 MiB cap.
+- Fix **`sync_network::apply_drained`** to report dependencies resolved across
+  chunks as applied. A private replay settled 4,555 ops and quarantined 13.
+
+**Evidence replay**
+
+- Fix **`scrub::scrub`** to preserve existing redaction markers without adding
+  closing brackets during signed belief evidence replay.
+
 ## 0.62.6 — 2026-09-30
 
 **Historical session replay**

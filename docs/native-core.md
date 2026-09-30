@@ -124,6 +124,10 @@ an existing destination.
 
 Pull visits every distinct configured source and retains each result when another
 source fails. The CLI returns a failing exit status for incomplete exchanges.
+Verified belief operations with absent UID references are retained as
+quarantined log entries. Their signed bytes are relayed and exported without
+being applied. Pull reports reconcile dependencies that resolve in later
+chunks against their final stored state.
 Bootstrap requires one source; use `--peer` to select explicitly when both a hub
 and peers are configured. Endpoint aliases share a cursor, while different paths
 or ports retain separate cursors.

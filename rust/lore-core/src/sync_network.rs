@@ -455,7 +455,7 @@ pub fn exchange(cfg: &Config, targets: &[Transport], push_hub: bool) -> Result<V
     Ok(reports)
 }
 fn empty_report() -> Value {
-    json!({"applied":0,"deferred":0,"unverified":0,"duplicate":0,"unknown":0,"failed":0,"skipped":0,"may_have_applied":0,"staged":0})
+    json!({"applied":0,"deferred":0,"quarantined":0,"unverified":0,"duplicate":0,"unknown":0,"failed":0,"skipped":0,"may_have_applied":0,"staged":0})
 }
 /// All framing is checked before the first receiver call. Split by bytes and
 /// count only after canonical ordering, retaining cross-page merge ordering.
@@ -485,15 +485,53 @@ fn apply_drained(cfg: &Config, ops: &[Value]) -> Result<Value> {
         chunks.push(start..ordered.len());
     }
     let mut report = empty_report();
+    let mut deferred_ids = BTreeSet::new();
     for range in chunks {
         // Receipt/application may fail after earlier rows in the first chunk
         // have landed. Once the receiver is entered, its global error cannot
         // certify that no effect occurred; retries remain idempotent.
         let result =
-            sync_apply::apply_ops(cfg, &ordered[range]).map_err(|_| Error::MayHaveApplied)?;
+            sync_apply::apply_ops(cfg, &ordered[range.clone()]).map_err(|_| Error::MayHaveApplied)?;
+        if result["deferred"].as_u64().unwrap_or(0) > 0 {
+            let conn = store::connect(cfg)?;
+            for op in &ordered[range] {
+                if let Some(id) = op["op_id"].as_str() {
+                    let state: Option<i64> = conn.query_row(
+                        "SELECT applied FROM sync_ops WHERE op_id=?",
+                        [id],
+                        |row| row.get(0),
+                    ).optional()?;
+                    if state == Some(sync_apply::APPLIED_NO) {
+                        deferred_ids.insert(id.to_owned());
+                    }
+                }
+            }
+        }
         for (k, v) in result.as_object().ok_or(Error::Unavailable)? {
             report[k] =
                 json!(report[k].as_u64().unwrap_or(0) + v.as_u64().ok_or(Error::Unavailable)?);
+        }
+    }
+    // A later chunk can resolve a dependency held by an earlier chunk.
+    // Reconcile those provisional counts against the final durable states.
+    if !deferred_ids.is_empty() {
+        let conn = store::connect(cfg)?;
+        for id in deferred_ids {
+            let state: Option<i64> = conn.query_row(
+                "SELECT applied FROM sync_ops WHERE op_id=?",
+                [&id],
+                |row| row.get(0),
+            ).optional()?;
+            let outcome = match state {
+                Some(sync_apply::APPLIED_YES) => Some("applied"),
+                Some(sync_apply::APPLIED_FAILED) => Some("failed"),
+                Some(sync_apply::APPLIED_QUARANTINED) => Some("quarantined"),
+                _ => None,
+            };
+            if let Some(key) = outcome {
+                report["deferred"] = json!(report["deferred"].as_u64().unwrap_or(0).saturating_sub(1));
+                report[key] = json!(report[key].as_u64().unwrap_or(0) + 1);
+            }
         }
     }
     Ok(report)
@@ -870,7 +908,7 @@ pub fn export_bundle(cfg: &Config, path: &Path) -> Result<Value> {
         .map(|s| s.to_string())
         .collect::<BTreeSet<_>>();
     let mut stmt = conn.prepare(&format!(
-        "{SELECT} WHERE applied IN (0,1) AND class IN ('memory','filemap','belief','pending','skill') ORDER BY lamport,machine_id,machine_seq LIMIT 100001"
+        "{SELECT} WHERE applied IN (0,1,5) AND class IN ('memory','filemap','belief','pending','skill') ORDER BY lamport,machine_id,machine_seq LIMIT 100001"
     ))?;
     let mut ops = Vec::new();
     let mut budget = 0;

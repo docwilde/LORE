@@ -185,6 +185,54 @@ fn pull_drains_before_canonical_application_and_banks_cursor() {
     assert_eq!(stored, ["Older fact", "Later fact"]);
 }
 #[test]
+fn pull_reports_cross_chunk_dependencies_after_final_retry() {
+    let (_t, cfg) = config();
+    let sign = |mut value: Value, seq: i64| {
+        value["machine_seq"] = json!(seq);
+        value["lamport"] = json!(seq);
+        value["hub_seq"] = json!(seq);
+        value["mac"] = json!(store::canonical_mac(
+            &json!([value["op_id"],value["machine_id"],value["machine_seq"],
+                    value["lamport"],value["class"],value["op"],
+                    value["project_key"],value["payload"]]),
+            KEY,
+        ).unwrap());
+        value
+    };
+    let mut edge = op("edge", 1);
+    edge["class"] = json!("belief");
+    edge["op"] = json!("edge");
+    edge["payload"] = json!({"src_uid":"late-a","dst_uid":"late-b",
+                              "rel":"explains","source":"derived"});
+    let mut ops = vec![sign(edge, 1)];
+    for seq in 2..=512 {
+        let mut filler = op("filler", seq);
+        filler["class"] = json!("future");
+        ops.push(sign(filler, seq));
+    }
+    for (seq, uid) in [(513, "late-a"), (514, "late-b")] {
+        let mut insert = op("insert", seq);
+        insert["class"] = json!("belief");
+        insert["op"] = json!("insert");
+        insert["payload"] = json!({"uid":uid,"subject":"user",
+                                    "claim":format!("belief {uid}"),"confidence":0.8});
+        ops.push(sign(insert, seq));
+    }
+    let (url, server) = fixture(vec![
+        (200, json!({"ops":ops[..500],"next":500})),
+        (200, json!({"ops":ops[500..],"next":null})),
+    ]);
+    let report = net::pull(&cfg, &Transport::new(&url, None, "peer:test".into()).unwrap()).unwrap();
+    assert_eq!(report["fetched"], 514);
+    assert_eq!(report["applied"], 3);
+    assert_eq!(report["deferred"], 0);
+    assert_eq!(report["unknown"], 511);
+    let conn = store::read_only(&cfg).unwrap();
+    assert_eq!(conn.query_row("SELECT count(*) FROM sync_ops WHERE applied=0", [],
+                              |row| row.get::<_, i64>(0)).unwrap(), 0);
+    server.join().unwrap();
+}
+#[test]
 fn partial_push_conflict_banks_only_settled_prefix() {
     let (_t, cfg) = config();
     let mut conn = store::connect(&cfg).unwrap();
@@ -652,7 +700,8 @@ fn large_bundle_uses_receiver_byte_budget_and_empty_report_is_complete() {
     net::export_bundle(&src, &empty).unwrap();
     let report = net::import_bundle(&cfg, &empty).unwrap();
     assert_eq!(report["unverified"], 0);
-    assert_eq!(report.as_object().unwrap().len(), 9);
+    assert_eq!(report["quarantined"], 0);
+    assert_eq!(report.as_object().unwrap().len(), 10);
 }
 
 #[test]

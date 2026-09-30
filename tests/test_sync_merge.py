@@ -1263,6 +1263,34 @@ class TestSessionRules(unittest.TestCase):
                        cls="session", verb="msgs", project_key=self.PROJECT_KEY,
                        payload={"session_id": session_id, "rows": rows})
 
+    def test_historical_large_msg_snapshot_uses_only_the_session_exception(self):
+        _, tgt = _machine("sess-large-snapshot")
+        large = "x" * (2 * 1024 * 1024)
+        session = self._msgs(tgt, 1, 1, [
+            {"ts": "t", "role": "user", "content": large}])
+        self.assertEqual(_apply(tgt, [session])["applied"], 1)
+        conn = tgt.db_connect()
+        self.assertEqual(conn.execute("SELECT length(content) FROM msg WHERE"
+                                      " session_id='S-1'").fetchone()[0], len(large))
+        conn.close()
+
+        ordinary = _signed(tgt, machine_id=MACHINE_A, machine_seq=2,
+                           lamport=2, cls="memory", verb="add",
+                           payload={"text": large})
+        with quiet():
+            report = _apply(tgt, [ordinary])
+        self.assertEqual(report["unknown"], 1)
+        conn = tgt.db_connect()
+        self.assertIsNone(conn.execute("SELECT 1 FROM sync_ops WHERE op_id=?",
+                                       (ordinary["op_id"],)).fetchone())
+        conn.close()
+
+        too_large = self._msgs(tgt, 3, 3, [
+            {"ts": "t", "role": "user", "content": "x" * (4 * 1024 * 1024)}])
+        with quiet():
+            report = _apply(tgt, [too_large])
+        self.assertEqual(report["unknown"], 1)
+
     def test_a_second_upsert_replaces_the_session_row_rather_than_adding_a_second(self):
         """One author machine means the LATEST upsert is the truth. Appending
         instead would put two rows with one session_id in front of `lore
@@ -2383,6 +2411,99 @@ class TestDeferredReport(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT applied FROM sync_ops WHERE op_id = ?",
                                       (op["op_id"],)).fetchone()[0],
                          tgt.apply_ops.__globals__["APPLIED_FAILED"])
+        conn.close()
+
+
+class TestMissingBeliefUidQuarantine(unittest.TestCase):
+    def test_verified_null_refs_are_preserved_and_not_retried(self):
+        root, tgt = _machine("null-ref-quarantine")
+        cases = (
+            ("reinforce", {"uid": None, "confidence": 0.8}),
+            ("reinforce", {"confidence": 0.8}),
+            ("supersede", {"uid": "known", "by_uid": None}),
+            ("edge", {"src_uid": "known", "dst_uid": None}),
+            ("retract", {"uid": None}),
+            ("status", {"uid": None, "status": "active"}),
+            ("outcome", {"belief_uid": None}),
+            ("dream_reviewed", {"a_uid": None, "b_uid": "known"}),
+        )
+        ops = [
+            _signed(tgt, machine_id=MACHINE_A, machine_seq=index, lamport=index,
+                    cls="belief", verb=verb, payload=payload)
+            for index, (verb, payload) in enumerate(cases, 1)
+        ]
+        report = _apply(tgt, ops)
+        self.assertEqual(report["quarantined"], len(ops), report)
+        self.assertEqual(report["deferred"], 0)
+        self.assertEqual(report["applied"], 0)
+        conn = tgt.db_connect()
+        self.assertEqual(tgt.quarantined_op_count(conn), len(ops))
+        self.assertEqual(tgt.retry_deferred(conn), 0)
+        for op in ops:
+            row = conn.execute(
+                "SELECT payload, mac, applied FROM sync_ops WHERE op_id = ?",
+                (op["op_id"],)).fetchone()
+            self.assertEqual(json.loads(row[0]), op["payload"])
+            self.assertEqual(row[1], op["mac"])
+            self.assertEqual(row[2], tgt.APPLIED_QUARANTINED)
+        conn.close()
+        with quiet() as out:
+            tgt.cmd_sync_status(None)
+        self.assertIn(f"quarantined:  {len(ops)}", out.getvalue())
+        bundle = root / "quarantined-bundle.json"
+        self.assertEqual(tgt.export_bundle(bundle)["count"], len(ops))
+        exported = json.loads(bundle.read_text())["ops"]
+        self.assertEqual({op["op_id"] for op in exported},
+                         {op["op_id"] for op in ops})
+        self.assertTrue(all(tgt.verify_mac(op, TEST_HMAC_KEY) for op in exported))
+        _, recipient = _machine("quarantined-bundle-recipient")
+        imported = recipient.import_bundle(bundle)
+        self.assertEqual(imported["quarantined"], len(ops))
+        conn = recipient.db_connect()
+        self.assertEqual(recipient.quarantined_op_count(conn), len(ops))
+        conn.close()
+
+    def test_old_deferred_null_ref_moves_to_quarantine(self):
+        _, tgt = _machine("old-null-ref-quarantine")
+        op = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                     cls="belief", verb="edge",
+                     payload={"src_uid": str(uuid.uuid4()), "dst_uid": None})
+        conn = tgt.db_connect()
+        conn.execute(
+            "INSERT INTO sync_ops(op_id, machine_id, machine_seq, lamport,"
+            " class, op, project_key, payload, mac, created, applied)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,0)",
+            (op["op_id"], op["machine_id"], op["machine_seq"], op["lamport"],
+             op["class"], op["op"], op["project_key"],
+             json.dumps(op["payload"], sort_keys=True), op["mac"], op["created"]),
+        )
+        conn.commit()
+        self.assertEqual(tgt.deferred_op_count(conn), 1)
+        self.assertEqual(tgt.retry_deferred(conn), 0)
+        self.assertEqual(tgt.deferred_op_count(conn), 0)
+        self.assertEqual(tgt.quarantined_op_count(conn), 1)
+        self.assertEqual(conn.execute(
+            "SELECT mac FROM sync_ops WHERE op_id = ?", (op["op_id"],)
+        ).fetchone()[0], op["mac"])
+        conn.close()
+
+    def test_bad_mac_remains_unverified_and_valid_unknown_uid_waits(self):
+        _, tgt = _machine("quarantine-boundary")
+        bad = _signed(tgt, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                      cls="belief", verb="reinforce", payload={"uid": None},
+                      key="wrong-secret")
+        waiting = _signed(tgt, machine_id=MACHINE_A, machine_seq=2, lamport=2,
+                          cls="belief", verb="reinforce",
+                          payload={"uid": str(uuid.uuid4()), "confidence": 0.7})
+        with quiet():
+            report = _apply(tgt, [bad, waiting])
+        self.assertEqual(report["unverified"], 1)
+        self.assertEqual(report["quarantined"], 0)
+        self.assertEqual(report["deferred"], 1)
+        conn = tgt.db_connect()
+        self.assertEqual(tgt.unverified_op_count(conn), 1)
+        self.assertEqual(tgt.deferred_op_count(conn), 1)
+        self.assertEqual(tgt.quarantined_op_count(conn), 0)
         conn.close()
 
 

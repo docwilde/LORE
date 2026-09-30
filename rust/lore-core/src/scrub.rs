@@ -100,6 +100,15 @@ fn replacement(kind: &str, caps: &Captures<'_, str>, text: &str) -> Result<Strin
             if pointer(value) {
                 return Ok(matched.as_str().into());
             }
+            // Signed historical notes may already contain a scrub marker
+            // followed by punctuation. Replaying them must not append another
+            // closing bracket on every receiver pass.
+            if value.strip_prefix("[REDACTED:").and_then(|rest| rest.split_once(']'))
+                .is_some_and(|(kind, tail)| !kind.is_empty()
+                    && kind.bytes().all(|c| c.is_ascii_alphabetic())
+                    && tail.chars().all(|c| "\"'`,;)]}>".contains(c))) {
+                return Ok(matched.as_str().into());
+            }
             let body = value.trim_end_matches(|c| "\"'`,;)]}>".contains(c));
             Ok(if body.is_empty() || pointer(body) {
                 matched.as_str().into()
@@ -194,5 +203,13 @@ mod tests {
         assert!(!clean.contains("ghp_"));
         let fingerprint = format!("SHA256:{}", "g".repeat(42) + "+");
         assert_eq!(scrub(&fingerprint).unwrap(), fingerprint);
+    }
+
+    #[test]
+    fn replay_of_an_existing_redaction_does_not_grow_brackets() {
+        let already = "token=[REDACTED:value]] and password=[REDACTED:value]";
+        assert_eq!(scrub(already).unwrap(), already);
+        let first = scrub("token=unmistakably-secret]").unwrap();
+        assert_eq!(scrub(&first).unwrap(), first);
     }
 }
