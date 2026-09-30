@@ -103,10 +103,17 @@ fn replacement(kind: &str, caps: &Captures<'_, str>, text: &str) -> Result<Strin
             // Signed historical notes may already contain a scrub marker
             // followed by punctuation. Replaying them must not append another
             // closing bracket on every receiver pass.
-            if value.strip_prefix("[REDACTED:").and_then(|rest| rest.split_once(']'))
-                .is_some_and(|(kind, tail)| !kind.is_empty()
-                    && kind.bytes().all(|c| c.is_ascii_alphabetic())
-                    && tail.chars().all(|c| "\"'`,;)]}>".contains(c))) {
+            if value
+                .strip_prefix("[REDACTED:")
+                .and_then(|rest| rest.split_once(']'))
+                .is_some_and(|(marker_kind, tail)| {
+                    let generated = matches!(marker_kind, "value" | "hex" | "base64")
+                        || patterns().is_ok_and(|known| {
+                            known.iter().any(|(name, _)| name == marker_kind)
+                        });
+                    generated && tail.chars().all(|c| "\"'`,;)]}>".contains(c))
+                })
+            {
                 return Ok(matched.as_str().into());
             }
             let body = value.trim_end_matches(|c| "\"'`,;)]}>".contains(c));
@@ -211,5 +218,9 @@ mod tests {
         assert_eq!(scrub(already).unwrap(), already);
         let first = scrub("token=unmistakably-secret]").unwrap();
         assert_eq!(scrub(&first).unwrap(), first);
+        assert_eq!(
+            scrub("token=[REDACTED:NeverShareThisSecret]").unwrap(),
+            "token=[REDACTED:value]]"
+        );
     }
 }
