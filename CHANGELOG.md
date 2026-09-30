@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.62.5 — 2026-09-30
+
+**Historical sync repair**
+
+- Fix **`sync_admin::resign`** to apply receiver envelope checks and class-specific
+  signing limits. Valid large local session operations can now be re-signed.
+- Keep invalid oversized memory operations unsigned. Foreign unsigned history
+  still needs authentic source provenance before it can be applied.
+
 ## 0.62.4 — 2026-09-29
 
 **Session sync**
