@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.62.9 — 2026-09-30
+
+**Pending review scope**
+
+- Fix **`pending::visible`** to hide project-bound file-map, skill, and belief
+  proposals outside their project in listings and exact review.
+- Keep **`status.pending`** as the whole-store count; the pending browser shows
+  global proposals and those for the current project.
+
 ## 0.62.8 — 2026-09-30
 
 **Credential scrubbing**

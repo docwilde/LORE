@@ -100,7 +100,13 @@ fn snapshot_at(directory: &File, name: &std::ffi::OsStr) -> Result<Snapshot> {
     })
 }
 fn visible(item: &Value, slug: &str) -> bool {
-    item["scope"] != "project" || item["project"] == slug
+    // File maps and reviewed skills carry their project in `project`, without
+    // a `scope` field. Use the same project identity as agent context so their
+    // proposals cannot be listed or approved from an unrelated checkout.
+    if item["scope"] == "project" || item["kind"] == "filemap" {
+        return item["project"].as_str().is_some_and(|project| !project.is_empty() && project == slug);
+    }
+    gate::pending_project(item).is_none_or(|project| project == slug)
 }
 pub fn ids(cfg: &Config) -> Result<Vec<String>> {
     let dir = cfg.root.join("pending");
@@ -930,6 +936,44 @@ pub fn resolve(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_bound_proposals_are_hidden_outside_their_project() {
+        let own = "own-project";
+        let foreign = "another-project";
+        for item in [
+            json!({"kind":"memory","scope":"project","project":own}),
+            json!({"kind":"filemap","project":own}),
+            json!({"kind":"skill","project":own}),
+            json!({"kind":"belief","project":own}),
+        ] {
+            assert!(visible(&item, own));
+            assert!(!visible(&item, foreign));
+        }
+        assert!(!visible(&json!({"kind":"filemap"}), own));
+        assert!(!visible(&json!({"kind":"memory","scope":"project"}), own));
+        // User memory can record an origin project without becoming project-bound.
+        assert!(visible(&json!({"kind":"memory","scope":"user","project":own}), foreign));
+        // A synced skill conflict without a project is a global review item.
+        assert!(visible(&json!({"kind":"skill","origin":"sync-skill-conflict"}), foreign));
+    }
+
+    #[test]
+    fn foreign_filemap_cannot_be_listed_or_reviewed() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        let own = temp.path().join("own");
+        let foreign = temp.path().join("foreign");
+        let pid = gate::stage(&cfg, &json!({
+            "kind":"filemap", "project":project_slug(&own),
+            "path":"src/lib.rs", "purpose":"fixture"
+        }), &auth()).unwrap();
+        let own_rows = list(&cfg, &json!({"cwd":own})).unwrap();
+        assert_eq!(own_rows.as_array().unwrap().len(), 1);
+        let foreign_rows = list(&cfg, &json!({"cwd":foreign.clone()})).unwrap();
+        assert!(foreign_rows.as_array().unwrap().is_empty());
+        assert_eq!(review(&cfg, &json!({"cwd":foreign,"pid":pid})), Err(Error::Untrusted));
+    }
+
     #[cfg(unix)]
     #[test]
     fn linked_pending_directory_never_yields_outside_review_proof() {
