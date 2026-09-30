@@ -313,8 +313,7 @@ class SeedTests(unittest.TestCase):
         coverage, so once the superseding belief HAS a uid (as it does
         here, and as 0.60.1's connect-time back-fill guarantees today),
         `seed --apply` emits a SECOND, correct supersede op that converges
-        the status -- the broken op stays in the log, inert, exactly as any
-        other genuinely-unresolvable held op does."""
+        the status -- the broken op stays in the log, quarantined and inert."""
         out = _py(self.keyed_env,
             "from lore_core import belief_insert, db_connect;"
             " from lore_core.sync_oplog import append_op;"
@@ -361,7 +360,7 @@ class SeedTests(unittest.TestCase):
         self.assertIn("seeded:             0", again.stdout)
 
         # Export + import into a fresh peer converges to the source's own
-        # status -- the broken op is held forever (genuinely unresolvable),
+        # status -- the broken op is quarantined (genuinely unresolvable),
         # the corrected one lands.
         bundle = Path(self.tmp.name) / "supersede-heal-bundle.json"
         exported = _cli(self.keyed_env, "sync", "export", bundle)
@@ -369,9 +368,11 @@ class SeedTests(unittest.TestCase):
         dest_root = Path(self.tmp.name) / "supersede-heal-dest"
         dest_env = _env(dest_root, "eeeeeeee-5555-4555-8555-555555555555", key=KEY)
         imported = _cli(dest_env, "sync", "import", bundle)
-        self.assertEqual(imported.returncode, 0, imported.stderr)
-        self.assertIn("deferred=1", imported.stdout)  # the broken op, held forever
+        self.assertEqual(imported.returncode, 1, imported.stderr)
+        self.assertIn("quarantined=1", imported.stdout)
+        self.assertIn("deferred=0", imported.stdout)
         self.assertIn("failed=0", imported.stdout)
+        self.assertIn("quarantined", imported.stderr)
 
         dst_status = _py(dest_env,
             "from lore_core import db_connect; c = db_connect(); "
