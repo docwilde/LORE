@@ -128,6 +128,10 @@ lore sync seed --apply           # back-fill ops for state older than the log it
 Machines must share `LORE_SYNC_HMAC_KEY` to verify operations. You can choose
 which data classes sync; see the [manual](docs/manual.md#sync--one-memory-on-every-machine)
 for setup and the [protocol](docs/sync-protocol.md) for the wire format.
+Signed historical belief operations with missing UID references are kept in
+the log as quarantined data and shown by `lore sync status`; they do not enter
+curated memory. A fresh direct-peer pull can replay a retained signed log when
+an older hub copy cannot be replaced.
 
 ## Data & safety
 

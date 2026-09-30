@@ -272,7 +272,7 @@ Off until `LORE_SYNC_URL` is set. With it set, every write to a synced class app
 | Command | What it does |
 |---|---|
 | `lore sync` | pull, then push |
-| `lore sync status` | machine id and label, unpushed count, classes on/off, what is waiting or unverified, conflicts, peer cursors. No network call. |
+| `lore sync status` | machine id and label, unpushed count, classes on/off, waiting, unverified and quarantined operations, conflicts, peer cursors. No network call. |
 | `lore sync push` | send this machine's own ops from the peer cursor, page by page. `--from <seq>` re-sends from there instead (`--from 0` re-seeds a hub that lost its data). |
 | `lore sync pull` | drain everything past the cursor — from the hub and from every configured peer — sort into canonical order, apply, then advance each cursor. `--peer <name>` pulls from that one peer alone. |
 | `lore sync bootstrap` | fill a fresh `LORE_ROOT` from the hub, or from `--peer <name>`. Refuses a populated one and says what is in it; `--merge` proceeds as an ordinary pull. |
@@ -293,6 +293,16 @@ If a store curated memory, beliefs, skills, or a file map for a while before the
 A pull runs detached at SessionStart and never on the prompt loop; a push runs after the review worker finishes. Both are silent when the hub is unreachable — ops accumulate and the next push drains them — and an explicit `lore sync` prints the error. A `409` from the hub means the client's log has a gap: it is reported, never retried around, because a lost op means a store that is no longer a function of its log.
 
 Ops are signed with `LORE_SYNC_HMAC_KEY`, which every machine of one account holds and the hub never sees. An op whose MAC is missing or wrong is staged as a pending proposal tagged `unverified` and applied by nothing but a human — a memory entry reaches the model's context verbatim, so an op that could be forged is a prompt injection with a persistence layer.
+
+An authenticated belief operation with a missing required UID reference is
+quarantined after verification. It remains in the signed log and portable
+exports, but is never applied or retried; `lore sync status` counts it. An
+unknown nonempty UID remains deferred because its insertion may arrive later.
+Quarantine does not invent an identity or change the signed payload. If the
+author's historical operation is irreparable, write a new reviewed operation
+with the correct UID rather than changing the old one. An old immutable hub
+copy cannot be replaced in place; a fresh direct-peer pull can replay the
+author's retained signed log through the same verification gate.
 
 ### Transport B — two machines, no hub
 
