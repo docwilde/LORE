@@ -11,6 +11,11 @@
 - Fix **`sync_network::apply_drained`** to report dependencies resolved across
   chunks as applied. A private replay settled 4,555 ops and quarantined 13.
 
+**Evidence replay**
+
+- Fix **`scrub::scrub`** to preserve existing redaction markers without adding
+  closing brackets during signed belief evidence replay.
+
 ## 0.62.6 — 2026-09-30
 
 **Historical session replay**
