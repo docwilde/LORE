@@ -139,6 +139,23 @@ fn tuple(op: &Value) -> Value {
         op["payload"]
     ])
 }
+fn mac_bytes(op: &Value) -> Result<Vec<u8>> {
+    let canonical_limit = if payload_limit(op) > crate::MAX_FRAME_BYTES {
+        payload_limit(op) + 8192
+    } else {
+        crate::MAX_FRAME_BYTES
+    };
+    store::canonical_bytes_bounded(&tuple(op), canonical_limit)
+}
+/// Sign an authored envelope under the same exact framing the receiver verifies.
+pub fn compute_mac(op: &Value, key: &str) -> Result<String> {
+    validate_envelope(op)?;
+    let raw = mac_bytes(op)?;
+    let mut signer = Hmac::<sha2::Sha256>::new_from_slice(key.as_bytes())
+        .map_err(|_| Error::InvalidRequest)?;
+    signer.update(&raw);
+    Ok(signer.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect())
+}
 pub fn verify_mac(op: &Value, key: Option<&str>) -> bool {
     let Some(key) = key.filter(|s| !s.is_empty()) else {
         return false;
@@ -163,14 +180,7 @@ pub fn verify_mac(op: &Value, key: Option<&str>) -> bool {
         };
         bytes[index] = byte;
     }
-    // The tuple includes bounded envelope fields as well as the payload.
-    // Preserve the ordinary signing cap for every other operation.
-    let canonical_limit = if payload_limit(op) > crate::MAX_FRAME_BYTES {
-        payload_limit(op) + 8192
-    } else {
-        crate::MAX_FRAME_BYTES
-    };
-    let Ok(raw) = store::canonical_bytes_bounded(&tuple(op), canonical_limit) else {
+    let Ok(raw) = mac_bytes(op) else {
         return false;
     };
     let Ok(mut verifier) = Hmac::<sha2::Sha256>::new_from_slice(key.as_bytes()) else {

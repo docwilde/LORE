@@ -76,6 +76,28 @@ fn resign_preserves_foreign_ops_and_backs_up_own_unsigned() {
     );
 }
 #[test]
+fn resign_refuses_unsigned_rows_the_receiver_cannot_accept() {
+    let (_t, cfg) = config();
+    let conn = store::connect(&cfg).unwrap();
+    let machine = store::machine_id(&conn).unwrap();
+    for (index, (id, class, verb, payload)) in [
+        ("oversized-memory", "memory", "add", json!({"text":"x".repeat(lore_core::MAX_FRAME_BYTES)})),
+        ("valid-large-session", "session", "msgs", json!({"rows":[{"content":"x".repeat(lore_core::MAX_FRAME_BYTES)}]})),
+    ].into_iter().enumerate() {
+        conn.execute("INSERT INTO sync_ops(op_id,machine_id,machine_seq,lamport,class,op,project_key,payload,mac,created,applied) VALUES(?,?,?,?,?,?,NULL,?,NULL,'2026-09-28T00:00:00Z',1)",rusqlite::params![id,machine,index as i64+1,index as i64+1,class,verb,payload.to_string()]).unwrap();
+    }
+    let dry = sync_admin::resign(&cfg, false, false).unwrap();
+    assert_eq!(dry["malformed"], 1);
+    assert_eq!(dry["unsigned"], 1);
+    let done = sync_admin::resign(&cfg, true, false).unwrap();
+    assert_eq!(done["resigned"], 1);
+    let rows = conn.prepare("SELECT op_id,mac FROM sync_ops ORDER BY op_id").unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))
+        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(rows[0], ("oversized-memory".into(), None));
+    assert!(rows[1].1.is_some());
+}
+#[test]
 fn seed_covers_portable_state_once_and_leaves_overcap_personal_memory() {
     let (_t, cfg) = config();
     lore_core::files::private_dir(&cfg.root).unwrap();

@@ -104,18 +104,9 @@ pub fn resign(cfg: &Config, apply: bool, replace: bool) -> Result<Value> {
             }
             continue;
         }
-        if !op["payload"].is_object()
+        if sync_apply::validate_envelope(&op).is_err()
             || !op["machine_seq"].as_i64().is_some_and(|n| n > 0)
             || !op["lamport"].as_i64().is_some_and(|n| n > 0)
-            || !op["op_id"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty() && s.len() <= 128)
-            || !op["class"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty() && s.len() <= 64)
-            || !op["op"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty() && s.len() <= 64)
         {
             malformed += 1;
             continue;
@@ -147,7 +138,7 @@ pub fn resign(cfg: &Config, apply: bool, replace: bool) -> Result<Value> {
             if tuple(&current) != tuple(op) || current["mac"] != op["mac"] {
                 return Err(Error::Changed);
             }
-            let signature = store::canonical_mac(&tuple(op), key)?;
+            let signature = sync_apply::compute_mac(op, key)?;
             if tx.execute(
                 "UPDATE sync_ops SET mac=? WHERE op_id=? AND machine_id=?",
                 params![signature, op["op_id"].as_str(), machine],
