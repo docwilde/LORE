@@ -9,9 +9,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
+    sync::Mutex,
     thread,
 };
 const KEY: &str = "lore-sync-protocol-test-key-DO-NOT-USE-IN-PRODUCTION";
+static PEER_ENV_LOCK: Mutex<()> = Mutex::new(());
 fn config() -> (tempfile::TempDir, Config) {
     let t = tempfile::tempdir().unwrap();
     let mut c = Config::for_root(t.path().join("root"));
@@ -682,6 +684,7 @@ fn peer_identity_alone_never_authenticates_embedded_server() {
 
 #[test]
 fn peer_cursor_keys_preserve_ports_paths_and_endpoint_aliases() {
+    let _guard = PEER_ENV_LOCK.lock().unwrap();
     assert_eq!(
         Transport::peer("host.test").unwrap().peer,
         Transport::peer("http://host.test:8765/v1").unwrap().peer
@@ -702,6 +705,7 @@ fn peer_cursor_keys_preserve_ports_paths_and_endpoint_aliases() {
 
 #[test]
 fn configured_sources_deduplicate_and_bootstrap_requires_one() {
+    let _guard = PEER_ENV_LOCK.lock().unwrap();
     struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -842,6 +846,7 @@ fn native_cli_import_reports_possible_effects_within_first_chunk() {
 
 #[test]
 fn changing_default_peer_port_cannot_reuse_another_endpoint_cursor() {
+    let _guard = PEER_ENV_LOCK.lock().unwrap();
     struct Restore(Option<std::ffi::OsString>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -1213,6 +1218,20 @@ fn large_signed_session_hub_pull_keeps_memory_order_signature_and_duplicates() {
     );
     assert_eq!(cursor(&cfg, &transport), "3");
     handle.join().unwrap();
+}
+#[test]
+fn newer_session_snapshot_does_not_read_prior_large_payload() {
+    let (_temp, mut cfg) = config();
+    cfg.sync.classes.insert("sessions".into());
+    let prior = large_session_op(1, 2_650_000);
+    let next = large_session_op(2, 800);
+    assert_eq!(lore_core::sync_apply::apply_ops(&cfg, &[prior]).unwrap()["applied"], 1);
+    let report = lore_core::sync_apply::apply_ops(&cfg, &[next]).unwrap();
+    assert_eq!(report["applied"], 1);
+    assert_eq!(report["failed"], 0);
+    let conn = store::read_only(&cfg).unwrap();
+    let bytes: i64 = conn.query_row("SELECT sum(length(content)) FROM msg", [], |r| r.get(0)).unwrap();
+    assert_eq!(bytes, 800);
 }
 #[test]
 fn oversized_session_and_other_classes_refuse_before_effects() {
