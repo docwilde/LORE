@@ -35,6 +35,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BIN_LORE = REPO_ROOT / "bin" / "lore.py"
@@ -1183,6 +1184,26 @@ class TestPendingAndSkillRules(unittest.TestCase):
         self.assertEqual(_apply(node, [remove])["applied"], 1)
         self.assertTrue(target.exists())
         self.assertTrue((directory / "notes.txt").exists())
+
+    def test_failed_skill_removal_is_not_reported_as_applied(self):
+        _, node = _machine("skill-removal-fails")
+        initial = _signed(node, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                          cls="skill", verb="put",
+                          payload={"name": "removal-fails", "body": "synced body"})
+        self.assertEqual(_apply(node, [initial])["applied"], 1)
+        directory = node.SKILLS_DIR / "removal-fails"
+        removal = _signed(node, machine_id=MACHINE_A, machine_seq=2, lamport=2,
+                          cls="skill", verb="remove", payload={"name": "removal-fails"})
+        with patch.object(shutil, "rmtree", side_effect=PermissionError("blocked")):
+            report = _apply(node, [removal])
+        self.assertEqual(report["failed"], 1)
+        self.assertEqual(report["applied"], 0)
+        self.assertTrue((directory / "SKILL.md").exists())
+        conn = node.db_connect()
+        self.assertEqual(conn.execute(
+            "SELECT applied FROM sync_ops WHERE op_id = ?", (removal["op_id"],)
+        ).fetchone()[0], node.APPLIED_FAILED)
+        conn.close()
 
     def test_a_skill_remove_deletes_the_skill_and_a_second_remove_changes_nothing(self):
         """sync.md: "`remove` is idempotent."

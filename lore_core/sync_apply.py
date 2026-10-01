@@ -963,7 +963,9 @@ def _apply_skill(conn: sqlite3.Connection, op: dict) -> bool:
         if prior is not None and canonical_key(prior) > canonical_key(op):
             return True  # a newer put already restored this skill
         if target.parent.exists():
-            shutil.rmtree(target.parent, ignore_errors=True)
+            # The caller records a successful receipt only after this delete
+            # succeeds. A failed removal must remain visible for retry.
+            shutil.rmtree(target.parent)
         return True
 
     if verb == "put":
