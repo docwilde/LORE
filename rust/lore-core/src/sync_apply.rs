@@ -999,7 +999,38 @@ fn skill(cfg: &Config, conn: &Connection, op: &Value) -> Result<Applied> {
         .into_iter()
         .filter(|old| old["op_id"] != op["op_id"] && old["payload"]["name"] == name)
         .max_by_key(order);
-    match text(op, "op", 64)? {
+    let verb = text(op, "op", 64)?;
+    if directory.try_exists()? {
+        // A valid MAC does not grant ownership of a locally installed skill.
+        // The current file must still match a previously applied LORE put.
+        let owned = if let Some(old) = &prior {
+            if target.try_exists()? {
+                let current = files::read_regular(&target, crate::MAX_FRAME_BYTES)?;
+                current == fallback(&old["payload"], "body", "", crate::MAX_FRAME_BYTES)?.as_bytes()
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let removable = if verb == "remove" && owned {
+            let mut entries = fs::read_dir(&directory)?;
+            entries.next().transpose()?.is_some_and(|e| e.file_name() == "SKILL.md")
+                && entries.next().transpose()?.is_none()
+        } else {
+            owned
+        };
+        if !removable {
+            stage(cfg, &json!({"kind":"skill","action":if verb == "remove" { "retire" } else { "update" },
+                "name":name,"body":if verb == "put" { fallback(p,"body","",crate::MAX_FRAME_BYTES)? } else { String::new() },
+                "description":format!("sync request conflicts with local skill {name}"),
+                "origin":"sync-skill-local-conflict"}),
+                &deterministic_uid(text_field(op, "op_id")?))?;
+            mark(conn, op, APPLIED_YES)?;
+            return Ok(Applied::Complete);
+        }
+    }
+    match verb {
         "remove" => {
             if prior.as_ref().is_some_and(|old| order(old) > order(op)) {
                 return Ok(Applied::Complete);
@@ -2033,6 +2064,38 @@ mod tests {
             .unwrap()["uid"]
                 == "shared-proposal"
         ));
+    }
+    #[test]
+    fn signed_skill_ops_preserve_manual_installations_and_local_edits() {
+        let (_temp, cfg) = fixture();
+        let manual = cfg.skills.join("manual-skill");
+        fs::create_dir_all(&manual).unwrap();
+        fs::write(manual.join("SKILL.md"), "manual instructions").unwrap();
+        let put = op(&cfg, "manual-put", 1, "skill", "put", None,
+            json!({"name":"manual-skill","body":"remote instructions"}));
+        let remove = op(&cfg, "manual-remove", 2, "skill", "remove", None,
+            json!({"name":"manual-skill"}));
+        assert_eq!(apply_ops(&cfg, &[put, remove]).unwrap()["applied"], 2);
+        assert_eq!(fs::read_to_string(manual.join("SKILL.md")).unwrap(), "manual instructions");
+        let proposals = proposal_files(&cfg, false).unwrap();
+        assert_eq!(proposals.len(), 2);
+
+        let initial = op(&cfg, "owned-put", 3, "skill", "put", None,
+            json!({"name":"edited-skill","body":"synced body"}));
+        assert_eq!(apply_ops(&cfg, &[initial]).unwrap()["applied"], 1);
+        let edited = cfg.skills.join("edited-skill");
+        fs::write(edited.join("SKILL.md"), "local edit").unwrap();
+        let update = op(&cfg, "owned-update", 4, "skill", "put", None,
+            json!({"name":"edited-skill","body":"new remote body"}));
+        assert_eq!(apply_ops(&cfg, &[update]).unwrap()["applied"], 1);
+        assert_eq!(fs::read_to_string(edited.join("SKILL.md")).unwrap(), "local edit");
+        fs::write(edited.join("SKILL.md"), "synced body").unwrap();
+        fs::write(edited.join("notes.txt"), "manual asset").unwrap();
+        let remove = op(&cfg, "owned-remove", 5, "skill", "remove", None,
+            json!({"name":"edited-skill"}));
+        assert_eq!(apply_ops(&cfg, &[remove]).unwrap()["applied"], 1);
+        assert!(edited.join("SKILL.md").exists());
+        assert!(edited.join("notes.txt").exists());
     }
     #[test]
     fn portable_pending_uids_are_exact_data_keys_not_filenames() {

@@ -1145,6 +1145,45 @@ class TestPendingAndSkillRules(unittest.TestCase):
             self.assertEqual(staged[expected_uid]["body"], loser["payload"]["body"])
             self.assertEqual(staged[expected_uid]["kind"], "skill")
 
+    def test_signed_skill_ops_preserve_manual_installation(self):
+        _, node = _machine("skill-manual-owner")
+        directory = node.SKILLS_DIR / "manual-skill"
+        directory.mkdir()
+        target = directory / "SKILL.md"
+        target.write_text("manual instructions", encoding="utf-8")
+        put = _signed(node, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                      cls="skill", verb="put",
+                      payload={"name": "manual-skill", "body": "remote instructions"})
+        remove = _signed(node, machine_id=MACHINE_A, machine_seq=2, lamport=2,
+                         cls="skill", verb="remove", payload={"name": "manual-skill"})
+        for operation, action in ((put, "update"), (remove, "retire")):
+            self.assertEqual(_apply(node, [operation])["applied"], 1)
+            self.assertEqual(target.read_text(encoding="utf-8"), "manual instructions")
+            proposal = _pending_items(node.ROOT)[node.deterministic_uid(operation["op_id"])]
+            self.assertEqual(proposal["action"], action)
+
+    def test_signed_skill_ops_preserve_local_edits_and_extra_files(self):
+        _, node = _machine("skill-edited-owner")
+        initial = _signed(node, machine_id=MACHINE_A, machine_seq=1, lamport=1,
+                          cls="skill", verb="put",
+                          payload={"name": "edited-skill", "body": "synced body"})
+        self.assertEqual(_apply(node, [initial])["applied"], 1)
+        directory = node.SKILLS_DIR / "edited-skill"
+        target = directory / "SKILL.md"
+        target.write_text("local edit", encoding="utf-8")
+        update = _signed(node, machine_id=MACHINE_A, machine_seq=2, lamport=2,
+                         cls="skill", verb="put",
+                         payload={"name": "edited-skill", "body": "new remote body"})
+        self.assertEqual(_apply(node, [update])["applied"], 1)
+        self.assertEqual(target.read_text(encoding="utf-8"), "local edit")
+        target.write_text("synced body", encoding="utf-8")
+        (directory / "notes.txt").write_text("manual asset", encoding="utf-8")
+        remove = _signed(node, machine_id=MACHINE_A, machine_seq=3, lamport=3,
+                         cls="skill", verb="remove", payload={"name": "edited-skill"})
+        self.assertEqual(_apply(node, [remove])["applied"], 1)
+        self.assertTrue(target.exists())
+        self.assertTrue((directory / "notes.txt").exists())
+
     def test_a_skill_remove_deletes_the_skill_and_a_second_remove_changes_nothing(self):
         """sync.md: "`remove` is idempotent."
 
