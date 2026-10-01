@@ -79,6 +79,13 @@ fn output(value: Value) -> Result<()> {
     io::stdout().lock().write_all(&bytes)?;
     Ok(())
 }
+fn scoped_belief_proposal(mut item: Value, subject: &str) -> Value {
+    item["subject"] = json!(subject);
+    if let Some(project) = subject.strip_prefix("project:") {
+        item["project"] = json!(project);
+    }
+    item
+}
 fn parse(args: &[String]) -> Result<(Value, Vec<String>)> {
     let mut req = json!({"cwd":std::env::current_dir()?});
     let mut positional = Vec::new();
@@ -402,9 +409,10 @@ pub fn run(args: &[String]) -> Result<()> {
             if auth.may_write() {
                 crate::beliefs::insert(&cfg, &req, &auth)?
             } else {
+                let subject = req["subject"].as_str().ok_or(Error::InvalidRequest)?;
                 let pid = crate::gate::stage(
                     &cfg,
-                    &json!({"kind":"belief","claim":req["claim"],"subject":req["subject"],"confidence":req["confidence"],"cwd":req["cwd"]}),
+                    &scoped_belief_proposal(json!({"kind":"belief","claim":req["claim"],"confidence":req["confidence"],"cwd":req["cwd"]}), subject),
                     &auth,
                 )?;
                 json!({"status":"staged","pid":pid})
@@ -418,9 +426,11 @@ pub fn run(args: &[String]) -> Result<()> {
             if auth.may_write() {
                 crate::beliefs::retract(&cfg, &req, &auth)?
             } else {
+                let reviewed = crate::beliefs::review(&cfg, &req)?;
+                let subject = reviewed["subject"].as_str().ok_or(Error::InvalidRequest)?;
                 let pid = crate::gate::stage(
                     &cfg,
-                    &json!({"kind":"belief","action":"retract","id":req["belief_id"],"reason":req["reason"],"cwd":req["cwd"]}),
+                    &scoped_belief_proposal(json!({"kind":"belief","action":"retract","id":req["belief_id"],"reason":req["reason"],"cwd":req["cwd"]}), subject),
                     &auth,
                 )?;
                 json!({"status":"staged","pid":pid})

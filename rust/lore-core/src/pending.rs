@@ -103,6 +103,15 @@ fn visible(item: &Value, slug: &str) -> bool {
     // File maps and reviewed skills carry their project in `project`, without
     // a `scope` field. Use the same project identity as agent context so their
     // proposals cannot be listed or approved from an unrelated checkout.
+    if item["kind"] == "belief" {
+        if let Some(project) = item["subject"].as_str().and_then(|subject| subject.strip_prefix("project:")) {
+            // Older staged beliefs omitted `project`; their subject still
+            // carries the boundary. A conflicting explicit project refuses
+            // review from either checkout.
+            return !project.is_empty() && project == slug
+                && item["project"].as_str().is_none_or(|staged| staged == project);
+        }
+    }
     if item["scope"] == "project" || item["kind"] == "filemap" {
         return item["project"].as_str().is_some_and(|project| !project.is_empty() && project == slug);
     }
@@ -972,6 +981,22 @@ mod tests {
         let foreign_rows = list(&cfg, &json!({"cwd":foreign.clone()})).unwrap();
         assert!(foreign_rows.as_array().unwrap().is_empty());
         assert_eq!(review(&cfg, &json!({"cwd":foreign,"pid":pid})), Err(Error::Untrusted));
+    }
+
+    #[test]
+    fn legacy_project_belief_without_project_field_stays_in_its_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        let own = temp.path().join("own");
+        let foreign = temp.path().join("foreign");
+        let slug = project_slug(&own);
+        let pid = gate::stage(&cfg, &json!({
+            "kind":"belief", "subject":format!("project:{slug}"),
+            "claim":"isolated fixture", "cwd":own
+        }), &auth()).unwrap();
+        assert_eq!(list(&cfg, &json!({"cwd":foreign.clone()})).unwrap().as_array().unwrap().len(), 0);
+        assert_eq!(review(&cfg, &json!({"cwd":foreign,"pid":pid})), Err(Error::Untrusted));
+        assert_eq!(list(&cfg, &json!({"cwd":own})).unwrap().as_array().unwrap().len(), 1);
     }
 
     #[cfg(unix)]

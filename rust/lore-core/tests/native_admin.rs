@@ -415,6 +415,30 @@ fn native(t: &tempfile::TempDir, cfg: &Config, args: &[&str]) -> std::process::O
         .unwrap()
 }
 #[test]
+fn detached_project_belief_is_staged_only_for_its_project() {
+    let (temp, cfg) = config();
+    let own = temp.path().join("own");
+    let foreign = temp.path().join("foreign");
+    std::fs::create_dir(&own).unwrap();
+    std::fs::create_dir(&foreign).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_lore-rs"))
+        .args(["belief", "add", "--cwd", own.to_str().unwrap(), "scoped fixture claim"])
+        .env_clear()
+        .env("HOME", temp.path())
+        .env("LORE_ROOT", &cfg.root)
+        .env("TMPDIR", temp.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let pid = response["pid"].as_str().unwrap();
+    let reviewed = lore_core::pending::review(&cfg, &json!({"cwd":own,"pid":pid})).unwrap();
+    let item: Value = serde_json::from_str(reviewed["raw"].as_str().unwrap()).unwrap();
+    assert_eq!(item["project"], lore_core::config::project_slug(&own));
+    assert!(lore_core::pending::list(&cfg, &json!({"cwd":foreign.clone()})).unwrap().as_array().unwrap().is_empty());
+    assert_eq!(lore_core::pending::review(&cfg, &json!({"cwd":foreign,"pid":pid})), Err(lore_core::Error::Untrusted));
+}
+#[test]
 fn setup_stages_auto_memory_and_teardown_preserves_existing_preferences_and_overcap() {
     let (t, cfg) = config();
     let cwd = t.path().join("project");
