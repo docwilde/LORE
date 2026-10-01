@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.62.11 — 2026-10-01
+
+**macOS native build**
+
+- Compare **`files::link_at`** device and inode identities with checked conversion across Linux and macOS stat types.
+- Add macOS Rust build coverage for the native memory carrier.
+
 ## 0.62.10 — 2026-10-01
 
 **Sync safety and review scope**
