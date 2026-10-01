@@ -856,7 +856,12 @@ fn stored_wire_rows(
         let class = crate::graph::db_text(row, 4, 64, &mut budget)?;
         let op = crate::graph::db_text(row, 5, 64, &mut budget)?;
         let pk = crate::graph::db_optional_text(row, 6, 2048, &mut budget)?;
-        let payload = crate::graph::db_text(row, 7, crate::MAX_FRAME_BYTES, &mut budget)?;
+        let payload_cap = if class == "session" && op == "msgs" {
+            MAX_SESSION_PAYLOAD_BYTES + 8192
+        } else {
+            crate::MAX_FRAME_BYTES
+        };
+        let payload = crate::graph::db_text(row, 7, payload_cap, &mut budget)?;
         let mac = crate::graph::db_optional_text(row, 8, 64, &mut budget)?;
         let created = crate::graph::db_optional_text(row, 9, 128, &mut budget)?;
         rows.push(json!({"op_id":id,"machine_id":machine,"machine_seq":seq,"lamport":lamport,"class":class,"op":op,"project_key":pk,"payload":serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null),"mac":mac,"created":created}));
@@ -1191,6 +1196,11 @@ fn state(conn: &Connection, op: &Value) -> Result<Option<i64>> {
         )
         .optional()?)
 }
+fn same_recorded_proof(conn: &Connection, op: &Value) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT op_id,machine_id,machine_seq,lamport,class,op,project_key,payload,mac,created FROM sync_ops WHERE op_id=?")?;
+    let prior = stored_wire_rows(&mut stmt, [text_field(op, "op_id")?])?;
+    Ok(prior.len() == 1 && tuple(&prior[0]) == tuple(op) && prior[0]["mac"] == op["mac"])
+}
 fn receive_lock(cfg: &Config, op: &Value) -> Result<files::Locks> {
     files::Locks::acquire(
         &cfg.root,
@@ -1278,6 +1288,10 @@ pub fn apply_ops(cfg: &Config, ops: &[Value]) -> Result<Value> {
                     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
                     if record(&tx, &op, APPLIED_UNVERIFIED)? {
                         report.unverified += 1
+                    } else if state(&tx, &op)? == Some(APPLIED_FAILED) {
+                        // An unauthenticated reuse of a failed ID cannot
+                        // settle the delivery and release the pull cursor.
+                        report.failed += 1
                     } else {
                         report.duplicate += 1
                     }
@@ -1297,9 +1311,22 @@ pub fn apply_ops(cfg: &Config, ops: &[Value]) -> Result<Value> {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let initial = if unknown { APPLIED_UNKNOWN } else if quarantine { APPLIED_QUARANTINED } else { APPLIED_NO };
         if !record(&tx, &op, initial)? {
-            report.duplicate += 1;
-            tx.commit()?;
-            continue;
+            // A failed effect retains the authenticated operation so the next
+            // delivery can retry it. Never let a different signed envelope
+            // borrow that op_id, even when its MAC is otherwise valid.
+            match state(&tx, &op)? {
+                Some(APPLIED_FAILED) if same_recorded_proof(&tx, &op)? => {}
+                Some(_) if !same_recorded_proof(&tx, &op)? => {
+                    report.failed += 1;
+                    tx.commit()?;
+                    continue;
+                }
+                _ => {
+                    report.duplicate += 1;
+                    tx.commit()?;
+                    continue;
+                }
+            }
         }
         if let Err(error) = observe(&tx, &op) {
             mark(&tx, &op, APPLIED_FAILED)?;
@@ -2227,6 +2254,50 @@ mod tests {
         assert_eq!(
             memory::read_entries(&approval.root.join("USER.md")).unwrap(),
             ["approved uncertain fixture"]
+        );
+    }
+
+    #[test]
+    fn uncertain_signed_effect_retries_only_its_original_proof() {
+        let (_temp, cfg) = fixture();
+        files::private_dir(&cfg.root).unwrap();
+        files::atomic_write(&cfg.root.join("provenance.json"), b"{broken fixture").unwrap();
+        let original = op(
+            &cfg,
+            "retry-partial",
+            1,
+            "memory",
+            "add",
+            None,
+            json!({"text":"partially landed fixture","source_engine":"codex"}),
+        );
+        let first = apply_ops(&cfg, &[original.clone()]).unwrap();
+        assert_eq!(first["failed"], 1);
+        assert_eq!(first["may_have_applied"], 1);
+        let mut changed = original.clone();
+        changed["payload"]["text"] = json!("replacement fixture");
+        changed["mac"] = json!(compute_mac(&changed, cfg.sync.key.as_deref().unwrap()).unwrap());
+        let rejected = apply_ops(&cfg, &[changed]).unwrap();
+        assert_eq!(rejected["failed"], 1);
+        assert_eq!(rejected["duplicate"], 0);
+        let mut unsigned = original.clone();
+        unsigned["mac"] = Value::Null;
+        let unverified = apply_ops(&cfg, &[unsigned]).unwrap();
+        assert_eq!(unverified["failed"], 1);
+        assert_eq!(unverified["duplicate"], 0);
+        assert_eq!(
+            memory::read_entries(&cfg.root.join("USER.md")).unwrap(),
+            ["partially landed fixture"]
+        );
+        files::atomic_write(&cfg.root.join("provenance.json"), b"{}").unwrap();
+        let retried = apply_ops(&cfg, &[original.clone()]).unwrap();
+        assert_eq!(retried["applied"], 1);
+        assert_eq!(retried["duplicate"], 0);
+        let conn = store::connect(&cfg).unwrap();
+        assert_eq!(state(&conn, &original).unwrap(), Some(APPLIED_YES));
+        assert_eq!(
+            memory::read_entries(&cfg.root.join("USER.md")).unwrap(),
+            ["partially landed fixture"]
         );
     }
 
