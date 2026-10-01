@@ -845,7 +845,11 @@ def index_live_fd(conn: sqlite3.Connection, fd: int, logical_path: Path) -> tupl
             previous_size = int(file_row[0].rsplit(":", 1)[1])
         except (IndexError, ValueError):
             pass
-    reset_for_truncation = previous_size is not None and st.st_size < previous_size
+    current_stamp = f"{st.st_mtime}:{st.st_size}"
+    reset_for_truncation = previous_size is not None and (
+        st.st_size < previous_size
+        or (st.st_size == previous_size and file_row[0] != current_stamp)
+    )
     if reset_for_truncation:
         start = 0
     existing_meta = conn.execute(
@@ -951,7 +955,7 @@ def index_live_fd(conn: sqlite3.Connection, fd: int, logical_path: Path) -> tupl
     if consumed != previous_start or file_row is None or incomplete_tail or reset_for_truncation:
         conn.execute(
             "INSERT OR REPLACE INTO files(path, stamp, lines_indexed) VALUES(?,?,?)",
-            (key, None if incomplete_tail else f"{st.st_mtime}:{st.st_size}", consumed))
+            (key, None if incomplete_tail else current_stamp, consumed))
     conn.execute(f"RELEASE {savepoint}")
     if owned_transaction:
         conn.commit()
