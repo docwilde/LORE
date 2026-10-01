@@ -6,6 +6,22 @@ decisions were made, see [`user-model-channel-separation.md`](user-model-channel
 [`memory-proposal-quality.md`](memory-proposal-quality.md), and
 [`write-gate.md`](write-gate.md).
 
+## Platform support
+
+- **Linux:** The native CLI, launcher and full test suite run in CI.
+- **macOS:** The native Rust carrier is checked in CI; the full CLI and plugin
+  workflows are not yet exercised there.
+- **Native Windows:** Not supported. `bin/lore`, `./task` and the Codex skill
+  launcher use POSIX shell, while the Rust carrier relies on Unix ownership,
+  descriptor, locking and process APIs. There is no Windows build or CI job.
+- **Windows with WSL 2:** A Linux environment is the route to try. Install
+  Rust, the agent CLI and LORE in one WSL 2 distribution, keep the checkout
+  and store in its Linux filesystem (such as `~/repo` and `~/.claude/lore`),
+  and use the Linux install instructions. This combination is not covered
+  by LORE CI, so it is not a verified platform yet. A native Windows agent
+  process and a WSL 2 LORE process should not be assumed to share hooks,
+  paths or store identity automatically.
+
 ## Commands
 
 | Command | What it does |

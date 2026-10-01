@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.62.12 — 2026-10-01
+
+**Platform documentation**
+
+- Document Linux and macOS verification, native Windows limits and the unverified WSL 2 route in the README and manual.
+- Align the Codex plugin manifest with the 0.62.12 release.
+
 ## 0.62.11 — 2026-10-01
 
 **macOS native build**

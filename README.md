@@ -71,6 +71,20 @@ directory. Store paths and identity remain process configuration. Saved credenti
 
 **First run:** review only looks forward, so run `/lore:backfill project` once to derive existing sessions into the belief store.
 
+### Windows
+
+Native Windows is not supported yet. The `bin/lore` launcher and `./task`
+require a POSIX shell, and the Rust carrier uses Unix file and process APIs.
+CI checks Linux and macOS, but not Windows.
+
+[WSL 2](https://learn.microsoft.com/windows/wsl/install) is the practical
+route to try on a Windows machine: install Rust and run LORE and its Claude
+Code or Codex integration inside the same Linux
+distribution. Keep the checkout and LORE store in the distribution's Linux
+filesystem (for example, under `~/`), then follow the install steps above.
+This WSL 2 setup has not been verified in LORE CI; see the
+[platform notes](docs/manual.md#platform-support) before relying on it.
+
 ### Codex
 
 LORE supports Codex through the portable [`plugin.json`](plugin.json) and
