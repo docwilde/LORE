@@ -639,6 +639,12 @@ increasing — opaque to the puller either way) rather than a Postgres
 an opaque paging cursor, echoed back verbatim as `since` on the next
 call, never used for merge order (§6.4 applies unchanged).
 
+LORE peers also return `scanned_to`, the last position inspected in the
+unfiltered stream. Unlike `next`, it remains an integer on the terminal page.
+This lets a puller save its cursor when the final page contains only excluded
+ops. Pullers accept older peers and hubs that omit this optional field, using
+the last non-null `next` or delivered `hub_seq` as before.
+
 A peer:
 
 - MUST implement `GET /ops` per §6.3–§6.4.

@@ -530,14 +530,33 @@ class PeerProtocol(unittest.TestCase):
             page = self.mod.ops_page(conn, 0, 10, exclude=MACHINE_B)
             self.assertEqual(len(page["ops"]), 1, "B's ops were not excluded")
             self.assertIsNone(page["next"], "the whole log was scanned")
+            self.assertEqual(page["scanned_to"], 4)
 
             # A page whose every row is filtered out still advances.
             page = self.mod.ops_page(conn, 1, 2, exclude=MACHINE_B)
             self.assertEqual(page["ops"], [])
             self.assertEqual(page["next"], 3,
                              "an all-excluded page must still move the cursor")
+            terminal = self.mod.ops_page(conn, 3, 2, exclude=MACHINE_B)
+            self.assertEqual(terminal["ops"], [])
+            self.assertIsNone(terminal["next"])
+            self.assertEqual(terminal["scanned_to"], 4)
         finally:
             conn.close()
+
+    def test_terminal_excluded_page_banks_cursor_and_legacy_page_still_drains(self):
+        class Pages:
+            def __init__(self, responses):
+                self.responses = responses
+            def pull(self, since, *, limit, exclude):
+                return self.responses.pop(0)
+
+        self.assertEqual(self.mod.drain(Pages([
+            {"ops": [], "next": None, "scanned_to": 4}
+        ]), since=3, exclude=MACHINE_B), ([], 1, 4))
+        self.assertEqual(self.mod.drain(Pages([
+            {"ops": [{"hub_seq": 4}], "next": None}
+        ]), since=3), ([{"hub_seq": 4}], 1, 4))
 
     def test_a_peer_serves_the_ops_it_relayed_not_only_the_ones_it_wrote(self):
         """sync.md, Transport B: with no hub, a machine that is off "holds ops

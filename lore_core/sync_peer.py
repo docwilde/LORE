@@ -450,7 +450,10 @@ def ops_page(conn: sqlite3.Connection, since: int, limit: int,
         })
     more = conn.execute("SELECT 1 FROM sync_ops WHERE seq > ? LIMIT 1",
                         (last,)).fetchone() is not None
-    return {"ops": ops, "next": last if more else None}
+    # `next` is null on the terminal page, including when every row was
+    # excluded. Keep the last scanned position separately so the puller can
+    # bank that page without seeing a returned op.
+    return {"ops": ops, "next": last if more else None, "scanned_to": last}
 
 
 class PeerOps:

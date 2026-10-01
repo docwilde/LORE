@@ -185,6 +185,25 @@ fn pull_drains_before_canonical_application_and_banks_cursor() {
     assert_eq!(stored, ["Older fact", "Later fact"]);
 }
 #[test]
+fn terminal_excluded_page_banks_scanned_cursor_and_legacy_page_still_works() {
+    let (_t, cfg) = config();
+    let (url, handle) = fixture(vec![(200, json!({"ops":[],"next":null,"scanned_to":4}))]);
+    let transport = Transport::new(&url, None, "peer:excluded".into()).unwrap();
+    let report = net::pull(&cfg, &transport).unwrap();
+    assert_eq!(report["fetched"], 0);
+    assert_eq!(report["drained_to"], 4);
+    assert_eq!(cursor(&cfg, &transport), "4");
+    handle.join().unwrap();
+
+    let mut old = op("legacy visible", 1);
+    old["hub_seq"] = json!(5);
+    let (url, handle) = fixture(vec![(200, json!({"ops":[old],"next":null}))]);
+    let transport = Transport::new(&url, None, "peer:legacy".into()).unwrap();
+    let report = net::pull(&cfg, &transport).unwrap();
+    assert_eq!(report["drained_to"], 5);
+    handle.join().unwrap();
+}
+#[test]
 fn pull_reports_cross_chunk_dependencies_after_final_retry() {
     let (_t, cfg) = config();
     let sign = |mut value: Value, seq: i64| {
