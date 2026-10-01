@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.62.10 — 2026-10-01
+
+**Sync safety and review scope**
+
+- Retry failed signed native effects only with their original authenticated proof, without advancing the pull cursor past a failed effect.
+- Preserve locally owned or edited skills during sync; stage conflicting changes for review and report failed removals.
+- Bind staged project belief reviews to their checkout, including older proposals without an explicit project field.
+- Keep peer cursors separate by URL path and advance past excluded terminal pages using the scanned stream position.
+- Refresh indexed search rows when a live transcript is truncated or rewritten.
+
 ## 0.62.9 — 2026-09-30
 
 **Pending review scope**
