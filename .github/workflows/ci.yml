@@ -13,6 +13,13 @@ permissions:
   contents: read
 
 jobs:
+  macos-native:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Check native macOS carrier
+        run: cargo check --locked --workspace
   test:
     runs-on: ubuntu-latest
     # The whole suite runs in about a second; anything approaching this

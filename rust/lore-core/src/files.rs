@@ -407,7 +407,9 @@ pub(crate) fn link_move_at(
     }
     let st = unsafe { st.assume_init() };
     let meta = proof.metadata().map_err(|_| Error::MayHaveApplied)?;
-    if st.st_dev != meta.dev() || st.st_ino != meta.ino() || st.st_nlink != 2 || meta.nlink() != 2 {
+    if u64::try_from(st.st_dev).ok() != Some(meta.dev())
+        || u64::try_from(st.st_ino).ok() != Some(meta.ino())
+        || st.st_nlink != 2 || meta.nlink() != 2 {
         return Err(Error::MayHaveApplied);
     }
     if unsafe { libc::unlinkat(source.as_raw_fd(), old_name.as_ptr(), 0) } != 0 {
