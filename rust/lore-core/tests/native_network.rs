@@ -402,14 +402,11 @@ fn failed_receipt_retains_cursor_and_retry_receives_missing_operation() {
 #[test]
 fn failed_signed_effect_retries_before_advancing_pull_cursor() {
     let (_t, cfg) = config();
-    let mut row = op("unused", 1);
-    row["class"] = json!("skill");
-    row["op"] = json!("put");
-    row["payload"] = json!({"name":"retry-fixture","body":"# Recovered skill"});
-    row["mac"] = json!(lore_core::sync_apply::compute_mac(&row, KEY).unwrap());
+    let mut row = op("retry fixture", 1);
     row["hub_seq"] = json!(1);
-    let target = cfg.skills.join("retry-fixture/SKILL.md");
-    std::fs::create_dir_all(&target).unwrap();
+    std::fs::create_dir_all(&cfg.root).unwrap();
+    let provenance = cfg.root.join("provenance.json");
+    std::fs::write(&provenance, "{broken fixture").unwrap();
     let (url, handle) = fixture(vec![
         (200, json!({"ops":[row.clone()],"next":null})),
         (200, json!({"ops":[row],"next":null})),
@@ -419,14 +416,14 @@ fn failed_signed_effect_retries_before_advancing_pull_cursor() {
     assert_eq!(first["failed"], 1);
     assert_eq!(first["cursor_advanced"], false);
     assert_eq!(cursor(&cfg, &transport), "0");
-    std::fs::remove_dir(&target).unwrap();
+    std::fs::write(&provenance, "{}").unwrap();
     let second = net::pull(&cfg, &transport).unwrap();
     assert_eq!(second["applied"], 1);
     assert_eq!(second["duplicate"], 0);
     assert_eq!(second["failed"], 0);
     assert_eq!(second["cursor_advanced"], true);
     assert_eq!(cursor(&cfg, &transport), "1");
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "# Recovered skill");
+    assert_eq!(std::fs::read_to_string(cfg.root.join("USER.md")).unwrap(), "- retry fixture\n");
     assert!(handle.join().unwrap().iter().all(|r| r.contains("since=0")));
 }
 #[test]
