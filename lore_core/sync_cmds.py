@@ -367,13 +367,11 @@ def drain(client, *, since: int = 0, page: int = DEFAULT_PAGE,
 
     Returns (ops, pages, drained_to) where `drained_to` is the position in the
     server's UNFILTERED stream that this drain reached -- the highest of the
-    last non-null `next` and the highest `hub_seq` actually delivered. Both
+    last `scanned_to`, non-null `next`, and delivered `hub_seq`. These
     are positions the caller has now seen everything up to (S6.3: `next` is
     "the hub_seq to pass as since for the following call", and `since` means
-    "already fully drained"), and taking the greater of the two avoids the two
-    ways a cursor built from only one of them stalls: a final page with
-    `next: null` would otherwise be re-delivered on every pull, and an
-    `exclude`d tail would otherwise never be passed.
+    "already fully drained"). The maximum covers both a final page with
+    `next: null` and an excluded tail with no delivered ops.
 
     NOTHING IS APPLIED HERE (S6.4 step 2: "MUST NOT apply anything before the
     drain completes"). A page's array is in hub_seq order, which is insertion
@@ -382,13 +380,23 @@ def drain(client, *, since: int = 0, page: int = DEFAULT_PAGE,
     design says is meaningless.
     """
     ops: "list[dict]" = []
-    cursor, pages, last_next = int(since), 0, 0
+    cursor, pages, last_next, last_scanned = int(since), 0, 0, 0
     while True:
         answer = client.pull(cursor, limit=page, exclude=exclude)
         got = answer.get("ops") or []
         ops.extend(got)
         pages += 1
         nxt = answer.get("next")
+        scanned = answer.get("scanned_to")
+        if scanned is not None:
+            if (isinstance(scanned, bool) or not isinstance(scanned, int)
+                    or scanned < cursor
+                    or any(not isinstance(o.get("hub_seq"), int)
+                           or o["hub_seq"] > scanned for o in got)):
+                raise SyncError("peer returned an invalid scanned_to cursor")
+            if nxt is not None and scanned != int(nxt):
+                raise SyncError("peer next and scanned_to cursors disagree")
+            last_scanned = max(last_scanned, scanned)
         if nxt is None:
             break
         nxt = int(nxt)
@@ -402,7 +410,7 @@ def drain(client, *, since: int = 0, page: int = DEFAULT_PAGE,
         cursor = nxt
     highest = max((int(o["hub_seq"]) for o in ops if isinstance(o.get("hub_seq"), int)),
                   default=0)
-    return ops, pages, max(int(since), last_next, highest)
+    return ops, pages, max(int(since), last_next, last_scanned, highest)
 
 
 def pull_ops(conn: sqlite3.Connection, client, *, machine_id: "str | None" = None,

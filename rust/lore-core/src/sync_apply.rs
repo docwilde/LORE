@@ -856,7 +856,12 @@ fn stored_wire_rows(
         let class = crate::graph::db_text(row, 4, 64, &mut budget)?;
         let op = crate::graph::db_text(row, 5, 64, &mut budget)?;
         let pk = crate::graph::db_optional_text(row, 6, 2048, &mut budget)?;
-        let payload = crate::graph::db_text(row, 7, crate::MAX_FRAME_BYTES, &mut budget)?;
+        let payload_cap = if class == "session" && op == "msgs" {
+            MAX_SESSION_PAYLOAD_BYTES + 8192
+        } else {
+            crate::MAX_FRAME_BYTES
+        };
+        let payload = crate::graph::db_text(row, 7, payload_cap, &mut budget)?;
         let mac = crate::graph::db_optional_text(row, 8, 64, &mut budget)?;
         let created = crate::graph::db_optional_text(row, 9, 128, &mut budget)?;
         rows.push(json!({"op_id":id,"machine_id":machine,"machine_seq":seq,"lamport":lamport,"class":class,"op":op,"project_key":pk,"payload":serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null),"mac":mac,"created":created}));
@@ -994,7 +999,38 @@ fn skill(cfg: &Config, conn: &Connection, op: &Value) -> Result<Applied> {
         .into_iter()
         .filter(|old| old["op_id"] != op["op_id"] && old["payload"]["name"] == name)
         .max_by_key(order);
-    match text(op, "op", 64)? {
+    let verb = text(op, "op", 64)?;
+    if directory.try_exists()? {
+        // A valid MAC does not grant ownership of a locally installed skill.
+        // The current file must still match a previously applied LORE put.
+        let owned = if let Some(old) = &prior {
+            if target.try_exists()? {
+                let current = files::read_regular(&target, crate::MAX_FRAME_BYTES)?;
+                current == fallback(&old["payload"], "body", "", crate::MAX_FRAME_BYTES)?.as_bytes()
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let removable = if verb == "remove" && owned {
+            let mut entries = fs::read_dir(&directory)?;
+            entries.next().transpose()?.is_some_and(|e| e.file_name() == "SKILL.md")
+                && entries.next().transpose()?.is_none()
+        } else {
+            owned
+        };
+        if !removable {
+            stage(cfg, &json!({"kind":"skill","action":if verb == "remove" { "retire" } else { "update" },
+                "name":name,"body":if verb == "put" { fallback(p,"body","",crate::MAX_FRAME_BYTES)? } else { String::new() },
+                "description":format!("sync request conflicts with local skill {name}"),
+                "origin":"sync-skill-local-conflict"}),
+                &deterministic_uid(text_field(op, "op_id")?))?;
+            mark(conn, op, APPLIED_YES)?;
+            return Ok(Applied::Complete);
+        }
+    }
+    match verb {
         "remove" => {
             if prior.as_ref().is_some_and(|old| order(old) > order(op)) {
                 return Ok(Applied::Complete);
@@ -1191,6 +1227,11 @@ fn state(conn: &Connection, op: &Value) -> Result<Option<i64>> {
         )
         .optional()?)
 }
+fn same_recorded_proof(conn: &Connection, op: &Value) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT op_id,machine_id,machine_seq,lamport,class,op,project_key,payload,mac,created FROM sync_ops WHERE op_id=?")?;
+    let prior = stored_wire_rows(&mut stmt, [text_field(op, "op_id")?])?;
+    Ok(prior.len() == 1 && tuple(&prior[0]) == tuple(op) && prior[0]["mac"] == op["mac"])
+}
 fn receive_lock(cfg: &Config, op: &Value) -> Result<files::Locks> {
     files::Locks::acquire(
         &cfg.root,
@@ -1278,6 +1319,10 @@ pub fn apply_ops(cfg: &Config, ops: &[Value]) -> Result<Value> {
                     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
                     if record(&tx, &op, APPLIED_UNVERIFIED)? {
                         report.unverified += 1
+                    } else if state(&tx, &op)? == Some(APPLIED_FAILED) {
+                        // An unauthenticated reuse of a failed ID cannot
+                        // settle the delivery and release the pull cursor.
+                        report.failed += 1
                     } else {
                         report.duplicate += 1
                     }
@@ -1297,9 +1342,22 @@ pub fn apply_ops(cfg: &Config, ops: &[Value]) -> Result<Value> {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let initial = if unknown { APPLIED_UNKNOWN } else if quarantine { APPLIED_QUARANTINED } else { APPLIED_NO };
         if !record(&tx, &op, initial)? {
-            report.duplicate += 1;
-            tx.commit()?;
-            continue;
+            // A failed effect retains the authenticated operation so the next
+            // delivery can retry it. Never let a different signed envelope
+            // borrow that op_id, even when its MAC is otherwise valid.
+            match state(&tx, &op)? {
+                Some(APPLIED_FAILED) if same_recorded_proof(&tx, &op)? => {}
+                Some(_) if !same_recorded_proof(&tx, &op)? => {
+                    report.failed += 1;
+                    tx.commit()?;
+                    continue;
+                }
+                _ => {
+                    report.duplicate += 1;
+                    tx.commit()?;
+                    continue;
+                }
+            }
         }
         if let Err(error) = observe(&tx, &op) {
             mark(&tx, &op, APPLIED_FAILED)?;
@@ -2008,6 +2066,38 @@ mod tests {
         ));
     }
     #[test]
+    fn signed_skill_ops_preserve_manual_installations_and_local_edits() {
+        let (_temp, cfg) = fixture();
+        let manual = cfg.skills.join("manual-skill");
+        fs::create_dir_all(&manual).unwrap();
+        fs::write(manual.join("SKILL.md"), "manual instructions").unwrap();
+        let put = op(&cfg, "manual-put", 1, "skill", "put", None,
+            json!({"name":"manual-skill","body":"remote instructions"}));
+        let remove = op(&cfg, "manual-remove", 2, "skill", "remove", None,
+            json!({"name":"manual-skill"}));
+        assert_eq!(apply_ops(&cfg, &[put, remove]).unwrap()["applied"], 2);
+        assert_eq!(fs::read_to_string(manual.join("SKILL.md")).unwrap(), "manual instructions");
+        let proposals = proposal_files(&cfg, false).unwrap();
+        assert_eq!(proposals.len(), 2);
+
+        let initial = op(&cfg, "owned-put", 3, "skill", "put", None,
+            json!({"name":"edited-skill","body":"synced body"}));
+        assert_eq!(apply_ops(&cfg, &[initial]).unwrap()["applied"], 1);
+        let edited = cfg.skills.join("edited-skill");
+        fs::write(edited.join("SKILL.md"), "local edit").unwrap();
+        let update = op(&cfg, "owned-update", 4, "skill", "put", None,
+            json!({"name":"edited-skill","body":"new remote body"}));
+        assert_eq!(apply_ops(&cfg, &[update]).unwrap()["applied"], 1);
+        assert_eq!(fs::read_to_string(edited.join("SKILL.md")).unwrap(), "local edit");
+        fs::write(edited.join("SKILL.md"), "synced body").unwrap();
+        fs::write(edited.join("notes.txt"), "manual asset").unwrap();
+        let remove = op(&cfg, "owned-remove", 5, "skill", "remove", None,
+            json!({"name":"edited-skill"}));
+        assert_eq!(apply_ops(&cfg, &[remove]).unwrap()["applied"], 1);
+        assert!(edited.join("SKILL.md").exists());
+        assert!(edited.join("notes.txt").exists());
+    }
+    #[test]
     fn portable_pending_uids_are_exact_data_keys_not_filenames() {
         let (temp, cfg) = fixture();
         let outside = temp.path().join("outside.json");
@@ -2227,6 +2317,50 @@ mod tests {
         assert_eq!(
             memory::read_entries(&approval.root.join("USER.md")).unwrap(),
             ["approved uncertain fixture"]
+        );
+    }
+
+    #[test]
+    fn uncertain_signed_effect_retries_only_its_original_proof() {
+        let (_temp, cfg) = fixture();
+        files::private_dir(&cfg.root).unwrap();
+        files::atomic_write(&cfg.root.join("provenance.json"), b"{broken fixture").unwrap();
+        let original = op(
+            &cfg,
+            "retry-partial",
+            1,
+            "memory",
+            "add",
+            None,
+            json!({"text":"partially landed fixture","source_engine":"codex"}),
+        );
+        let first = apply_ops(&cfg, &[original.clone()]).unwrap();
+        assert_eq!(first["failed"], 1);
+        assert_eq!(first["may_have_applied"], 1);
+        let mut changed = original.clone();
+        changed["payload"]["text"] = json!("replacement fixture");
+        changed["mac"] = json!(compute_mac(&changed, cfg.sync.key.as_deref().unwrap()).unwrap());
+        let rejected = apply_ops(&cfg, &[changed]).unwrap();
+        assert_eq!(rejected["failed"], 1);
+        assert_eq!(rejected["duplicate"], 0);
+        let mut unsigned = original.clone();
+        unsigned["mac"] = Value::Null;
+        let unverified = apply_ops(&cfg, &[unsigned]).unwrap();
+        assert_eq!(unverified["failed"], 1);
+        assert_eq!(unverified["duplicate"], 0);
+        assert_eq!(
+            memory::read_entries(&cfg.root.join("USER.md")).unwrap(),
+            ["partially landed fixture"]
+        );
+        files::atomic_write(&cfg.root.join("provenance.json"), b"{}").unwrap();
+        let retried = apply_ops(&cfg, &[original.clone()]).unwrap();
+        assert_eq!(retried["applied"], 1);
+        assert_eq!(retried["duplicate"], 0);
+        let conn = store::connect(&cfg).unwrap();
+        assert_eq!(state(&conn, &original).unwrap(), Some(APPLIED_YES));
+        assert_eq!(
+            memory::read_entries(&cfg.root.join("USER.md")).unwrap(),
+            ["partially landed fixture"]
         );
     }
 

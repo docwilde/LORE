@@ -645,6 +645,18 @@ pub fn pull_from(
                 drained = drained.max(position);
                 ops.push(op.clone());
             }
+            if let Some(scanned) = response.get("scanned_to") {
+                let scanned = scanned
+                    .as_i64()
+                    .filter(|n| *n >= cursor && *n >= previous)
+                    .ok_or(Error::InvalidRequest)?;
+                if !response["next"].is_null()
+                    && response["next"].as_i64() != Some(scanned)
+                {
+                    return Err(Error::InvalidRequest);
+                }
+                drained = drained.max(scanned);
+            }
             pages += 1;
             match response.get("next") {
                 Some(Value::Null) => break,
@@ -889,7 +901,7 @@ pub fn ops_page(cfg: &Config, since: i64, limit: usize, exclude: Option<&str>) -
         })
         .optional()?
         .is_some();
-    Ok(json!({"ops":ops,"next":if more{Some(last)}else{None}}))
+    Ok(json!({"ops":ops,"next":if more{Some(last)}else{None},"scanned_to":last}))
 }
 fn enabled(cfg: &Config, class: &str) -> bool {
     cfg.sync.enabled

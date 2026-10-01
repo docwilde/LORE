@@ -305,6 +305,47 @@ class TestLiveIndex(unittest.TestCase):
         added3, consumed3 = lore.index_live(conn, t)
         self.assertEqual((added3, consumed3), (0, 8))
 
+    def test_truncated_or_replaced_live_transcript_reowns_search_rows(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "rewritten-live.jsonl"
+        _transcript(t, [_msg("user", "old first long message"),
+                        _msg("assistant", "old second long message")])
+        self.assertEqual(lore.index_live(conn, t), (2, 2))
+
+        _transcript(t, [_msg("user", "new shorter message")])
+        self.assertEqual(lore.index_live(conn, t), (1, 1))
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("new shorter message",)])
+
+        _transcript(t, [_msg("assistant", "new")])  # same line count, smaller file
+        self.assertEqual(lore.index_live(conn, t), (1, 1))
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("new",)])
+
+        t.write_text("", encoding="utf-8")
+        self.assertEqual(lore.index_live(conn, t), (0, 0))
+        self.assertEqual(conn.execute(
+            "SELECT count(*) FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchone()[0], 0)
+        self.assertEqual(conn.execute(
+            "SELECT messages FROM sessions WHERE session_id = ?", (t.stem,)
+        ).fetchone()[0], 0)
+
+    def test_same_size_live_transcript_rewrite_replaces_search_rows(self):
+        conn = lore.db_connect()
+        t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "same-size-live.jsonl"
+        _transcript(t, [_msg("user", "old")])
+        old_mtime = t.stat().st_mtime
+        self.assertEqual(lore.index_live(conn, t), (1, 1))
+        _transcript(t, [_msg("user", "new")])
+        os.utime(t, (old_mtime + 1, old_mtime + 1))
+        self.assertEqual(lore.index_live(conn, t), (1, 1))
+        self.assertEqual(conn.execute(
+            "SELECT content FROM msg WHERE session_id = ?", (t.stem,)
+        ).fetchall(), [("new",)])
+
     def test_partial_tail_deferred_to_next_pass(self):
         conn = lore.db_connect()
         t = Path(os.environ["LORE_PROJECTS_DIR"]) / "-tmp-live" / "partial.jsonl"

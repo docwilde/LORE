@@ -185,6 +185,25 @@ fn pull_drains_before_canonical_application_and_banks_cursor() {
     assert_eq!(stored, ["Older fact", "Later fact"]);
 }
 #[test]
+fn terminal_excluded_page_banks_scanned_cursor_and_legacy_page_still_works() {
+    let (_t, cfg) = config();
+    let (url, handle) = fixture(vec![(200, json!({"ops":[],"next":null,"scanned_to":4}))]);
+    let transport = Transport::new(&url, None, "peer:excluded".into()).unwrap();
+    let report = net::pull(&cfg, &transport).unwrap();
+    assert_eq!(report["fetched"], 0);
+    assert_eq!(report["drained_to"], 4);
+    assert_eq!(cursor(&cfg, &transport), "4");
+    handle.join().unwrap();
+
+    let mut old = op("legacy visible", 1);
+    old["hub_seq"] = json!(5);
+    let (url, handle) = fixture(vec![(200, json!({"ops":[old],"next":null}))]);
+    let transport = Transport::new(&url, None, "peer:legacy".into()).unwrap();
+    let report = net::pull(&cfg, &transport).unwrap();
+    assert_eq!(report["drained_to"], 5);
+    handle.join().unwrap();
+}
+#[test]
 fn pull_reports_cross_chunk_dependencies_after_final_retry() {
     let (_t, cfg) = config();
     let sign = |mut value: Value, seq: i64| {
@@ -398,6 +417,33 @@ fn failed_receipt_retains_cursor_and_retry_receives_missing_operation() {
         )
         .unwrap();
     assert_eq!(cursor, "1");
+}
+#[test]
+fn failed_signed_effect_retries_before_advancing_pull_cursor() {
+    let (_t, cfg) = config();
+    let mut row = op("retry fixture", 1);
+    row["hub_seq"] = json!(1);
+    std::fs::create_dir_all(&cfg.root).unwrap();
+    let provenance = cfg.root.join("provenance.json");
+    std::fs::write(&provenance, "{broken fixture").unwrap();
+    let (url, handle) = fixture(vec![
+        (200, json!({"ops":[row.clone()],"next":null})),
+        (200, json!({"ops":[row],"next":null})),
+    ]);
+    let transport = Transport::new(&url, None, "peer:failed-effect".into()).unwrap();
+    let first = net::pull(&cfg, &transport).unwrap();
+    assert_eq!(first["failed"], 1);
+    assert_eq!(first["cursor_advanced"], false);
+    assert_eq!(cursor(&cfg, &transport), "0");
+    std::fs::write(&provenance, "{}").unwrap();
+    let second = net::pull(&cfg, &transport).unwrap();
+    assert_eq!(second["applied"], 1);
+    assert_eq!(second["duplicate"], 0);
+    assert_eq!(second["failed"], 0);
+    assert_eq!(second["cursor_advanced"], true);
+    assert_eq!(cursor(&cfg, &transport), "1");
+    assert_eq!(std::fs::read_to_string(cfg.root.join("USER.md")).unwrap(), "- retry fixture\n");
+    assert!(handle.join().unwrap().iter().all(|r| r.contains("since=0")));
 }
 #[test]
 fn session_start_schedules_only_native_pull_and_rate_limits_following_starts() {

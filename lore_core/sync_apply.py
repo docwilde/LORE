@@ -940,19 +940,38 @@ def _apply_skill(conn: sqlite3.Connection, op: dict) -> bool:
     if target is None:
         return True  # unsafe name: refused, exactly as apply_item refuses one
 
+    prior = _prior_skill_put(conn, op, name)
+    directory = target.parent
+    if directory.exists():
+        # A signed op establishes its author's identity, not ownership of an
+        # existing local installation. Only a file still matching an applied
+        # LORE put can be changed by the courier. Extra files also make a
+        # whole-directory remove unsafe.
+        owned = (prior is not None and target.is_file()
+                 and target.read_text(encoding="utf-8") == prior["body"])
+        if verb == "remove" and owned:
+            owned = {child.name for child in directory.iterdir()} == {"SKILL.md"}
+        if not owned:
+            _stage({"kind": "skill", "action": "retire" if verb == "remove" else "update",
+                    "name": name, "body": payload.get("body") or "",
+                    "description": f"sync request conflicts with local skill {name}",
+                    "origin": "sync-skill-local-conflict"},
+                   deterministic_uid(op["op_id"]))
+            return True
+
     if verb == "remove":
-        prior = _prior_skill_put(conn, op, name)
         if prior is not None and canonical_key(prior) > canonical_key(op):
             return True  # a newer put already restored this skill
         if target.parent.exists():
-            shutil.rmtree(target.parent, ignore_errors=True)
+            # The caller records a successful receipt only after this delete
+            # succeeds. A failed removal must remain visible for retry.
+            shutil.rmtree(target.parent)
         return True
 
     if verb == "put":
         if _newer_skill_remove(conn, op, name):
             return True  # a later remove already retired this body
         body = payload.get("body") or ""
-        prior = _prior_skill_put(conn, op, name)
         if prior is not None and prior["body"] == body:
             return True  # same body: nothing to win and nothing to stage
         if prior is not None and canonical_key(prior) > canonical_key(op):
