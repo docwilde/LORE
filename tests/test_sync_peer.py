@@ -319,6 +319,15 @@ class PeerAddressing(unittest.TestCase):
         )), {key: str(number) for number, key in enumerate(keys + [direct])})
         conn.close()
 
+    def test_distinct_url_paths_cannot_share_a_cursor(self):
+        base = self.mod.peer_key("https://workstation.example")
+        alpha = self.mod.peer_key("https://workstation.example/lore-alpha")
+        beta = self.mod.peer_key("https://workstation.example/lore-beta/")
+        self.assertEqual(len({base, alpha, beta}), 3)
+        self.assertEqual(alpha, self.mod.peer_key("https://workstation.example/lore-alpha/"))
+        self.assertEqual(beta, "peer:https://workstation.example/lore-beta")
+        self.assertEqual(self.mod.peer_key("workstation"), "peer:workstation")
+
     def test_ipv6_address_and_port_cannot_share_another_address_cursor(self):
         self.assertNotEqual(
             self.mod.peer_key("https://[::1]:8443"),

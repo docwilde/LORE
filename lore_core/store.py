@@ -836,8 +836,18 @@ def index_live_fd(conn: sqlite3.Connection, fd: int, logical_path: Path) -> tupl
     session_id = transcript.stem
     proj = transcript.parent.name
     engine = "claude"
-    file_row = conn.execute("SELECT lines_indexed FROM files WHERE path = ?", (key,)).fetchone()
-    start = int(file_row[0]) if file_row and file_row[0] else 0
+    file_row = conn.execute("SELECT stamp, lines_indexed FROM files WHERE path = ?", (key,)).fetchone()
+    previous_start = int(file_row[1]) if file_row and file_row[1] else 0
+    start = previous_start
+    previous_size = None
+    if file_row and file_row[0]:
+        try:
+            previous_size = int(file_row[0].rsplit(":", 1)[1])
+        except (IndexError, ValueError):
+            pass
+    reset_for_truncation = previous_size is not None and st.st_size < previous_size
+    if reset_for_truncation:
+        start = 0
     existing_meta = conn.execute(
         "SELECT cwd, title FROM sessions WHERE session_id = ?", (session_id,)
     ).fetchone()
@@ -846,41 +856,52 @@ def index_live_fd(conn: sqlite3.Connection, fd: int, logical_path: Path) -> tupl
     original_meta = (cwd, title)
     if start == 0:
         conn.execute("DELETE FROM msg WHERE session_id = ?", (session_id,))
-    consumed = start
-    incomplete_tail = False
-    new_rows: list[tuple] = []
     try:
-        for i, raw in enumerate(_live_lines(fd, st.st_size), 1):
-            if i <= start:
-                continue
-            try:
-                d = json.loads(raw)
-            except (json.JSONDecodeError, ValueError):
-                if not raw.endswith("\n"):
-                    incomplete_tail = True
-                    break  # in-flight append; retry the whole line next pass
+        while True:
+            consumed = start
+            seen = 0
+            incomplete_tail = False
+            new_rows: list[tuple] = []
+            for i, raw in enumerate(_live_lines(fd, st.st_size), 1):
+                seen = i
+                if i <= start:
+                    continue
+                try:
+                    d = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    if not raw.endswith("\n"):
+                        incomplete_tail = True
+                        break  # in-flight append; retry the whole line next pass
+                    consumed = i
+                    continue
                 consumed = i
-                continue
-            consumed = i
-            if isinstance(d, dict):
-                if not cwd and d.get("cwd"):
-                    cwd = d["cwd"]
-                if d.get("type") == "custom-title" and d.get("customTitle"):
-                    title = d["customTitle"]
-                elif d.get("type") == "ai-title" and not title:
-                    title = d.get("aiTitle") or None
-            if not isinstance(d, dict) or d.get("type") not in ("user", "assistant") \
-                    or d.get("isMeta"):
-                continue
-            if d.get("engine"):
-                engine = _engine_label(d["engine"])
-            message = d.get("message")
-            text = (extract_text(message.get("content", ""))
-                    if isinstance(message, dict) else "")
-            if text:
-                # Scrub before truncation so a split secret never persists.
-                new_rows.append((session_id, proj, d.get("timestamp") or "",
-                                 d["type"], scrub_secrets(text)[:MSG_TRUNC]))
+                if isinstance(d, dict):
+                    if not cwd and d.get("cwd"):
+                        cwd = d["cwd"]
+                    if d.get("type") == "custom-title" and d.get("customTitle"):
+                        title = d["customTitle"]
+                    elif d.get("type") == "ai-title" and not title:
+                        title = d.get("aiTitle") or None
+                if not isinstance(d, dict) or d.get("type") not in ("user", "assistant") \
+                        or d.get("isMeta"):
+                    continue
+                if d.get("engine"):
+                    engine = _engine_label(d["engine"])
+                message = d.get("message")
+                text = (extract_text(message.get("content", ""))
+                        if isinstance(message, dict) else "")
+                if text:
+                    # Scrub before truncation so a split secret never persists.
+                    new_rows.append((session_id, proj, d.get("timestamp") or "",
+                                     d["type"], scrub_secrets(text)[:MSG_TRUNC]))
+            if seen >= start:
+                break
+            # The old cursor is beyond EOF: this path was truncated or
+            # replaced. Re-own its search rows and replay the new file once.
+            conn.execute("DELETE FROM msg WHERE session_id = ?", (session_id,))
+            reset_for_truncation = True
+            start = 0
+            engine = "claude"
     except (OSError, UnicodeDecodeError):
         conn.execute(f"ROLLBACK TO {savepoint}")
         conn.execute(f"RELEASE {savepoint}")
@@ -891,7 +912,7 @@ def index_live_fd(conn: sqlite3.Connection, fd: int, logical_path: Path) -> tupl
         conn.executemany(
             "INSERT INTO msg(session_id, project, ts, role, content) VALUES(?,?,?,?,?)",
             new_rows)
-    if new_rows or (cwd, title) != original_meta:
+    if new_rows or (cwd, title) != original_meta or reset_for_truncation:
         # keep the sessions row usable by print_hits; the exact recount is one
         # indexed lookup, cheaper than tracking a delta through the delete path.
         n = conn.execute("SELECT count(*) FROM msg WHERE session_id = ?",
@@ -921,13 +942,13 @@ def index_live_fd(conn: sqlite3.Connection, fd: int, logical_path: Path) -> tupl
             "first_ts": row[3] if row else None, "last_ts": row[4] if row else None,
             "messages": row[5] if row else n, "engine": engine,
         })
-        if new_rows:
+        if new_rows or reset_for_truncation:
             append_op(conn, "session", "msgs", pk, {
                 "session_id": session_id,
                 "rows": [{"ts": ts, "role": role, "content": text}
                          for _sid, _proj, ts, role, text in new_rows],
             })
-    if consumed != start or file_row is None or incomplete_tail:
+    if consumed != previous_start or file_row is None or incomplete_tail or reset_for_truncation:
         conn.execute(
             "INSERT OR REPLACE INTO files(path, stamp, lines_indexed) VALUES(?,?,?)",
             (key, None if incomplete_tail else f"{st.st_mtime}:{st.st_size}", consumed))

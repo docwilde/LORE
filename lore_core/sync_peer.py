@@ -235,7 +235,8 @@ def peer_key(spec: str) -> str:
     Keep the legacy host key for the direct HTTP listener at peer_port(), so
     bare names and explicit default-port spellings retain their cursors.
     Other HTTP ports and every HTTPS endpoint need distinct rows: their
-    opaque cursors cannot be shared just because the host matches.
+    opaque cursors cannot be shared just because the host matches. URL paths
+    distinguish separately mounted peers at the same origin.
     """
     parsed = urllib.parse.urlsplit(peer_url(spec))
     host = (parsed.hostname or spec).strip().lower()
@@ -243,15 +244,16 @@ def peer_key(spec: str) -> str:
     # [::1]:8443 and [::1:8443] produce the same cursor key.
     if ":" in host:
         host = f"[{host}]"
+    path = parsed.path.rstrip("/")
     if parsed.scheme == "https":
         port = parsed.port or 443
-        return f"{PEER_PREFIX}https://{host}" + (f":{port}" if port != 443 else "")
+        return f"{PEER_PREFIX}https://{host}" + (f":{port}" if port != 443 else "") + path
     port = parsed.port or 80
     if port == peer_port():
-        return PEER_PREFIX + host
+        return PEER_PREFIX + host + path
     if port == 80:
-        return f"{PEER_PREFIX}http://{host}"
-    return f"{PEER_PREFIX}{host}:{port}"
+        return f"{PEER_PREFIX}http://{host}{path}"
+    return f"{PEER_PREFIX}{host}:{port}{path}"
 
 
 def peer_label(key: str) -> str:
