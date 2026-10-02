@@ -124,7 +124,7 @@ from .gate import entry_key, entry_provenance
 from .memory import memory_bucket, memory_path, read_entries
 from .scrub import scrub_secrets
 from .store import db_connect
-from .sync_apply import APPLIED_YES, canonical_key
+from .sync_apply import APPLIED_YES, InvalidOp, _portable_entry_key, canonical_key
 from .sync_oplog import (
     append_op, class_enabled, get_or_create_machine, hmac_key,
     resolve_project_key_for_slug,
@@ -196,6 +196,15 @@ def _replay_bucket(ops: "list[dict]", kind: str, bucket: str) -> "list[str]":
     function answers is exactly what a fresh receiver's log replay would
     produce for this bucket -- which is the oracle "covered" needs."""
     entries: "list[str]" = []
+
+    def local_key(value: object) -> str | None:
+        # Signed keys name the author's local slug. Replay must use the same
+        # project-key translation as the receiver before comparing digests.
+        try:
+            return _portable_entry_key(kind, bucket, value)
+        except InvalidOp:
+            return None
+
     for op in ops:
         payload = op["payload"]
         verb = op["op"]
@@ -204,13 +213,14 @@ def _replay_bucket(ops: "list[dict]", kind: str, bucket: str) -> "list[str]":
             if text and not any(text.lower() == e.lower() for e in entries):
                 entries.append(text)
         elif verb == "remove":
-            key = payload.get("key", "")
-            entries = [e for e in entries if entry_key(kind, bucket, e) != key]
+            key = local_key(payload.get("key"))
+            if key is not None:
+                entries = [e for e in entries if entry_key(kind, bucket, e) != key]
         elif verb == "replace":
             text = payload.get("text") or ""
-            old_key = payload.get("old_key", "")
+            old_key = local_key(payload.get("old_key"))
             idx = next((i for i, e in enumerate(entries)
-                       if entry_key(kind, bucket, e) == old_key), None)
+                       if old_key is not None and entry_key(kind, bucket, e) == old_key), None)
             if idx is not None:
                 entries[idx] = text
             elif text and not any(text.lower() == e.lower() for e in entries):

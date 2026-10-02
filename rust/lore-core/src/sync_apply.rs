@@ -599,7 +599,7 @@ fn missing_required_belief_uid(op: &Value) -> bool {
     };
     required.iter().any(|field| op["payload"].get(*field).is_none_or(Value::is_null))
 }
-fn portable_key(key: &str, kind: &str, bucket: &str) -> Result<String> {
+pub(crate) fn portable_key(key: &str, kind: &str, bucket: &str) -> Result<String> {
     let Some((prefix, digest)) = key.rsplit_once(':') else {
         return Err(Error::InvalidRequest);
     };

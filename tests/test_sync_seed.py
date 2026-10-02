@@ -106,6 +106,27 @@ class SeedTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_seed_replays_a_foreign_project_remove_key(self):
+        project_key = "https://example.test/shared.git"
+        _py(self.keyed_env,
+            "from lore_core import db_connect, record_project_identity; "
+            "from lore_core.gate import entry_key; "
+            "from lore_core.sync_oplog import append_op; "
+            "c = db_connect(); "
+            f"record_project_identity(c, {project_key!r}, 'receiver'); "
+            "text = 'Historical fact'; "
+            f"append_op(c, 'memory', 'add', {project_key!r}, {{'text': text}}); "
+            f"append_op(c, 'memory', 'remove', {project_key!r}, "
+            "{'key': entry_key('memory', 'project:author', text)}); "
+            "c.commit()")
+        _py(self.prelog_env,
+            "from lore_core import memory_add; "
+            "memory_add('project', 'receiver', 'Historical fact')")
+
+        result = _cli(self.keyed_env, "sync", "seed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("memory  would seed 1", result.stdout)
+
     # -- refusal ------------------------------------------------------------
 
     def test_missing_key_is_refused_cleanly(self):

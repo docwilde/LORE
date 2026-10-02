@@ -198,11 +198,19 @@ fn replay(log: &[Value], class: &str, key: Option<&str>, bucket: &str) -> Vec<St
                     entries.push(text.into())
                 }
             }
-            Some("remove") => entries.retain(|e| gate::entry_key(class, bucket, e) != p["key"]),
+            Some("remove") => {
+                if let Some(key) = p["key"].as_str()
+                    .and_then(|key| sync_apply::portable_key(key, class, bucket).ok())
+                {
+                    entries.retain(|e| gate::entry_key(class, bucket, e) != key);
+                }
+            }
             Some("replace") => {
+                let old_key = p["old_key"].as_str()
+                    .and_then(|key| sync_apply::portable_key(key, class, bucket).ok());
                 if let Some(e) = entries
                     .iter_mut()
-                    .find(|e| gate::entry_key(class, bucket, e) == p["old_key"])
+                    .find(|e| old_key.as_ref().is_some_and(|key| gate::entry_key(class, bucket, e) == key.as_str()))
                 {
                     *e = text.into()
                 } else if !text.is_empty()
@@ -520,3 +528,20 @@ fn belief_plan(conn: &Connection, log: &[Value], plan: &mut Vec<Descriptor>) -> 
     Ok(())
 }
 use rusqlite::OptionalExtension;
+
+#[cfg(test)]
+mod tests {
+    use super::replay;
+    use crate::gate;
+    use serde_json::json;
+
+    #[test]
+    fn seed_replay_translates_foreign_project_keys() {
+        let author_key = gate::entry_key("memory", "project:author", "Historical fact");
+        let log = vec![
+            json!({"applied":1,"class":"memory","project_key":"shared","op":"add","payload":{"text":"Historical fact"}}),
+            json!({"applied":1,"class":"memory","project_key":"shared","op":"remove","payload":{"key":author_key}}),
+        ];
+        assert!(replay(&log, "memory", Some("shared"), "project:receiver").is_empty());
+    }
+}
