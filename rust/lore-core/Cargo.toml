@@ -1,6 +1,6 @@
 [package]
 name = "lore-core"
-version = "0.62.12"
+version = "0.62.13"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Native LORE memory, beliefs, review and session index"

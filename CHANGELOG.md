@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.62.13 — 2026-10-02
+
+**Historical sync replay**
+
+- Fix **`sync_seed._replay_bucket`** and **`sync_admin::replay`** to translate signed remove and replace keys from the author's project slug before checking replay coverage.
+- Keep the original signed operation unchanged; `lore sync seed` now identifies file-map entries missing after cross-machine replay.
+
 ## 0.62.12 — 2026-10-01
 
 **Platform documentation**
