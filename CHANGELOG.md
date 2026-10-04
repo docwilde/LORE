@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.62.16 — 2026-10-04
+
+**Index with an over-limit transcript**
+
+- Fix **`lore index`** aborting every run when one transcript exceeds a size limit (256 MB file, 8 MB line, 20000 messages): **`index::index`** now refuses that file alone and reports it as **`refused`**; other errors still abort.
+- On a live store a 518 MB Codex rollout blocked the index after the 0.62.15 fix; the new test indexes a small session beside a transcript with a line past the limit.
+
 ## 0.62.15 — 2026-10-04
 
 **Index with an oversized session**
