@@ -4,7 +4,7 @@
 
 **Internal sessions with an earlier assistant row**
 
-- Fix **`index::parse_record`** missing LORE's own provider sessions whose log starts with an assistant row (the "Not logged in" first attempt): the prompt now flags the session if no earlier row is a user row, and drops the rows already read.
+- Fix **`index::parse_record`** missing LORE's own provider sessions that start with an assistant row (the "Not logged in" first attempt): the prompt now flags the session when no earlier row is a user row and drops the rows already read.
 - On a live store 161 such sessions were indexed as normal work after 0.62.14; `lore index --force` removes them.
 
 ## 0.62.16 — 2026-10-04
