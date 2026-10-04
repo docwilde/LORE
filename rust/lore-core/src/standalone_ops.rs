@@ -94,6 +94,16 @@ fn prepare_review(cfg: &Config, req: &Value) -> Result<Option<Value>> {
     let file = files::open_regular(path, 256 * 1024 * 1024)?;
     let (meta, _) = crate::index::parse_transcript_fd(&file, codex)?;
     if meta.internal {
+        if !codex && req["dry_run"] != true {
+            if let Some(id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|s| config::valid_id(s))
+            {
+                let conn = store::connect(cfg)?;
+                crate::index::mark_internal_reviewed(&conn, id, &slug)?;
+            }
+        }
         return Ok(None);
     }
     if req.get("session_id").is_none() {

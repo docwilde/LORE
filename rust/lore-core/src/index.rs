@@ -21,6 +21,30 @@ use std::{
 const MAX_FILE: u64 = 256 * 1024 * 1024;
 const MAX_LINE: usize = 8 * 1024 * 1024;
 const MAX_MESSAGES: usize = 20000;
+/// Opening lines of LORE's own provider prompts. A provider call leaves its
+/// transcript in the project it ran from; those sessions are never indexed or
+/// reviewed as work.
+pub const INTERNAL_PROMPT_MARKERS: [&str; 4] = [
+    "You are the background memory reviewer",
+    "You are the dreamer of a belief store",
+    "You are given every active belief in a memory store",
+    "You are the belief reconciler",
+];
+/// Internal sessions have nothing to review; recording them keeps the
+/// unreviewed backlog to sessions that can still produce memory.
+pub fn mark_internal_reviewed(conn: &Connection, sid: &str, project: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO reviewed(session_id,project,ts) VALUES(?,?,?)",
+        params![sid, project, crate::utcnow()],
+    )?;
+    Ok(())
+}
+pub fn internal_prompt(text: &str) -> bool {
+    let head = text.trim_start();
+    INTERNAL_PROMPT_MARKERS
+        .iter()
+        .any(|marker| head.starts_with(marker))
+}
 #[derive(Clone, Debug, Default)]
 pub struct Metadata {
     pub cwd: Option<String>,
@@ -167,10 +191,14 @@ fn parse_record(
         else {
             return Ok(());
         };
-        if v["isMeta"].as_bool().unwrap_or(false) {
+        if v["isMeta"].as_bool().unwrap_or(false) || meta.internal {
             return Ok(());
         }
         let text = extract_text(&v["message"]["content"]);
+        if role == "user" && rows.is_empty() && internal_prompt(&text) {
+            meta.internal = true;
+            return Ok(());
+        }
         if !text.is_empty() {
             rows.push(Message {
                 ts: scrub::scrub(&string(&v["timestamp"], 128).unwrap_or_default())?,
@@ -671,6 +699,18 @@ pub fn index(cfg: &Config, req: &Value) -> Result<Value> {
             Some(v) => v,
             None => parse_transcript_fd(&file, false)?,
         };
+        if !native && meta.internal {
+            let (sid, project) = identity(&path)?;
+            mark_internal_reviewed(&tx, &sid, &project)?;
+            tx.execute("DELETE FROM msg WHERE session_id=?", [&sid])?;
+            tx.execute("DELETE FROM sessions WHERE session_id=?", [&sid])?;
+            tx.execute(
+                "INSERT OR REPLACE INTO files(path,stamp) VALUES(?,?)",
+                params![pathkey, current],
+            )?;
+            skipped += 1;
+            continue;
+        }
         let (sid, project) = if native {
             let Some(id) = meta.session_id.as_deref().filter(|s| config::valid_id(s)) else {
                 continue;
@@ -1021,6 +1061,54 @@ mod tests {
         .unwrap()
         .is_empty());
         assert_eq!(fts_expr("a OR b; \"c\"", " "), "\"a\" \"OR\" \"b\" \"c\"");
+    }
+    #[test]
+    fn lore_provider_sessions_are_internal_and_leave_the_index_and_backlog() {
+        let (_temp, cfg) = fixture();
+        let dir = cfg.projects.join("fixture");
+        fs::create_dir_all(&dir).unwrap();
+        let big = format!(
+            "You are the dreamer of a belief store (Honcho-pattern): {}",
+            "token secret _key ".repeat(30000)
+        );
+        fs::write(dir.join("dreamer.jsonl"), user(&big)).unwrap();
+        fs::write(dir.join("work.jsonl"), user("plain work message")).unwrap();
+        let (meta, rows) =
+            parse_transcript_fd(&open_regular(&dir.join("dreamer.jsonl")).unwrap(), false)
+                .unwrap();
+        assert!(meta.internal);
+        assert!(rows.is_empty());
+        let conn = store::connect(&cfg).unwrap();
+        conn.execute("INSERT INTO sessions(session_id,project,messages,engine) VALUES('dreamer','fixture',1,'claude')",[]).unwrap();
+        conn.execute("INSERT INTO msg(session_id,project,ts,role,content) VALUES('dreamer','fixture','now','user','stale')",[]).unwrap();
+        drop(conn);
+        index(&cfg, &json!({"force":true})).unwrap();
+        let conn = store::connect(&cfg).unwrap();
+        let sessions: Vec<String> = conn
+            .prepare("SELECT session_id FROM sessions ORDER BY 1")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(sessions, ["work"]);
+        let stale: i64 = conn
+            .query_row("SELECT count(*) FROM msg WHERE session_id='dreamer'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stale, 0);
+        let reviewed: Vec<String> = conn
+            .prepare("SELECT session_id FROM reviewed ORDER BY 1")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(reviewed, ["dreamer"]);
+    }
+    #[test]
+    fn a_session_that_merely_quotes_a_lore_prompt_stays_work() {
+        assert!(internal_prompt("  You are the background memory reviewer for a coding agent"));
+        assert!(!internal_prompt("Please explain \"You are the background memory reviewer\""));
     }
     #[test]
     fn malformed_negative_cursor_and_session_count_are_refused() {
