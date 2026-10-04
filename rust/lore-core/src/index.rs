@@ -195,8 +195,11 @@ fn parse_record(
             return Ok(());
         }
         let text = extract_text(&v["message"]["content"]);
-        if role == "user" && rows.is_empty() && internal_prompt(&text) {
+        // The provider's first attempt can log an assistant row (for example
+        // "Not logged in") before the prompt, so only earlier user rows count.
+        if role == "user" && internal_prompt(&text) && !rows.iter().any(|m| m.role == "user") {
             meta.internal = true;
+            rows.clear();
             return Ok(());
         }
         if !text.is_empty() {
@@ -1132,6 +1135,22 @@ mod tests {
             .collect::<std::result::Result<_, _>>()
             .unwrap();
         assert_eq!(reviewed, ["dreamer"]);
+    }
+    #[test]
+    fn an_assistant_row_before_the_prompt_does_not_hide_an_internal_session() {
+        let (_temp, cfg) = fixture();
+        let dir = cfg.projects.join("fixture");
+        fs::create_dir_all(&dir).unwrap();
+        let first = format!(
+            "{}\n",
+            json!({"type":"assistant","cwd":"/owned/fixture","timestamp":"2026-09-27T00:00:00Z","message":{"content":[{"type":"text","text":"Not logged in"}]}})
+        );
+        let prompt = user("You are the background memory reviewer for a coding agent");
+        fs::write(dir.join("retry.jsonl"), format!("{first}{prompt}")).unwrap();
+        let (meta, rows) =
+            parse_transcript_fd(&open_regular(&dir.join("retry.jsonl")).unwrap(), false).unwrap();
+        assert!(meta.internal);
+        assert!(rows.is_empty());
     }
     #[test]
     fn a_session_that_merely_quotes_a_lore_prompt_stays_work() {
