@@ -676,6 +676,7 @@ pub fn index(cfg: &Config, req: &Value) -> Result<Value> {
     collect(&cfg.codex_sessions, 0, &mut codex, ".jsonl")?;
     let mut indexed = 0;
     let mut skipped = 0;
+    let mut refused = 0;
     for (path, native) in claude
         .into_iter()
         .map(|p| (p, false))
@@ -688,7 +689,14 @@ pub fn index(cfg: &Config, req: &Value) -> Result<Value> {
         // Full parsing precedes native-cache admission: session_meta may occur
         // after a large preamble, and a new sidecar must still remove duplicates.
         let parsed = if native {
-            Some(parse_transcript_fd(&file, true)?)
+            match parse_transcript_fd(&file, true) {
+                Ok(parsed) => Some(parsed),
+                Err(Error::TooLarge) => {
+                    refused += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             None
         };
@@ -706,9 +714,18 @@ pub fn index(cfg: &Config, req: &Value) -> Result<Value> {
             skipped += 1;
             continue;
         }
+        // A file past the size limits is refused alone; one such transcript
+        // must not roll back the whole run and freeze every other session.
         let (meta, rows) = match parsed {
             Some(v) => v,
-            None => parse_transcript_fd(&file, false)?,
+            None => match parse_transcript_fd(&file, false) {
+                Ok(parsed) => parsed,
+                Err(Error::TooLarge) => {
+                    refused += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            },
         };
         if !native && meta.internal {
             let (sid, project) = identity(&path)?;
@@ -747,7 +764,7 @@ pub fn index(cfg: &Config, req: &Value) -> Result<Value> {
         indexed += 1;
     }
     tx.commit()?;
-    Ok(json!({"indexed":indexed,"skipped":skipped}))
+    Ok(json!({"indexed":indexed,"skipped":skipped,"refused":refused}))
 }
 pub fn fts_expr(query: &str, op: &str) -> String {
     let mut tokens = Vec::new();
@@ -1147,6 +1164,25 @@ mod tests {
         };
         assert_eq!(ops("upsert"), 2);
         assert_eq!(ops("msgs"), 1);
+    }
+    #[test]
+    fn a_transcript_past_the_line_limit_is_refused_alone() {
+        let (_temp, cfg) = fixture();
+        let dir = cfg.projects.join("fixture");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("huge.jsonl"), user(&"x".repeat(MAX_LINE + 1))).unwrap();
+        fs::write(dir.join("small.jsonl"), user("plain work message")).unwrap();
+        let done = index(&cfg, &json!({"force":true})).unwrap();
+        assert_eq!((done["indexed"].as_u64(), done["refused"].as_u64()), (Some(1), Some(1)));
+        let conn = store::connect(&cfg).unwrap();
+        let sessions: Vec<String> = conn
+            .prepare("SELECT session_id FROM sessions")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(sessions, ["small"]);
     }
     #[test]
     fn malformed_negative_cursor_and_session_count_are_refused() {
