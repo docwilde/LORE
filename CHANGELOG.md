@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.62.14 — 2026-10-04
+
+**Own sessions and large messages**
+
+- Fix **`scrub::scrub`** refusing any message over ~100 KB: the key-value patterns spend ~10 backtracking steps per byte against a cumulative 1M budget. Inputs over 32 KB now get a 128M budget; matches are unchanged.
+- Fix LORE's own reviewer, dreamer and graph-derive sessions being indexed and reviewed as work: **`index::internal_prompt`** flags them by their opening line and Claude-engine indexing skips them.
+- Record internal sessions as reviewed so `lore doctor` stops counting them as backlog (210 of 315 on one live store); `lore index --force` drops rows indexed earlier.
+
 ## 0.62.13 — 2026-10-02
 
 **Historical sync replay**

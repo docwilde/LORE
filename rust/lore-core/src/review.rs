@@ -746,12 +746,9 @@ pub fn build_review_job(
     }
 
     if messages.iter().take(50).any(|message| {
-        [
-            "You are the background memory reviewer",
-            "You are the belief reconciler",
-        ]
-        .iter()
-        .any(|marker| message.content.contains(marker))
+        index::INTERNAL_PROMPT_MARKERS
+            .iter()
+            .any(|marker| message.content.contains(marker))
     }) {
         return Ok(None);
     }

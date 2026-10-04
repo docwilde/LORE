@@ -10,30 +10,48 @@ struct Pattern {
     pattern: String,
     flags: u32,
 }
-static PATTERNS: OnceLock<Result<Vec<(String, Regex)>>> = OnceLock::new();
-fn patterns() -> Result<&'static Vec<(String, Regex)>> {
-    PATTERNS
-        .get_or_init(|| {
-            let source: Vec<Pattern> = serde_json::from_str(include_str!("scrub_patterns.json"))
+/// Texts up to this size use the standard backtracking budget. Larger inputs
+/// use the large table: the budget is cumulative over one search and the key
+/// value patterns spend roughly ten steps per byte, so one budget cannot serve
+/// a 100 KB message. Matching results are identical; only the bound differs.
+const LARGE_INPUT_BYTES: usize = 32 * 1024;
+const BACKTRACK_LIMIT: usize = 1_000_000;
+const BACKTRACK_LIMIT_LARGE: usize = 128 * MAX_FRAME_BYTES;
+type Table = Vec<(String, Regex)>;
+static PATTERNS: OnceLock<Result<Table>> = OnceLock::new();
+static PATTERNS_LARGE: OnceLock<Result<Table>> = OnceLock::new();
+fn build(limit: usize) -> Result<Table> {
+    let source: Vec<Pattern> =
+        serde_json::from_str(include_str!("scrub_patterns.json")).map_err(|_| Error::Unavailable)?;
+    source
+        .into_iter()
+        .map(|p| {
+            let flags = match (p.flags & 2 != 0, p.flags & 16 != 0) {
+                (true, true) => "(?is)",
+                (true, false) => "(?i)",
+                (false, true) => "(?s)",
+                _ => "",
+            };
+            let regex = RegexBuilder::new(&format!("{flags}{}", p.pattern.replace("\\Z", "\\z")))
+                .backtrack_limit(limit)
+                .build()
                 .map_err(|_| Error::Unavailable)?;
-            source
-                .into_iter()
-                .map(|p| {
-                    let flags = match (p.flags & 2 != 0, p.flags & 16 != 0) {
-                        (true, true) => "(?is)",
-                        (true, false) => "(?i)",
-                        (false, true) => "(?s)",
-                        _ => "",
-                    };
-                    let regex =
-                        RegexBuilder::new(&format!("{flags}{}", p.pattern.replace("\\Z", "\\z")))
-                            .backtrack_limit(1_000_000)
-                            .build()
-                            .map_err(|_| Error::Unavailable)?;
-                    Ok((p.kind, regex))
-                })
-                .collect()
+            Ok((p.kind, regex))
         })
+        .collect()
+}
+fn patterns() -> Result<&'static Table> {
+    PATTERNS
+        .get_or_init(|| build(BACKTRACK_LIMIT))
+        .as_ref()
+        .map_err(|e| *e)
+}
+fn patterns_for(len: usize) -> Result<&'static Table> {
+    if len <= LARGE_INPUT_BYTES {
+        return patterns();
+    }
+    PATTERNS_LARGE
+        .get_or_init(|| build(BACKTRACK_LIMIT_LARGE))
         .as_ref()
         .map_err(|e| *e)
 }
@@ -146,7 +164,7 @@ pub fn scrub(text: &str) -> Result<String> {
         return Err(Error::TooLarge);
     }
     let mut text = text.to_owned();
-    for (kind, regex) in patterns()? {
+    for (kind, regex) in patterns_for(text.len())? {
         let mut out = String::new();
         let mut offset = 0;
         for captures in regex.captures_iter(text.as_str()) {
@@ -210,6 +228,24 @@ mod tests {
         assert!(!clean.contains("ghp_"));
         let fingerprint = format!("SHA256:{}", "g".repeat(42) + "+");
         assert_eq!(scrub(&fingerprint).unwrap(), fingerprint);
+    }
+
+    #[test]
+    fn texts_far_past_the_standard_backtracking_budget_are_still_scrubbed() {
+        // The key-value patterns spend ~10 backtracking steps per byte, so a
+        // ~110 KB message used to exhaust the 1M budget and refuse the whole
+        // transcript.
+        let filler = "the token for this secret _key is rotated weekly. ".repeat(3000);
+        assert!(filler.len() > 100_000);
+        let secret = "sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012345";
+        let text = format!("{filler} password='long secret phrase' {secret} {filler}");
+        let clean = scrub(&text).unwrap();
+        assert!(clean.contains("password='[REDACTED:value]'"));
+        assert!(!clean.contains("sk-"));
+        assert!(clean.len() < text.len());
+        let huge = filler.repeat(6);
+        assert!(huge.len() > 800_000 && huge.len() < crate::MAX_FRAME_BYTES);
+        assert_eq!(scrub(&huge).unwrap(), huge);
     }
 
     #[test]
