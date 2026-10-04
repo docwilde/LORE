@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.62.15 — 2026-10-04
+
+**Index with an oversized session**
+
+- Fix **`lore index`** aborting every run when one session's messages exceed a sync frame (1 MiB): **`index::emit`** now indexes that session locally and skips only its `msgs` operation, where it used to roll back the whole index transaction.
+- Verified on a live store: one 2.3 MB session had frozen the index at 295 sessions; the new test indexes a 1.2 MB session beside a small one.
+
 ## 0.62.14 — 2026-10-04
 
 **Own sessions and large messages**

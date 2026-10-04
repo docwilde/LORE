@@ -327,6 +327,32 @@ pub fn parse_transcript_fd(file: &File, codex: bool) -> Result<(Metadata, Vec<Me
     meta.last_ts = safe_optional(&meta.last_ts)?;
     Ok((meta, rows))
 }
+fn msgs_payload(conn: &Connection, sid: &str) -> Result<Value> {
+    // Read the current persisted snapshot inside the caller's mutation lock.
+    let mut stmt = conn
+        .prepare("SELECT ts,role,content FROM msg WHERE session_id=? ORDER BY rowid LIMIT 20001")?;
+    let mut cursor = stmt.query([sid])?;
+    let mut rows = Vec::new();
+    let mut budget = crate::MAX_FRAME_BYTES;
+    while let Some(row) = cursor.next()? {
+        if rows.len() >= MAX_MESSAGES {
+            return Err(Error::TooLarge);
+        }
+        let ts = crate::graph::db_text(row, 0, 128, &mut budget)?;
+        let role = crate::graph::db_text(row, 1, 32, &mut budget)?;
+        let content = crate::graph::db_text(row, 2, 65536, &mut budget)?;
+        rows.push(json!({"ts":ts,"role":role,"content":content}));
+    }
+    let payload = json!({"session_id":sid,"rows":rows});
+    if serde_json::to_vec(&payload)
+        .map_err(|_| Error::Unavailable)?
+        .len()
+        > crate::MAX_FRAME_BYTES
+    {
+        return Err(Error::TooLarge);
+    }
+    Ok(payload)
+}
 fn emit(
     cfg: &Config,
     conn: &Connection,
@@ -368,30 +394,15 @@ fn emit(
         Some(&pk),
         &json!({"session_id":sid,"project_key":pk,"machine_id":mid,"cwd":cwd,"title":title,"first_ts":first,"last_ts":last,"messages":count,"engine":engine}),
     )?;
-    // Canonical msgs is a complete replacement, never a tail or a chunk.
-    // Read the current persisted snapshot inside this same mutation lock.
-    let mut stmt = conn
-        .prepare("SELECT ts,role,content FROM msg WHERE session_id=? ORDER BY rowid LIMIT 20001")?;
-    let mut cursor = stmt.query([sid])?;
-    let mut rows = Vec::new();
-    let mut budget = crate::MAX_FRAME_BYTES;
-    while let Some(row) = cursor.next()? {
-        if rows.len() >= MAX_MESSAGES {
-            return Err(Error::TooLarge);
-        }
-        let ts = crate::graph::db_text(row, 0, 128, &mut budget)?;
-        let role = crate::graph::db_text(row, 1, 32, &mut budget)?;
-        let content = crate::graph::db_text(row, 2, 65536, &mut budget)?;
-        rows.push(json!({"ts":ts,"role":role,"content":content}));
-    }
-    let payload = json!({"session_id":sid,"rows":rows});
-    if serde_json::to_vec(&payload)
-        .map_err(|_| Error::Unavailable)?
-        .len()
-        > crate::MAX_FRAME_BYTES
-    {
-        return Err(Error::TooLarge);
-    }
+    // Canonical msgs is a complete replacement, never a tail or a chunk, so a
+    // session whose full message set does not fit one frame has no valid msgs
+    // operation. It stays indexed locally; refusing it here would abort the
+    // whole index transaction and freeze every other session.
+    let payload = match msgs_payload(conn, sid) {
+        Ok(payload) => payload,
+        Err(Error::TooLarge) => return Ok(()),
+        Err(error) => return Err(error),
+    };
     store::append_op(cfg, conn, "session", "msgs", Some(&pk), &payload)?;
     Ok(())
 }
@@ -1109,6 +1120,33 @@ mod tests {
     fn a_session_that_merely_quotes_a_lore_prompt_stays_work() {
         assert!(internal_prompt("  You are the background memory reviewer for a coding agent"));
         assert!(!internal_prompt("Please explain \"You are the background memory reviewer\""));
+    }
+    #[test]
+    fn a_session_too_large_for_one_sync_frame_does_not_abort_the_index() {
+        let (_temp, cfg) = fixture();
+        let dir = cfg.projects.join("fixture");
+        fs::create_dir_all(&dir).unwrap();
+        let line = user(&"word ".repeat(900));
+        fs::write(dir.join("huge.jsonl"), line.repeat(300)).unwrap();
+        fs::write(dir.join("small.jsonl"), user("plain work message")).unwrap();
+        assert_eq!(index(&cfg, &json!({"force":true})).unwrap()["indexed"], 2);
+        let conn = store::connect(&cfg).unwrap();
+        let rows = |sid: &str| -> i64 {
+            conn.query_row("SELECT count(*) FROM msg WHERE session_id=?", [sid], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(rows("huge"), 300);
+        assert_eq!(rows("small"), 1);
+        let ops = |op: &str| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM sync_ops WHERE class='session' AND op=?",
+                [op],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(ops("upsert"), 2);
+        assert_eq!(ops("msgs"), 1);
     }
     #[test]
     fn malformed_negative_cursor_and_session_count_are_refused() {
