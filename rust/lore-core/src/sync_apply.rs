@@ -354,6 +354,7 @@ fn stage(cfg: &Config, item: &Value, uid: &str) -> Result<bool> {
     let dir = cfg.root.join("pending");
     files::private_dir(&dir)?;
     let _lock = files::Locks::acquire(&cfg.root, &[dir.join(".sync-stage")], cfg.timeout)?;
+    let _namespace = pending::namespace_lock(cfg)?;
     for path in proposal_files(cfg, true)? {
         let value: Value =
             serde_json::from_slice(&files::read_regular(&path, crate::MAX_FRAME_BYTES)?)

@@ -466,7 +466,7 @@ fn remember(cfg: &Config, identity: &Value, args: &Value) -> Result<Value> {
     };
     let id = gate::stage(
         cfg,
-        &json!({"kind":"memory","scope":scope,"action":"add","match":"","text":text,"project":slug,"session_id":identity["session_id"]}),
+        &json!({"kind":"memory","scope":scope,"action":"add","match":"","text":text,"project":slug,"source_project":slug,"session_id":identity["session_id"]}),
         &authority,
     )?;
     Ok(
@@ -575,6 +575,8 @@ mod tests {
         let item: Value = serde_json::from_str(&row.raw).unwrap();
         assert_eq!(item["writer"], "model");
         assert_eq!(item["source_engine"], "claude");
+        assert_eq!(item["source_project"], config::project_slug(gate::cwd(&identity).unwrap()));
+        assert_eq!(item["session_id"], "fixture");
     }
     #[test]
     fn graph_projection_never_inherits_citation_authority() {

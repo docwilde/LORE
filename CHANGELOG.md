@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.62.18 — 2026-10-09
+
+**Session-scoped pending review**
+
+- Add **`pending_for_sessions_v1`** with source-project proposal IDs and explicit incomplete states for legacy, unreadable, overflow, or unresolved claims.
+- Serialize pending reads with stage, resolve, sync, and project-move writes, so a complete result describes one namespace snapshot.
+
 ## 0.62.17 — 2026-10-04
 
 **Internal sessions with an earlier assistant row**

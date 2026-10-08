@@ -973,15 +973,17 @@ pub fn relocate(cfg: &Config, req: &Value, p: &[String], auth: &Authority) -> Re
             let raw = files::read_regular(&path, crate::MAX_FRAME_BYTES)?;
             let mut item: Value =
                 serde_json::from_slice(&raw).map_err(|_| Error::InvalidRequest)?;
-            if item["project"] != source && item["origin_project"] != source {
+            if item["project"] != source && item["origin_project"] != source
+                && item["source_project"] != source {
                 return Ok(false);
             }
-            for key in ["project", "origin_project"] {
+            for key in ["project", "origin_project", "source_project"] {
                 if item[key] == source {
                     item[key] = json!(target)
                 }
             }
             if !dry {
+                let _namespace = crate::pending::namespace_lock(cfg)?;
                 files::atomic_write(
                     &path,
                     &serde_json::to_vec_pretty(&item).map_err(|_| Error::Unavailable)?,

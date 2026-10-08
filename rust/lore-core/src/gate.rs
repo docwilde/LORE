@@ -285,6 +285,7 @@ pub fn stage(cfg: &Config, item: &Value, authority: &Authority) -> Result<String
     }
     let dir = cfg.root.join("pending");
     files::private_dir(&dir)?;
+    let _namespace = crate::pending::namespace_lock(cfg)?;
     let directory = files::open_directory(&dir)?;
     let stamp = crate::utcnow().replace(['-', ':', 'T', 'Z'], "");
     for index in 0..10000 {
@@ -295,6 +296,7 @@ pub fn stage(cfg: &Config, item: &Value, authority: &Authority) -> Result<String
                 file.write_all(&bytes).map_err(|_| Error::MayHaveApplied)?;
                 file.sync_all().map_err(|_| Error::MayHaveApplied)?;
                 directory.sync_all().map_err(|_| Error::MayHaveApplied)?;
+                drop(_namespace);
                 append_file_op(
                     cfg,
                     "pending",

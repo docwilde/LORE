@@ -21,6 +21,7 @@ impl Core {
             "scrub",
             "snapshot",
             "pending",
+            "pending_for_sessions_v1",
             "pending_cluster_v1",
             "sync_state",
             "refresh",
@@ -91,6 +92,7 @@ impl Core {
                 json!({"projects_dir":config.projects,"slug":crate::config::project_slug(crate::gate::cwd(req)?)})
             }
             "pending" => crate::pending::list(config, req)?,
+            "pending_for_sessions_v1" => crate::pending::for_sessions(config, req)?,
             "pending_cluster_v1" => {
                 let mut request = req.clone();
                 request["cluster"] = json!(true);

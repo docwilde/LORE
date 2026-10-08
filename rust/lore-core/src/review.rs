@@ -959,6 +959,7 @@ pub fn stage_proposals(
     };
     let mut put = |mut item: Value| -> Result<()> {
         item["project"] = item.get("project").cloned().unwrap_or_else(|| json!(slug));
+        item["source_project"] = json!(slug);
         item["session_id"] = json!(sid);
         let id = gate::stage(cfg, &item, authority)?;
         let actual = pending::snapshot(&cfg.root.join("pending").join(format!("{id}.json")))?.item;
@@ -1035,7 +1036,7 @@ pub fn stage_proposals(
         }
         gate::stage(
             cfg,
-            &json!({"kind":"filemap","project":slug,"session_id":sid,"path":path,"purpose":purpose}),
+            &json!({"kind":"filemap","project":slug,"source_project":slug,"session_id":sid,"path":path,"purpose":purpose}),
             authority,
         )?;
         staged += 1;
@@ -1065,7 +1066,7 @@ pub fn stage_proposals(
             }
             gate::stage(
                 cfg,
-                &json!({"kind":"skill","project":slug,"session_id":sid,"name":name,"action":action,"description":safe_line(&proposal["description"],300)?,"body":body}),
+                &json!({"kind":"skill","project":slug,"source_project":slug,"session_id":sid,"name":name,"action":action,"description":safe_line(&proposal["description"],300)?,"body":body}),
                 authority,
             )?;
             staged += 1;
@@ -1573,6 +1574,9 @@ mod tests {
         assert_eq!(result["staged"], 1);
         assert_eq!(result["memory"]["already_covered"], 1);
         assert_eq!(pending::ids(&cfg).unwrap().len(), 1);
+        let staged = pending::snapshot(&cfg.root.join("pending").join(format!("{}.json", pending::ids(&cfg).unwrap()[0]))).unwrap();
+        assert_eq!(staged.item["source_project"], "fixture");
+        assert_eq!(staged.item["session_id"], "session");
         assert_eq!(
             memory::read_entries(&cfg.root.join("USER.md")).unwrap(),
             ["reviewer requires complete verified evidence"]

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # LORE_ROOT must point away from the real store BEFORE the module executes:
@@ -387,7 +388,9 @@ class TestDormantSweep(unittest.TestCase):
 
     def test_transitions(self):
         conn = self._conn()
-        old, fresh = "2026-01-01T00:00:00Z", "2026-08-21T00:00:00Z"
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(days=180)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        fresh = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._add(conn, 1, 0.7, old, old)         # stale, low conf -> dormant
         self._add(conn, 2, 0.97, old, old)        # stale, near-certain -> stays
         self._add(conn, 3, 0.7, fresh, fresh)     # fresh -> stays
