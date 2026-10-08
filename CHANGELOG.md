@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.62.19 — 2026-10-09
+
+**Pending summary completeness**
+
+- Fix **`pending_for_sessions_v1`** reporting `complete: true` and zero pending when `pending/*.json` has an invalid or non-UTF-8 filename stem. These entries now make every requested session incomplete; valid IDs remain visible.
+
 ## 0.62.18 — 2026-10-09
 
 **Session-scoped pending review**
