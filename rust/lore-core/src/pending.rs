@@ -8,6 +8,7 @@ use crate::{
     Error, Result,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::{
@@ -32,6 +33,88 @@ fn proposal_path(cfg: &Config, id: &str) -> Result<PathBuf> {
         return Err(Error::InvalidRequest);
     }
     Ok(cfg.root.join("pending").join(format!("{id}.json")))
+}
+
+/// Serializes changes to the set or contents of pending proposal files with
+/// source-scoped summaries. Keep this lock short: applying a reviewed proposal
+/// can itself stage another proposal.
+pub(crate) fn namespace_lock(cfg: &Config) -> Result<files::Locks> {
+    files::Locks::acquire(&cfg.root, &[cfg.root.join("pending/.namespace")], cfg.timeout)
+}
+
+/// A bounded, consistent read of pending IDs for exact source sessions. The
+/// `project` field is a proposal target and must never be used as provenance.
+/// Old or imported proposals with ambiguous provenance make the affected
+/// session unknown rather than falsely reporting zero.
+pub fn for_sessions(cfg: &Config, req: &Value) -> Result<Value> {
+    let slug = project_slug(gate::cwd(req)?);
+    let requested = req["session_ids"].as_array().filter(|ids| !ids.is_empty() && ids.len() <= 64)
+        .ok_or(Error::InvalidRequest)?;
+    let mut seen = std::collections::HashSet::new();
+    let session_ids = requested.iter().map(|value| {
+        let id = value.as_str().filter(|id| !id.is_empty() && id.len() <= 128
+            && !id.chars().any(char::is_control)).ok_or(Error::InvalidRequest)?;
+        if !seen.insert(id) { return Err(Error::InvalidRequest); }
+        Ok(id)
+    }).collect::<Result<Vec<_>>>()?;
+    let _namespace = namespace_lock(cfg)?;
+    let mut complete = true;
+    let pending_ids = match ids(cfg) {
+        Ok(ids) => ids,
+        Err(Error::TooLarge) => { complete = false; Vec::new() },
+        Err(error) => return Err(error),
+    };
+    // A failed or interrupted resolution may leave an unresolved claim after
+    // removing its file from the active directory. Such a store cannot prove
+    // that any session has zero work left to review or recover.
+    let claim_dir = cfg.root.join("pending/.claimed");
+    match fs::symlink_metadata(&claim_dir) {
+        Ok(_) => {
+            if !matches!(files::directory_names(&claim_dir, 4096), Ok(names) if names.is_empty()) {
+                complete = false;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => complete = false,
+    }
+    let mut rows = session_ids.iter().map(|id| json!({"session_id":id,"pending_pids":[],"complete":complete}))
+        .collect::<Vec<_>>();
+    let mut revision = Sha256::new();
+    for id in pending_ids {
+        let snap = match snapshot(&proposal_path(cfg, &id)?) {
+            Ok(snap) => snap,
+            Err(_) => { complete = false; continue; }
+        };
+        revision.update(id.as_bytes());
+        revision.update([0]);
+        revision.update(snap.sha256.as_bytes());
+        revision.update([0]);
+        // A proposal can target a different project from the one whose
+        // session produced it. Review visibility is target-scoped; this
+        // source-only summary must not use that target filter.
+        let source = snap.item["source_project"].as_str().filter(|source| valid_slug(source));
+        if source.is_some_and(|source| source != slug) { continue; }
+        let sid = snap.item["session_id"].as_str().filter(|sid| !sid.is_empty() && sid.len() <= 128
+            && !sid.chars().any(char::is_control));
+        if let (Some(source), Some(sid)) = (source, sid) {
+            if source == slug {
+                if let Some(row) = rows.iter_mut().find(|row| row["session_id"] == sid) {
+                    row["pending_pids"].as_array_mut().unwrap().push(json!(id));
+                }
+            }
+        } else if let Some(sid) = sid {
+            if let Some(row) = rows.iter_mut().find(|row| row["session_id"] == sid) {
+                row["complete"] = json!(false);
+            }
+        } else {
+            // A legacy proposal without a source session could belong to any
+            // requested session; no negative claim is justified.
+            for row in &mut rows { row["complete"] = json!(false); }
+        }
+    }
+    if !complete { for row in &mut rows { row["complete"] = json!(false); } }
+    Ok(json!({"source_project_slug":slug,"snapshot":format!("{:x}",revision.finalize()),
+        "complete":rows.iter().all(|row| row["complete"] == true),"sessions":rows}))
 }
 fn same_file(before: &Metadata, after: &Metadata) -> bool {
     #[cfg(unix)]
@@ -336,6 +419,7 @@ pub fn list(cfg: &Config, req: &Value) -> Result<Value> {
             "id",
             "confidence",
             "session_id",
+            "source_project",
             "derived_by",
             "created",
             "writer",
@@ -606,6 +690,7 @@ pub(crate) fn archive_uid(cfg: &Config, uid: &str, status: &str) -> Result<bool>
     let claim_path = private_claim_dir(cfg)?;
     let claim_dir = files::open_directory(&claim_path)?;
     let claimed = claim_path.join(format!("{id}-{}.json", uuid::Uuid::new_v4().simple()));
+    let _namespace = namespace_lock(cfg)?;
     files::rename_at(
         &source_dir,
         source.file_name().ok_or(Error::UnsafePath)?,
@@ -613,6 +698,7 @@ pub(crate) fn archive_uid(cfg: &Config, uid: &str, status: &str) -> Result<bool>
         claimed.file_name().ok_or(Error::UnsafePath)?,
         false,
     )?;
+    drop(_namespace);
     let mut local = cfg.clone();
     local.sync.enabled = false;
     archive_inner(&local, &id, &claimed, &snap, status, false)
@@ -884,7 +970,10 @@ pub fn resolve(
     let claim_dir = files::open_directory(&claim_path)?;
     let claimed = claim_path.join(format!("{id}-{}.json", uuid::Uuid::new_v4().simple()));
     let claim_name = claimed.file_name().ok_or(Error::UnsafePath)?;
-    files::rename_at(&source_dir, source_name, &claim_dir, claim_name, false)?;
+    {
+        let _namespace = namespace_lock(cfg)?;
+        files::rename_at(&source_dir, source_name, &claim_dir, claim_name, false)?;
+    }
     let checked = (|| {
         let snap = snapshot_at(&claim_dir, claim_name)?;
         check_expected(req, &snap)?;
@@ -899,6 +988,7 @@ pub fn resolve(
     let mut snap = match checked {
         Ok(snap) => snap,
         Err(error) => {
+            let _namespace = namespace_lock(cfg)?;
             restore_claim_at(&source_dir, source_name, &claim_dir, claim_name, id)?;
             return Err(error);
         }
@@ -927,6 +1017,7 @@ pub fn resolve(
                 )
             }
             Err(error) => {
+                let _namespace = namespace_lock(cfg)?;
                 restore_claim_at(&source_dir, source_name, &claim_dir, claim_name, id)?;
                 return Ok(json!({"status":"refused","error":error.code(),"applied":false}));
             }
@@ -1037,6 +1128,91 @@ mod tests {
         Authority::HumanReview {
             agent: "fixture".into(),
             engine: "claude".into(),
+        }
+    }
+    #[test]
+    fn source_summary_is_exact_and_does_not_confuse_target_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        let source = temp.path().join("source");
+        let other = temp.path().join("other");
+        let source_slug = project_slug(&source);
+        let other_slug = project_slug(&other);
+        let first = gate::stage(&cfg, &json!({"kind":"memory","scope":"user",
+            "project":other_slug,"source_project":source_slug,"session_id":"one","text":"fixture one"}), &auth()).unwrap();
+        let second = gate::stage(&cfg, &json!({"kind":"memory","scope":"user",
+            "project":source_slug,"source_project":other_slug,"session_id":"one","text":"fixture two"}), &auth()).unwrap();
+        let result = for_sessions(&cfg, &json!({"cwd":source,"session_ids":["one","two"]})).unwrap();
+        assert_eq!(result["source_project_slug"], source_slug);
+        assert_eq!(result["complete"], true);
+        assert_eq!(result["sessions"][0]["pending_pids"], json!([first]));
+        assert_eq!(result["sessions"][1]["pending_pids"], json!([]));
+        let other_result = for_sessions(&cfg, &json!({"cwd":other,"session_ids":["one"]})).unwrap();
+        assert_eq!(other_result["sessions"][0]["pending_pids"], json!([second]));
+        assert_ne!(result["snapshot"], json!(""));
+        assert_eq!(for_sessions(&cfg, &json!({"cwd":source,"session_ids":["one","one"]})), Err(Error::InvalidRequest));
+    }
+    #[test]
+    fn legacy_source_uncertainty_is_local_to_known_session_or_all_when_unattributed() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        let cwd = temp.path().join("source");
+        gate::stage(&cfg, &json!({"kind":"memory","scope":"user","project":project_slug(&cwd),
+            "session_id":"one","text":"old proposal"}), &auth()).unwrap();
+        let result = for_sessions(&cfg, &json!({"cwd":cwd,"session_ids":["one","two"]})).unwrap();
+        assert_eq!(result["complete"], false);
+        assert_eq!(result["sessions"][0]["complete"], false);
+        assert_eq!(result["sessions"][1]["complete"], true);
+        gate::stage(&cfg, &json!({"kind":"memory","scope":"user","text":"older proposal"}), &auth()).unwrap();
+        let result = for_sessions(&cfg, &json!({"cwd":cwd,"session_ids":["one","two"]})).unwrap();
+        assert_eq!(result["sessions"][1]["complete"], false);
+    }
+    #[test]
+    fn unresolved_claim_prevents_a_false_zero_pending_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        let request = json!({"cwd":temp.path(),"session_ids":["one"]});
+        assert_eq!(for_sessions(&cfg, &request).unwrap()["complete"], true);
+        let claims = cfg.root.join("pending/.claimed");
+        files::private_dir(&claims).unwrap();
+        File::create(claims.join("unresolved.json")).unwrap();
+        let result = for_sessions(&cfg, &request).unwrap();
+        assert_eq!(result["complete"], false);
+        assert_eq!(result["sessions"][0]["complete"], false);
+    }
+    #[test]
+    fn summary_waits_for_writer_and_refuses_an_unreadable_entry() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        let cwd = temp.path().join("source");
+        let dir = cfg.root.join("pending");
+        files::private_dir(&dir).unwrap();
+        let guard = namespace_lock(&cfg).unwrap();
+        let mut file = files::create_private_file(&files::open_directory(&dir).unwrap(),
+            std::ffi::OsStr::new("partial.json"), true).unwrap();
+        file.write_all(b"{").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let config = cfg.clone();
+        let source = cwd.clone();
+        let reader = std::thread::spawn(move || {
+            tx.send(for_sessions(&config, &json!({"cwd":source,"session_ids":["one"]}))).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(30)).is_err());
+        file.write_all(format!("\"kind\":\"memory\",\"source_project\":\"{}\",\"session_id\":\"one\"}}",project_slug(&cwd)).as_bytes()).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        drop(guard);
+        let result = rx.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+        reader.join().unwrap();
+        assert_eq!(result["complete"], true);
+        assert_eq!(result["sessions"][0]["pending_pids"], json!(["partial"]));
+        #[cfg(unix)] {
+            std::os::unix::fs::symlink(temp.path().join("outside"), dir.join("unreadable.json")).unwrap();
+            let result = for_sessions(&cfg, &json!({"cwd":cwd,"session_ids":["one"]})).unwrap();
+            assert_eq!(result["complete"], false);
+            assert_eq!(result["sessions"][0]["complete"], false);
         }
     }
     fn request(cfg: &Config, id: &str, cwd: &Path) -> Value {
@@ -1310,6 +1486,9 @@ mod tests {
             File::create(dir.join(format!("ignored-{index}.txt"))).unwrap();
         }
         assert_eq!(ids(&cfg), Err(Error::TooLarge));
+        let summary = for_sessions(&cfg, &json!({"cwd":temp.path(),"session_ids":["one"]})).unwrap();
+        assert_eq!(summary["complete"], false);
+        assert_eq!(summary["sessions"][0]["complete"], false);
     }
     #[test]
     fn skill_wrapper_is_idempotent_and_foreign_install_is_not_overwritten() {
