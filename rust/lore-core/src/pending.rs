@@ -59,8 +59,11 @@ pub fn for_sessions(cfg: &Config, req: &Value) -> Result<Value> {
     }).collect::<Result<Vec<_>>>()?;
     let _namespace = namespace_lock(cfg)?;
     let mut complete = true;
-    let pending_ids = match ids(cfg) {
-        Ok(ids) => ids,
+    let pending_ids = match scan_ids(cfg) {
+        Ok((ids, invalid_stem)) => {
+            if invalid_stem { complete = false; }
+            ids
+        },
         Err(Error::TooLarge) => { complete = false; Vec::new() },
         Err(error) => return Err(error),
     };
@@ -201,16 +204,22 @@ fn visible(item: &Value, slug: &str) -> bool {
     gate::pending_project(item).is_none_or(|project| project == slug)
 }
 pub fn ids(cfg: &Config) -> Result<Vec<String>> {
+    Ok(scan_ids(cfg)?.0)
+}
+/// Keep malformed JSON names visible as uncertainty to source-scoped summaries.
+/// A bounded directory scan is still shared with ordinary pending ID listings.
+fn scan_ids(cfg: &Config) -> Result<(Vec<String>, bool)> {
     let dir = cfg.root.join("pending");
     if fs::symlink_metadata(&dir).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
     let mut ids = Vec::new();
+    let mut invalid_stem = false;
     for name in files::directory_names(&dir, 4096)? {
         let path = dir.join(name);
         if path
             .extension()
-            .is_some_and(|extension| extension == "json")
+            .is_some_and(|extension| extension == "json") || path.file_name().is_some_and(|name| name == ".json")
         {
             if let Some(id) = path
                 .file_stem()
@@ -218,11 +227,13 @@ pub fn ids(cfg: &Config) -> Result<Vec<String>> {
                 .filter(|id| valid_id(id))
             {
                 ids.push(id.to_owned());
+            } else {
+                invalid_stem = true;
             }
         }
     }
     ids.sort();
-    Ok(ids)
+    Ok((ids, invalid_stem))
 }
 fn scrub_display(value: &Value, depth: usize) -> Result<Value> {
     if depth > 32 {
@@ -1179,6 +1190,46 @@ mod tests {
         let result = for_sessions(&cfg, &request).unwrap();
         assert_eq!(result["complete"], false);
         assert_eq!(result["sessions"][0]["complete"], false);
+    }
+    #[test]
+    fn invalid_json_stems_make_every_session_summary_incomplete() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        let cwd = temp.path().join("source");
+        let pid = gate::stage(&cfg, &json!({"kind":"memory","scope":"user",
+            "source_project":project_slug(&cwd),"session_id":"one","text":"known proposal"}), &auth()).unwrap();
+        let request = json!({"cwd":cwd,"session_ids":["one","two"]});
+        assert_eq!(for_sessions(&cfg, &request).unwrap()["complete"], true);
+        let dir = cfg.root.join("pending");
+        for name in ["bad stem.json", ".json"] {
+            fs::write(dir.join(name), b"{}").unwrap();
+            let result = for_sessions(&cfg, &request).unwrap();
+            assert_eq!(result["complete"], false, "{name}");
+            assert_eq!(result["sessions"][0]["complete"], false, "{name}");
+            assert_eq!(result["sessions"][1]["complete"], false, "{name}");
+            assert_eq!(result["sessions"][0]["pending_pids"], json!([pid]), "{name}");
+            assert_eq!(result["sessions"][1]["pending_pids"], json!([]), "{name}");
+            fs::remove_file(dir.join(name)).unwrap();
+            assert_eq!(for_sessions(&cfg, &request).unwrap()["complete"], true);
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_json_stem_makes_every_session_summary_incomplete() {
+        use std::os::unix::ffi::OsStringExt;
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        let request = json!({"cwd":temp.path(),"session_ids":["one","two"]});
+        assert_eq!(for_sessions(&cfg, &request).unwrap()["complete"], true);
+        let dir = cfg.root.join("pending");
+        files::private_dir(&dir).unwrap();
+        let name = std::ffi::OsString::from_vec(b"bad\xff.json".to_vec());
+        fs::write(dir.join(&name), b"{}").unwrap();
+        let result = for_sessions(&cfg, &request).unwrap();
+        assert_eq!(result["complete"], false);
+        assert!(result["sessions"].as_array().unwrap().iter().all(|row| row["complete"] == false));
+        fs::remove_file(dir.join(name)).unwrap();
+        assert_eq!(for_sessions(&cfg, &request).unwrap()["complete"], true);
     }
     #[test]
     fn summary_waits_for_writer_and_refuses_an_unreadable_entry() {
