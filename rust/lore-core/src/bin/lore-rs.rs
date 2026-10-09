@@ -1,7 +1,7 @@
 //! Native JSONL carrier. No Python interpreter, fallback or JSON authority.
 use lore_core::{config::Config, gate::Authority, Core, Error};
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::time::Duration;
 
 const AGENT_FRAME_BYTES: usize = 64 * 1024;
@@ -36,6 +36,9 @@ fn main() {
             memory_show(options)
         }
         [group, command] if group == "filemap" && command == "show" => filemap_show(),
+        [group, command, options @ ..] if group == "codegraph" && command == "store" => {
+            codegraph_store(options)
+        }
         _ => lore_core::standalone::run(&args),
     };
     if let Err(error) = outcome {
@@ -141,6 +144,45 @@ fn write_frame(output: &mut impl Write, reply: &Value, limit: usize) -> lore_cor
     raw.push(b'\n');
     output.write_all(&raw)?;
     output.flush()?;
+    Ok(())
+}
+
+/// Explicit owner path: review the exact exported file digest in a terminal.
+/// The JSONL bridge never receives this authority from its request body.
+fn codegraph_store(options: &[String]) -> lore_core::Result<()> {
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return Err(Error::Untrusted);
+    }
+    let [cwd_flag, cwd, input_flag, input, expected_flag, expected,
+        revision_flag, revision] = options else {
+        return Err(Error::InvalidRequest);
+    };
+    if cwd_flag != "--cwd" || input_flag != "--input" || expected_flag != "--expected-sha256"
+        || revision_flag != "--expected-revision"
+        || expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::InvalidRequest);
+    }
+    let revision = revision.parse::<u64>().map_err(|_| Error::InvalidRequest)?;
+    let bytes = lore_core::files::read_regular(std::path::Path::new(input), 96 * 1024)?;
+    if lore_core::digest(&bytes) != expected.to_ascii_lowercase() {
+        return Err(Error::Changed);
+    }
+    let snapshot: Value = serde_json::from_slice(&bytes).map_err(|_| Error::InvalidRequest)?;
+    let query = snapshot["graph"]["query"].as_str().ok_or(Error::InvalidRequest)?;
+    let path = snapshot["graph"]["value"].as_str().ok_or(Error::InvalidRequest)?;
+    let request = json!({"op":"codegraph_snapshot_store_v1","cwd":cwd,"query":query,
+        "path":path,"expected_revision":revision,"snapshot":snapshot});
+    eprint!("Store reviewed codegraph export SHA-256 {expected}? Type STORE to continue: ");
+    io::stderr().flush()?;
+    let mut confirmation = String::new();
+    io::stdin().read_line(&mut confirmation)?;
+    if confirmation.trim() != "STORE" { return Err(Error::Untrusted); }
+    let cfg = Config::from_env(Duration::from_secs(3))?;
+    let mut core = lore_core::Core::new(cfg, Authority::HumanReview {
+        agent: "lore-cli".into(), engine: "owner".into(),
+    });
+    let result = core.execute(&request)?;
+    println!("{}", serde_json::to_string(&result).map_err(|_| Error::Unavailable)?);
     Ok(())
 }
 

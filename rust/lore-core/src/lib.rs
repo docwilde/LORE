@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod beliefs;
 pub mod config;
+pub mod codegraph_snapshot;
 pub mod context;
 mod core;
 pub mod dream;
