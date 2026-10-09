@@ -30,6 +30,10 @@ search, sync state and local sync records. Agent operators use the same core
 with a frozen engine, session and project identity. Learned skill selection,
 usage and outcomes use the existing skill layout.
 
+The [codegraph snapshot store](codegraph-snapshots.md) adds an explicit,
+source-checked read operator and owner-reviewed local write gate. It does not
+alter curated memory or the sync protocol.
+
 The native review worker proves the transcript's identity and bytes before
 calling a provider and again before applying output. It derives beliefs and
 stages memory, file map and skill proposals. Reconciliation freezes candidate

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.62.20 — 2026-10-09
+
+**Reviewed codegraph snapshots**
+
+- Add **`codegraph_snapshot_read_v1`** for worktree-scoped Rust syntax snapshots. Reads recheck the requested source hash and return unknown binding; other-file candidates remain unverified.
+- Add **`codegraph_snapshot_store_v1`** and **`lore-rs codegraph store`** with terminal review and revision checks. Snapshots stay local; no TUI background write or sync occurs.
+
 ## 0.62.19 — 2026-10-09
 
 **Pending summary completeness**

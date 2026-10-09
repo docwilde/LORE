@@ -20,6 +20,7 @@ Memory: memory show|entries|usage|review|add|replace|remove|move
 Beliefs: belief list|search|show|review|add|retract|edges|dedup-report
          evidence consult ask outcome stats audit crosscheck dream
 Graph: graph stats|neighbours|path|communities|components|degree|context|html|backfill|derive|edge
+Codegraph: codegraph store --cwd WORKTREE --input FILE --expected-sha256 HASH --expected-revision N
 Sessions: search session index history recent|prefix|metadata
 Review: review backfill pending list|show approve reject
 Skills: skills list|candidates|usage
