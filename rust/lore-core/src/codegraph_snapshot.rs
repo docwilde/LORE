@@ -92,6 +92,8 @@ fn location(cfg: &Config, scope: &Scope, query: &str, path: &str) -> PathBuf {
 
 fn source_hash(root: &Path, path: &str) -> Result<String> {
     let path = root.join(path);
+    // open_regular walks every component from / with O_NOFOLLOW, so a
+    // repo-relative path cannot traverse an intermediate directory link.
     let mut file = files::open_regular(&path, MAX_SOURCE_BYTES)?;
     let before = file.metadata()?;
     let mut bytes = Vec::new();
@@ -175,10 +177,15 @@ pub fn store(cfg: &Config, req: &Value, authority: &Authority) -> Result<Value> 
     let (query, path) = query(req)?;
     let expected = req["expected_revision"].as_u64().ok_or(Error::InvalidRequest)?;
     let snapshot = req["snapshot"].as_object().ok_or(Error::InvalidRequest)?;
-    if snapshot.len() != 6 || snapshot.get("schema_version") != Some(&json!(1))
+    // DOXA's optional query_sha256 covers its original struct serialization.
+    // JSON parsing loses that field order, so LORE discards the producer claim
+    // and computes/verifies its own graph_sha256 over the stored graph value.
+    if snapshot.keys().any(|key| !matches!(key.as_str(),
+        "schema_version" | "storage" | "graph_binding" | "graph" |
+        "curated_purpose" | "query_sha256"))
+        || snapshot.get("schema_version") != Some(&json!(1))
         || snapshot.get("storage") != Some(&json!("export_only_not_persisted"))
         || snapshot.get("graph_binding") != Some(&json!("unknown"))
-        || !snapshot.get("query_sha256").and_then(Value::as_str).is_some_and(hex64)
         || snapshot.get("curated_purpose").and_then(|purpose| purpose["project_key"].as_str())
             != Some(scope.project_key.as_str()) {
         return Err(Error::InvalidRequest);
@@ -298,6 +305,9 @@ mod tests {
     #[test]
     fn stored_ambiguity_is_preserved_but_never_upgraded_to_a_binding() {
         let (_temp, cfg, root, mut snapshot) = fixture();
+        // The producer's byte-order-specific digest is intentionally not a
+        // LORE integrity claim; only LORE's graph_sha256 is returned.
+        snapshot["query_sha256"] = json!("not-recomputed-by-lore");
         snapshot["graph"]["module_edges"] = json!([{
             "source":"lib.rs","target":null,"reason":"ambiguous_layout",
             "candidates":["child.rs","child/mod.rs"]
@@ -306,6 +316,8 @@ mod tests {
         store(&cfg, &request, &owner()).unwrap();
         let found = read(&cfg, &request).unwrap();
         assert_eq!(found["binding"], "unknown");
+        assert!(found.get("query_sha256").is_none());
+        assert_eq!(found["graph_sha256"], crate::digest(&graph_bytes(&snapshot["graph"]).unwrap()));
         assert_eq!(found["graph"]["module_edges"], snapshot["graph"]["module_edges"]);
         assert_eq!(found["freshness"], "requested_source_verified_only");
         let file = location(&cfg, &scope(&request).unwrap(), "file", "lib.rs");
@@ -313,5 +325,28 @@ mod tests {
         corrupt[0] = b'!';
         fs::write(file, corrupt).unwrap();
         assert_eq!(read(&cfg, &request), Err(Error::Changed));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_read_refuses_intermediate_symlink_even_when_outside_bytes_match() {
+        use std::os::unix::fs::symlink;
+        let (temp, cfg, root, mut snapshot) = fixture();
+        let inside = root.join("src");
+        fs::create_dir(&inside).unwrap();
+        fs::write(inside.join("lib.rs"), "fn one() {}\n").unwrap();
+        snapshot["graph"]["value"] = json!("src/lib.rs");
+        let request = json!({"cwd":root,"query":"file","path":"src/lib.rs",
+            "expected_revision":0,"snapshot":snapshot});
+        store(&cfg, &request, &owner()).unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("lib.rs"), "fn one() {}\n").unwrap();
+        fs::remove_file(inside.join("lib.rs")).unwrap();
+        fs::remove_dir(&inside).unwrap();
+        symlink(&outside, &inside).unwrap();
+        assert_eq!(source_hash(&root, "src/lib.rs"), Err(Error::UnsafePath));
+        assert_eq!(read(&cfg, &request), Err(Error::UnsafePath));
+        assert_eq!(store(&cfg, &request, &owner()), Err(Error::UnsafePath));
     }
 }

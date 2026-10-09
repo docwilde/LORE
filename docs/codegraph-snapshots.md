@@ -23,6 +23,9 @@ The graph's project, absolute worktree, query, path, and requested-source hash
 must match the current source bytes. Writes are locked and atomic. The
 LORE file-map overlay in the DOXA export is checked for project scope but
 is not stored: it has no revision or source hash and must be read afresh.
+The export's `query_sha256` is ignored because it hashes DOXA's original
+struct serialization, whose field order is lost when LORE parses JSON. LORE
+computes and verifies its own `graph_sha256` over the stored graph value.
 
 For a terminal owner, export the DOXA answer to an owned file, inspect it,
 compute that file's SHA-256, then run:
