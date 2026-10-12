@@ -2,13 +2,18 @@
 
 LORE can retain one reviewed DOXA syntax answer per exact Git worktree,
 file, and query kind. This is a local, data-only cache. It does not resolve
-Rust imports or calls, turn syntax candidates into facts, sync snapshots,
+Rust or Python imports or calls, turn syntax candidates into facts, sync snapshots,
 or put codegraph data into an agent's context.
 
 ## Protocol
 
-`codegraph_snapshot_read_v1` accepts
-`{"op":"codegraph_snapshot_read_v1","cwd":"/absolute/worktree", "query":"file|imports|calls|modules","path":"src/lib.rs"}`.
+`codegraph_snapshot_read_v1` accepts a Rust path such as
+`{"op":"codegraph_snapshot_read_v1","cwd":"/absolute/worktree", "query":"file|imports|calls|modules","path":"src/lib.rs"}`
+or a Python path such as
+`{"op":"codegraph_snapshot_read_v1","cwd":"/absolute/worktree", "query":"file|imports|calls|modules","path":"src/main.py"}`.
+The requested path must be a repository-relative `.rs` or `.py` file no longer
+than 4096 bytes. Source reads remain bounded to 1 MiB and are rehashed on read
+and before and after a store.
 It returns `{"status":"missing"}` or a `current` result with the stored
 `graph`, revision, source and graph SHA-256, and explicit
 `binding: "unknown"`, `freshness: "requested_source_verified_only"`.

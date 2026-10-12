@@ -76,7 +76,7 @@ fn query(req: &Value) -> Result<(&str, &str)> {
         .filter(|kind| matches!(*kind, "file" | "imports" | "calls" | "modules"))
         .ok_or(Error::InvalidRequest)?;
     let path = req["path"].as_str().ok_or(Error::InvalidRequest)?;
-    if path.is_empty() || path.len() > 4096 || !path.ends_with(".rs")
+    if path.is_empty() || path.len() > 4096 || !(path.ends_with(".rs") || path.ends_with(".py"))
         || !Path::new(path).components().all(|part| matches!(part, Component::Normal(_)))
         || path.chars().any(char::is_control) {
         return Err(Error::InvalidRequest);
@@ -226,15 +226,19 @@ mod tests {
     use std::fs;
 
     fn fixture() -> (tempfile::TempDir, Config, PathBuf, Value) {
+        fixture_with_source("lib.rs", "fn one() {}\n")
+    }
+
+    fn fixture_with_source(path: &str, source: &str) -> (tempfile::TempDir, Config, PathBuf, Value) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("repo");
         fs::create_dir(&root).unwrap();
         fs::create_dir(root.join(".git")).unwrap();
         fs::write(root.join(".git/config"), "[core]\n").unwrap();
-        fs::write(root.join("lib.rs"), "fn one() {}\n").unwrap();
+        fs::write(root.join(path), source).unwrap();
         let cfg = Config::for_root(temp.path().join("store"));
-        let sha = source_hash(&root, "lib.rs").unwrap();
-        let graph = json!({"scope":root,"query":"file","value":"lib.rs","status":"ok","coverage":{},
+        let sha = source_hash(&root, path).unwrap();
+        let graph = json!({"scope":root,"query":"file","value":path,"status":"ok","coverage":{},
             "requested_source_sha256":sha,"requested_source_read_unix_ms":1,
             "rows":[],"edges":[],"module_edges":[]});
         let snapshot = json!({"schema_version":1,"storage":"export_only_not_persisted",
@@ -244,7 +248,10 @@ mod tests {
         (temp, cfg, root, snapshot)
     }
     fn req(root: &Path, snapshot: &Value, expected: u64) -> Value {
-        json!({"cwd":root,"query":"file","path":"lib.rs","expected_revision":expected,"snapshot":snapshot})
+        req_for(root, snapshot, expected, "lib.rs")
+    }
+    fn req_for(root: &Path, snapshot: &Value, expected: u64, path: &str) -> Value {
+        json!({"cwd":root,"query":"file","path":path,"expected_revision":expected,"snapshot":snapshot})
     }
     fn owner() -> Authority { Authority::HumanReview { agent: "fixture".into(), engine: "codex".into() } }
 
@@ -265,6 +272,22 @@ mod tests {
         fs::write(root.join("lib.rs"), "fn changed() {}\n").unwrap();
         assert_eq!(read(&cfg, &next), Err(Error::Changed));
         assert_eq!(store(&cfg, &next, &owner()), Err(Error::Changed));
+    }
+
+    #[test]
+    fn python_snapshot_roundtrips_and_source_edits_invalidate_it() {
+        let (_temp,cfg,root,mut snapshot)=fixture_with_source("main.py","def one():\n    return 1\n");
+        snapshot["graph"]["coverage"]=json!({"language":"python","parser":"fixture"});
+        snapshot["graph"]["rows"]=json!([{"kind":"function","name":"one","path":"main.py"}]);
+        let request=req_for(&root,&snapshot,0,"main.py");
+        assert_eq!(read(&cfg,&request).unwrap()["status"],"missing");
+        assert_eq!(store(&cfg,&request,&owner()).unwrap()["revision"],1);
+        let stored=read(&cfg,&request).unwrap();
+        assert_eq!(stored["status"],"current");
+        assert_eq!(stored["path"],"main.py");
+        assert_eq!(stored["graph"]["rows"][0]["name"],"one");
+        fs::write(root.join("main.py"),"def one():\n    return 2\n").unwrap();
+        assert_eq!(read(&cfg,&request),Err(Error::Changed));
     }
 
     #[test]
@@ -293,6 +316,14 @@ mod tests {
         let mut request = req(&root, &snapshot, 0);
         request["path"] = json!("../lib.rs");
         assert_eq!(store(&cfg, &request, &owner()), Err(Error::InvalidRequest));
+        request = req(&root, &snapshot, 0);
+        request["path"] = json!("main.js");
+        assert_eq!(store(&cfg, &request, &owner()), Err(Error::InvalidRequest));
+        request["path"] = json!("../main.py");
+        assert_eq!(store(&cfg, &request, &owner()), Err(Error::InvalidRequest));
+        request["path"] = json!("/workspace/main.py");
+        assert_eq!(store(&cfg, &request, &owner()), Err(Error::InvalidRequest));
+        assert_eq!(read(&cfg, &request), Err(Error::InvalidRequest));
         request = req(&root.join("..").join("repo"), &snapshot, 0);
         assert_eq!(read(&cfg, &request), Err(Error::Changed));
         request = req(&root, &snapshot, 0);

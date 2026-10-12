@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.62.21 — 2026-10-12
+
+**Reviewed Python codegraph snapshots**
+
+- Allow Python paths through **`codegraph_snapshot_read_v1`** and **`codegraph_snapshot_store_v1`**, retaining exact-source rehash checks.
+- Keep Python snapshot binding `unknown`: syntax candidates do not prove semantic imports, calls, or name resolution.
+
 ## 0.62.20 — 2026-10-09
 
 **Reviewed codegraph snapshots**
