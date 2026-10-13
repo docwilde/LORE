@@ -40,6 +40,20 @@ environment, stdin a tty — a human in a shell) write directly. `hook` and
 sets neither marker fails *open* to `interactive`, rather than staging
 every routine write on an install this can't measure.
 
+Codex shell tool calls carry `CODEX_THREAD_ID` and `CODEX_SESSION_ID`, as
+observed in the Codex desktop session that reproduced the missing
+classification. Either non-empty marker classifies the caller as
+`interactive`, even when stdin is a pipe or `/dev/null`. Harness markers
+and the Claude hook check above take precedence over inherited Codex
+markers. Empty session markers and `LORE_ENGINE=codex` alone do not grant
+write authority; `LORE_ENGINE` only labels provenance. The native carrier
+infers the source engine from the caller markers when no explicit
+`LORE_ENGINE` override is present.
+
+This recognition applies to the standalone CLI and public bridge. The MCP
+and agent bridge retain their model proposal path, and Codex CLI writes
+remain `interactive`, distinct from explicit human review operations.
+
 ## The gate is advisory
 
 Every signal lives in the caller's own environment, and a hook runs as the

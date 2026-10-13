@@ -35,10 +35,24 @@ Sync pulls configured sources; bootstrap requires one source (or --peer).
 Review uses the Claude CLI; source --engine identifies the transcript provider.
 "#;
 pub fn authority() -> Authority {
-    let engine = crate::config::var("LORE_ENGINE").unwrap_or_else(|_| "unknown".into());
     let marker = std::env::var("AI_AGENT").unwrap_or_default();
     let claude = std::env::var("CLAUDECODE").is_ok_and(|s| !s.is_empty())
         || marker.starts_with("claude-code");
+    // Codex shell tools have non-terminal stdin. Bind them by session markers,
+    // after the hook/harness check below; LORE_ENGINE alone is provenance.
+    let codex = ["CODEX_THREAD_ID", "CODEX_SESSION_ID"]
+        .iter()
+        .any(|key| std::env::var(key).is_ok_and(|s| !s.is_empty()));
+    let engine = crate::config::var("LORE_ENGINE").unwrap_or_else(|_| {
+        if claude {
+            "claude"
+        } else if codex {
+            "codex"
+        } else {
+            "unknown"
+        }
+        .into()
+    });
     let project = std::env::var("CLAUDE_PROJECT_DIR").is_ok_and(|s| !s.is_empty());
     let agent = "lore-cli".to_string();
     if marker.ends_with("_harness") || claude && project && !marker.ends_with("_agent") {
@@ -50,6 +64,7 @@ pub fn authority() -> Authority {
     }
     if marker.ends_with("_agent")
         || claude
+        || codex
         || crate::config::var("LORE_WRITE_GATE")
             .is_ok_and(|s| matches!(s.as_str(), "off" | "0" | "false"))
     {

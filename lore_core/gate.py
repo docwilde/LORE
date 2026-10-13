@@ -13,14 +13,14 @@ the approval gate guarded one entrance to a room with several doors.
 
 WHAT THIS DOES. Every CLI write is classified by WHO is calling:
 
-    interactive  a Claude Code TOOL subprocess -- the agent running `lore
-                 memory add` through Bash. The intended path; applies.
-    terminal     a human at a keyboard (no Claude Code in the environment,
+    interactive  a Claude Code or Codex TOOL subprocess -- the agent running
+                 `lore memory add` through a shell. The intended path; applies.
+    terminal     a human at a keyboard (no coding agent in the environment,
                  stdin is a tty). The most human-approved path there is;
                  applies.
     hook         a command Claude Code executed as a HOOK -- the untrusted
                  door. Stages into pending/ instead of applying.
-    detached     no Claude Code, no tty: cron, a daemon, a background script.
+    detached     no coding agent, no tty: cron, a daemon, a background script.
                  Stages.
 
 ("unknown" is not a writer class -- it is the provenance label for an entry
@@ -168,6 +168,10 @@ def detect_writer() -> "tuple[str, str]":
     install that cannot be measured -- an honest gate is worth more than a
     gate that breaks the intended path. It costs nothing against an adversary
     who could forge the variable anyway.
+
+    Codex shell tools carry CODEX_THREAD_ID / CODEX_SESSION_ID despite
+    non-terminal stdin. Either non-empty marker is interactive, after the
+    hook checks above. LORE_ENGINE labels origin; it never grants authority.
     """
     ai_agent = os.environ.get("AI_AGENT", "")
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
@@ -184,9 +188,12 @@ def detect_writer() -> "tuple[str, str]":
     if in_claude:
         # Claude Code, no agent/harness marker: an older version. Fail open.
         return WRITER_INTERACTIVE, "CLAUDECODE set, no AI_AGENT marker (pre-2.1 shape)"
+    for marker in ("CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+        if os.environ.get(marker):
+            return WRITER_INTERACTIVE, f"{marker} set"
     if _stdin_is_tty():
-        return WRITER_TERMINAL, "no Claude Code in env, stdin is a tty"
-    return WRITER_DETACHED, "no Claude Code in env, stdin is not a tty"
+        return WRITER_TERMINAL, "no coding agent in env, stdin is a tty"
+    return WRITER_DETACHED, "no coding agent in env, stdin is not a tty"
 
 
 def writer_class() -> str:
