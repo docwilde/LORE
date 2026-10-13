@@ -64,6 +64,7 @@ HOOK_ENV = {"AI_AGENT": "claude-code_2.1.228_harness", "CLAUDECODE": "1",
 
 @contextlib.contextmanager
 def as_writer(env: dict, drop=("AI_AGENT", "CLAUDECODE", "CLAUDE_PROJECT_DIR",
+                               "CODEX_THREAD_ID", "CODEX_SESSION_ID", "LORE_ENGINE",
                                "LORE_WRITE_GATE")):
     with mock.patch.dict(os.environ, {}, clear=False):
         for k in drop:
@@ -123,6 +124,24 @@ class TestWriterDetection(unittest.TestCase):
     def test_agent_marker_is_interactive(self):
         with as_writer(AGENT_ENV):
             self.assertEqual(lore.writer_class(), lore.WRITER_INTERACTIVE)
+
+    def test_codex_session_markers_are_interactive(self):
+        for marker in ("CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+            with self.subTest(marker=marker), as_writer({marker: "fixture-codex-session"}):
+                self.assertEqual(lore.writer_class(), lore.WRITER_INTERACTIVE)
+                self.assertEqual(lore.current_engine(), "codex")
+
+    def test_codex_markers_do_not_override_hook_classification(self):
+        for hook in (HOOK_ENV, {"AI_AGENT": "codex_fixture_harness"},
+                     {"CLAUDECODE": "1", "CLAUDE_PROJECT_DIR": CWD}):
+            with self.subTest(hook=hook), as_writer(hook | {"CODEX_THREAD_ID": "fixture-codex-session"}):
+                self.assertEqual(lore.writer_class(), lore.WRITER_HOOK)
+
+    def test_empty_codex_markers_and_engine_label_are_detached(self):
+        with as_writer({"CODEX_THREAD_ID": "", "CODEX_SESSION_ID": "", "LORE_ENGINE": "codex"}), \
+                mock.patch("lore_core.gate.sys.stdin") as stdin:
+            stdin.isatty.return_value = False
+            self.assertEqual(lore.writer_class(), lore.WRITER_DETACHED)
 
     def test_harness_marker_is_hook(self):
         with as_writer(HOOK_ENV):
@@ -203,6 +222,23 @@ class TestMemoryGate(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(_entries(), ["the agent's own durable fact"])
         self.assertEqual(_pending_items(), [])
+
+    def test_codex_add_replace_and_remove_apply_immediately(self):
+        for marker in ("CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+            with self.subTest(marker=marker), as_writer({marker: "fixture-codex-session"}), quiet():
+                rc = lore.cmd_memory(Namespace(mcmd="add", scope="project", cwd=CWD,
+                                               text=["Codex durable fact"]))
+                self.assertEqual(rc, 0)
+                self.assertEqual(_entries(), ["Codex durable fact"])
+                rc = lore.cmd_memory(Namespace(mcmd="replace", scope="project", cwd=CWD,
+                                               match="Codex durable fact", text=["Updated Codex fact"]))
+                self.assertEqual(rc, 0)
+                self.assertEqual(_entries(), ["Updated Codex fact"])
+                rc = lore.cmd_memory(Namespace(mcmd="remove", scope="project", cwd=CWD,
+                                               match="Updated Codex fact"))
+                self.assertEqual(rc, 0)
+                self.assertEqual(_entries(), [])
+                self.assertEqual(_pending_items(), [])
 
     def test_hook_replace_and_remove_cannot_mutate_the_store(self):
         with as_writer(AGENT_ENV), quiet():

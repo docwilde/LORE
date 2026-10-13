@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.62.22 — 2026-10-13
+
+**Codex memory writes**
+
+- Fix **`standalone::authority`** and **`detect_writer`** ignoring Codex session markers; interactive memory writes now apply instead of staging or receiving `untrusted_write`.
+- Infer **`source_engine`** from Codex or Claude caller markers when **`LORE_ENGINE`** is unset; explicit overrides still win.
+- Retain hook staging, detached-write gating, and MCP proposal review; empty session markers and engine labels grant no write authority.
+
 ## 0.62.21 — 2026-10-12
 
 **Reviewed Python codegraph snapshots**

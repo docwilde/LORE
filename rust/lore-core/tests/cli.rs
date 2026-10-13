@@ -320,6 +320,138 @@ fn memory_readback_preserves_scopes_unknown_sources_and_other_host_pull_policy()
     assert!(!fixture.root.join("state.db").exists() && !fixture.root.join(".locks").exists());
 }
 #[test]
+fn codex_session_writes_apply_with_interactive_provenance() {
+    for marker in ["CODEX_THREAD_ID", "CODEX_SESSION_ID"] {
+        let fixture = Fixture::new();
+        let env = [(marker, "fixture-codex-session")];
+        let (success, out, err) = fixture.invoke_env(
+            &["memory", "add", "--scope", "user", "Codex session fact"],
+            &env,
+        );
+        assert!(success && err.is_empty(), "{marker}: {out} {err}");
+        assert_eq!(
+            fs::read_to_string(fixture.root.join("USER.md")).unwrap(),
+            "- Codex session fact\n"
+        );
+        let cfg = config::Config::for_root(fixture.root.clone());
+        let provenance = gate::provenance(&cfg, "memory", "user", "Codex session fact");
+        assert_eq!(provenance["writer"], "interactive", "{marker}");
+        assert_eq!(provenance["source_engine"], "codex", "{marker}");
+        assert!(lore_core::pending::ids(&cfg).unwrap().is_empty());
+
+        let (success, out, err) = fixture.invoke_env(
+            &[
+                "memory", "replace", "--scope", "user", "--match",
+                "Codex session fact", "Updated Codex fact",
+            ],
+            &env,
+        );
+        assert!(success && err.is_empty(), "{marker}: {out} {err}");
+        assert_eq!(
+            fs::read_to_string(fixture.root.join("USER.md")).unwrap(),
+            "- Updated Codex fact\n"
+        );
+        let (success, out, err) = fixture.invoke_env(
+            &[
+                "memory", "remove", "--scope", "user", "--match", "Updated Codex fact",
+            ],
+            &env,
+        );
+        assert!(success && err.is_empty(), "{marker}: {out} {err}");
+        assert_eq!(
+            fs::read_to_string(fixture.root.join("USER.md")).unwrap(),
+            ""
+        );
+        assert!(lore_core::pending::ids(&cfg).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn codex_session_can_write_config_and_preserves_explicit_source_engine() {
+    let fixture = Fixture::new();
+    let env = [
+        ("CODEX_THREAD_ID", "fixture-codex-session"),
+        ("LORE_ENGINE", "custom"),
+    ];
+    let (success, out, err) =
+        fixture.invoke_env(&["config", "set", "LORE_REFRESH_SECS", "60"], &env);
+    assert!(success && err.is_empty(), "{out} {err}");
+    let settings: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.home.join(".claude/settings.json")).unwrap(),
+    ).unwrap();
+    assert_eq!(settings["env"]["LORE_REFRESH_SECS"], "60");
+    let (success, out, err) = fixture.invoke_env(
+        &["memory", "add", "--scope", "user", "Explicit engine fact"],
+        &env,
+    );
+    assert!(success && err.is_empty(), "{out} {err}");
+    let cfg = config::Config::for_root(fixture.root.clone());
+    assert_eq!(
+        gate::provenance(&cfg, "memory", "user", "Explicit engine fact")["source_engine"],
+        "custom"
+    );
+}
+
+#[test]
+fn codex_markers_do_not_override_hooks_or_grant_human_review() {
+    for extra in [
+        vec![("AI_AGENT", "codex_fixture_harness")],
+        vec![
+            ("AI_AGENT", "claude-code_fixture_harness"),
+            ("CLAUDECODE", "1"),
+        ],
+        vec![("CLAUDECODE", "1"), ("CLAUDE_PROJECT_DIR", "/fixture")],
+    ] {
+        let fixture = Fixture::new();
+        let mut env = vec![
+            ("CODEX_THREAD_ID", "fixture-codex-session"),
+            ("CODEX_SESSION_ID", "fixture-codex-session"),
+        ];
+        env.extend(extra);
+        let (success, out, err) = fixture.invoke_env(
+            &["memory", "add", "--scope", "user", "Hook proposal"],
+            &env,
+        );
+        assert!(success && err.is_empty(), "{out} {err}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap()["status"],
+            "staged"
+        );
+        assert!(!fixture.root.join("USER.md").exists());
+        let (success, out, err) =
+            fixture.invoke_env(&["config", "set", "LORE_REFRESH_SECS", "60"], &env);
+        assert!(!success && out.is_empty());
+        assert_eq!(err, "lore-rs: untrusted_write\n");
+    }
+    let fixture = Fixture::new();
+    let (success, out, err) = fixture.invoke_env(
+        &["codegraph", "store"],
+        &[("CODEX_THREAD_ID", "fixture-codex-session")],
+    );
+    assert!(!success && out.is_empty());
+    assert_eq!(err, "lore-rs: untrusted_write\n");
+}
+
+#[test]
+fn empty_codex_markers_and_engine_labels_do_not_grant_write_authority() {
+    let fixture = Fixture::new();
+    let (success, out, err) = fixture.invoke_env(
+        &["memory", "add", "--scope", "user", "Detached proposal"],
+        &[
+            ("CODEX_THREAD_ID", ""),
+            ("CODEX_SESSION_ID", ""),
+            ("LORE_ENGINE", "codex"),
+        ],
+    );
+    assert!(success && err.is_empty(), "{out} {err}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()["status"],
+        "staged"
+    );
+    assert!(!fixture.root.join("USER.md").exists());
+}
+
+#[test]
 fn project_and_filemap_use_current_repository_identity_without_mutating_files() {
     let mut fixture = Fixture::new();
     fs::create_dir(fixture.cwd.join(".git")).unwrap();
