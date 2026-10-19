@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.62.23 — 2026-10-19
+
+**Background review history**
+
+- Fix **`worker::provider`** and **`run_claude`** saving background reviews as resumable user sessions; disable session persistence for Deriver, Dreamer and their shared review callers.
+- Retain that setting during OAuth retries. Existing session files and Desktop imports require separate archival.
+
 ## 0.62.22 — 2026-10-13
 
 **Codex memory writes**

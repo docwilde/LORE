@@ -147,7 +147,9 @@ fn provider(
         command.arg("--bare");
     }
     command
-        .args(["-p", "--model", model, "--allowedTools", ""])
+        // Background reviews must never become resumable user sessions,
+        // including when subscription auth requires the non-bare retry.
+        .args(["-p", "--no-session-persistence", "--model", model, "--allowedTools", ""])
         .env("LORE_SKIP", "1")
         .env("LORE_DISABLE_REVIEW", "1")
         .stdin(Stdio::piped())

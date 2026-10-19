@@ -142,7 +142,10 @@ def run_claude(claude: str, prompt: str, model: str, role: str
         # Prompt via STDIN, never argv: a dreamer prompt over a large
         # belief store exceeds ARG_MAX (live E2BIG at 515 beliefs,
         # 2026-08-22). `claude -p` with no inline prompt reads stdin.
-        cmd += ["-p", "--model", model, "--allowedTools", ""]
+        # Internal reviews must stay out of provider/Desktop session history,
+        # including the OAuth retry without --bare.
+        cmd += ["-p", "--no-session-persistence", "--model", model,
+                "--allowedTools", ""]
         return subprocess.run(
             cmd, capture_output=True, text=True, timeout=600,
             input=prompt,
