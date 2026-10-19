@@ -29,7 +29,8 @@ const PROVIDER: &str = r#"#!/usr/bin/python3
 import json, os, re, subprocess, sys, time
 from pathlib import Path
 root = Path(os.environ['OWNED_FIXTURE'])
-assert sys.argv[1:] == ['--bare', '-p', '--model', 'owned-model', '--allowedTools', '']
+bare = '--bare' in sys.argv[1:]
+assert sys.argv[1:] == (['--bare'] if bare else []) + ['-p', '--no-session-persistence', '--model', 'owned-model', '--allowedTools', '']
 assert os.environ['LORE_SKIP'] == '1' and os.environ['LORE_DISABLE_REVIEW'] == '1'
 child = subprocess.Popen(['/bin/sleep', '30'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 (root / 'ready').write_text(json.dumps({'provider':os.getpid(), 'descendant':child.pid}))
@@ -43,6 +44,9 @@ role = 'dreamer' if prompt.startswith('You are the dreamer') else 'deriver'
 (root / ('ready-' + role)).write_text(json.dumps({'provider':os.getpid(), 'descendant':child.pid}))
 with (root / 'calls').open('a') as output:
     output.write(json.dumps({'role':role,'argv':sys.argv[1:]}) + '\n')
+if mode == 'dream_auth_retry' and bare:
+    sys.stderr.write('Not logged in')
+    sys.exit(1)
 if mode.startswith('dream_'):
     (root / ('prompt-' + role)).write_text(prompt)
     if role == 'dreamer':
@@ -508,6 +512,7 @@ fn automatic_native_dream_merges_verified_pair_and_stages_promotions_for_review(
                 json!([
                     "--bare",
                     "-p",
+                    "--no-session-persistence",
                     "--model",
                     "owned-model",
                     "--allowedTools",
@@ -569,6 +574,29 @@ fn automatic_native_dream_merges_verified_pair_and_stages_promotions_for_review(
         assert_eq!(review["source_engine"], engine);
         fixture.assert_not_curated();
     }
+}
+#[test]
+fn native_review_oauth_retry_keeps_both_roles_out_of_session_history() {
+    let fixture = Fixture::new("codex", false);
+    fixture.seed_pair();
+    let mut worker = fixture.spawn("codex", "dream_auth_retry");
+    worker.observe_role(&fixture.home, "deriver");
+    worker.observe_role(&fixture.home, "dreamer");
+    assert!(worker.finish(Duration::from_secs(5)).unwrap().success());
+    assert!(worker.stderr().is_empty() && worker.stdout().is_empty());
+    let calls = fixture.calls();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(
+        calls.iter().map(|call| call["role"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["deriver", "deriver", "dreamer", "dreamer"]
+    );
+    for (index, call) in calls.iter().enumerate() {
+        let args = call["argv"].as_array().unwrap();
+        assert_eq!(args.contains(&json!("--bare")), index % 2 == 0);
+        assert!(args.contains(&json!("--no-session-persistence")));
+    }
+    assert_eq!(fixture.pending().len(), 2);
+    fixture.assert_not_curated();
 }
 #[test]
 fn failed_automatic_dream_preserves_landed_review_and_reports_no_safe_retry() {
