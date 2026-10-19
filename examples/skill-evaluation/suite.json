@@ -1,0 +1,17 @@
+{
+  "schema":"lore.skill-suite.v1",
+  "family":"coding",
+  "model":"deterministic-contract-fixture",
+  "runtime":"python3-stdlib",
+  "interpreter":"/usr/bin/python3",
+  "runner":"runner.py",
+  "verifier":"verifier.py",
+  "timeout_seconds":5,
+  "answer_markers":["memorized task-specific answer must never appear in a reusable skill"],
+  "cases":[
+    {"id":"train","split":"train","fixture":"tasks/train"},
+    {"id":"replay","split":"replay","fixture":"tasks/replay"},
+    {"id":"validation","split":"validation","fixture":"tasks/validation"},
+    {"id":"test","split":"test","fixture":"tasks/test"}
+  ]
+}

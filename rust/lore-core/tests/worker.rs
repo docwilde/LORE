@@ -67,6 +67,9 @@ if mode == 'error':
     sys.exit(7)
 if mode == 'changed_source':
     Path(os.environ['OWNED_SOURCE']).write_text('changed owned source\n')
+if mode == 'diagnostic':
+    print(json.dumps({'skills':[{'name':'owned-recipe','body':'Run the frozen tests before proposing a change.'}]}))
+    sys.exit(0)
 print(json.dumps({'memory':[{'scope':'user','action':'add','text':'Native reviewer preserves owned evidence','source_engine':'forged'}], 'filemap':[], 'skills':[], 'skill_outcomes':[], 'conclusions':[]}))
 "#;
 
@@ -165,6 +168,7 @@ impl Fixture {
             .env("OWNED_FIXTURE", &self.home)
             .env("OWNED_SOURCE", &self.source)
             .env("OWNED_MODE", mode)
+            .env("LORE_DIAGNOSTIC_TRACES", if mode == "diagnostic" { "1" } else { "0" })
             .current_dir(&self.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::from(fs::File::create(&output).unwrap()))
@@ -663,4 +667,25 @@ fn persisted_disabled_worker_refuses_without_provider_invocation() {
         assert!(fixture.pending().is_empty());
         fixture.assert_not_curated();
     }
+}
+
+#[test]
+fn native_review_attaches_local_diagnostic_trace_without_expanding_provider_digest() {
+    let fixture=Fixture::new("claude",false);
+    let mut source=fs::read_to_string(&fixture.source).unwrap();
+    source.push_str(&format!("{}\n",json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"owned-call","name":"Bash","input":{"command":"cargo test"}}]}})));
+    source.push_str(&format!("{}\n",json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"owned-call","content":"successful observation only in diagnostic trace","is_error":false}]}})));
+    files::atomic_write(&fixture.source,source.as_bytes()).unwrap();
+    let mut worker=fixture.spawn("claude","diagnostic");
+    worker.observe_provider(&fixture.home);
+    assert!(worker.finish(Duration::from_secs(5)).unwrap().success(),"{}",worker.stderr());
+    let items=fixture.pending(); assert_eq!(items.len(),1);
+    let hash=items[0]["diagnostic_trace_sha256"].as_str().unwrap();
+    let trace=lore_core::diagnostics::show(&fixture.config(),&json!({"sha256":hash})).unwrap();
+    assert!(trace["events"].as_array().unwrap().iter().any(|e|e["content"]=="successful observation only in diagnostic trace"));
+    assert!(!fs::read_to_string(fixture.home.join("prompt")).unwrap().contains("successful observation only"));
+    let cfg=fixture.config(); let pid=pending::ids(&cfg).unwrap().remove(0);
+    let reviewed=pending::review(&cfg,&json!({"cwd":fixture.cwd,"pid":pid})).unwrap();
+    assert!(reviewed["raw"].as_str().unwrap().contains(hash));
+    fixture.assert_not_curated();
 }

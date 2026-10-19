@@ -23,7 +23,11 @@ Graph: graph stats|neighbours|path|communities|components|degree|context|html|ba
 Codegraph: codegraph store --cwd WORKTREE --input FILE --expected-sha256 HASH --expected-revision N
 Sessions: search session index history recent|prefix|metadata
 Review: review backfill pending list|show approve reject
-Skills: skills list|candidates|usage
+Skills: skills list|candidates|usage|evaluate PID --suite FILE
+        skills evaluation SHA256
+        skills artifact --kind candidate|trace|suite --sha256 SHA256
+Diagnostics: trace capture --transcript FILE --session-id ID --engine claude|codex
+             trace show SHA256
 Administration: setup teardown reset project move config show|set|unset
 Sync: sync status|health|whoami|push|pull|bootstrap|serve|export|import|classes|login|resign|seed
 Integration: mcp hook
@@ -251,7 +255,8 @@ fn validate_flags(group: &str, sub: &str, req: &Value) -> Result<()> {
         ("approve"|"reject",_) => "pid expected",
         ("consult"|"ask"|"dialectic",_) => "query limit",
         ("outcome",_) => "belief_id event source note",
-        ("skills",_) => "prompt limit",
+        ("skills",_) => "prompt limit pid suite sha256 kind",
+        ("trace",_) => "transcript session_id engine sha256",
         ("dream",_) => "dry_run engine",
         ("audit",_) => "sample",
         ("project", "move") => "old new dry_run",
@@ -333,6 +338,7 @@ pub fn run(args: &[String]) -> Result<()> {
             | "config"
             | "pending"
             | "project"
+            | "trace"
     );
     let (sub, tail) = if grouped && args.get(1).is_some_and(|s| !s.starts_with('-')) {
         (args[1].as_str(), &args[2..])
@@ -351,6 +357,11 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     let mut core = Core::new(cfg.clone(), auth.clone());
     let value = match (group, sub) {
+        ("trace", "capture") => crate::diagnostics::capture(&cfg, &req)?,
+        ("trace", "show") => {
+            pos(&mut req, "sha256", &p, false)?;
+            crate::diagnostics::show(&cfg, &req)?
+        }
         ("snapshot" | "inject", _) => crate::context::snapshot(&cfg, &req)?,
         ("refresh", _) => crate::context::refresh(&cfg, &req)?,
         ("memory", "show" | "entries" | "list") => {
@@ -553,6 +564,15 @@ pub fn run(args: &[String]) -> Result<()> {
             crate::skills::candidates_op(&cfg, &req)?
         }
         ("skills", "usage") => crate::skills::load_usage(&cfg)?,
+        ("skills", "evaluate") => {
+            pos(&mut req, "pid", &p, false)?;
+            crate::skill_evaluation::evaluate(&cfg, &req, &auth)?
+        }
+        ("skills", "evaluation") => {
+            pos(&mut req, "sha256", &p, false)?;
+            crate::skill_evaluation::show(&cfg, &req)?
+        }
+        ("skills", "artifact") => crate::skill_evaluation::artifact(&cfg, &req)?,
         ("review", _) => {
             own_process_group()?;
             crate::standalone_ops::review(&cfg, &req)?

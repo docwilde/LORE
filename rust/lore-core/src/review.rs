@@ -83,6 +83,7 @@ pub struct ReviewJob {
     cwd: PathBuf,
     authority: Authority,
     source: SourceProof,
+    diagnostic_trace: Option<String>,
 }
 impl ReviewJob {
     pub fn prompt(&self) -> &str {
@@ -882,6 +883,11 @@ pub fn build_review_job(
     if session_id.len() > 128 {
         return Err(Error::InvalidRequest);
     }
+    let diagnostic_trace = if record_usage && cfg.var("LORE_DIAGNOSTIC_TRACES").is_ok_and(|v| v == "1") {
+        let trace = crate::diagnostics::capture(cfg, &json!({"transcript":path,"session_id":sid,"engine":if codex {"codex"} else {"claude"}}))?;
+        if trace["source_sha256"] != source.hash { return Err(Error::Changed); }
+        Some(trace["sha256"].as_str().ok_or(Error::InvalidRequest)?.to_owned())
+    } else { None };
     let job = ReviewJob {
         prompt,
         project: slug,
@@ -889,6 +895,7 @@ pub fn build_review_job(
         cwd: cwd.into(),
         authority: authority.clone(),
         source,
+        diagnostic_trace,
     };
     job.validate_source()?;
     if record_usage {
@@ -921,6 +928,12 @@ pub fn stage_proposals(
     slug: &str,
     sid: &str,
     authority: &Authority,
+) -> Result<Value> {
+    stage_proposals_with_trace(cfg, data, slug, sid, authority, None)
+}
+fn stage_proposals_with_trace(
+    cfg: &Config, data: &Value, slug: &str, sid: &str,
+    authority: &Authority, diagnostic_trace: Option<&str>,
 ) -> Result<Value> {
     require_derived(authority)?;
     validate_channels(data)?;
@@ -1066,7 +1079,7 @@ pub fn stage_proposals(
             }
             gate::stage(
                 cfg,
-                &json!({"kind":"skill","project":slug,"source_project":slug,"session_id":sid,"name":name,"action":action,"description":safe_line(&proposal["description"],300)?,"body":body}),
+                &json!({"kind":"skill","project":slug,"source_project":slug,"session_id":sid,"name":name,"action":action,"description":safe_line(&proposal["description"],300)?,"body":body,"diagnostic_trace_sha256":diagnostic_trace}),
                 authority,
             )?;
             staged += 1;
@@ -1332,14 +1345,14 @@ pub fn process_result(cfg: &Config, job: &ReviewJob, output: &str) -> Result<Val
     job.validate_source()?;
     let data = extract_json(output)?;
     validate_channels(&data)?;
-    let staged = stage_proposals(cfg, &data, &job.project, &job.session_id, &job.authority)
+    let staged = stage_proposals_with_trace(cfg, &data, &job.project, &job.session_id, &job.authority, job.diagnostic_trace.as_deref())
         .map_err(|_| Error::MayHaveApplied)?;
     let derived = derive_conclusions(cfg, &data, &job.project, &job.session_id, &job.authority)
         .map_err(|_| Error::MayHaveApplied)?;
     let outcomes = skills::record_outcomes(cfg, &data, &job.cwd, &job.authority)
         .map_err(|_| Error::MayHaveApplied)?;
     Ok(
-        json!({"staged":staged["staged"],"memory":staged["memory"],"beliefs":derived,"skill_outcomes":outcomes}),
+        json!({"staged":staged["staged"],"memory":staged["memory"],"beliefs":derived,"skill_outcomes":outcomes,"diagnostic_trace_sha256":job.diagnostic_trace}),
     )
 }
 

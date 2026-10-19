@@ -28,6 +28,11 @@ impl Core {
             "filemap",
             "codegraph_snapshot_read_v1",
             "codegraph_snapshot_store_v1",
+            "diagnostic_trace_capture_v1",
+            "diagnostic_trace_read_v1",
+            "skill_evaluate_v1",
+            "skill_evaluation_read_v1",
+            "skill_evaluation_artifact_v1",
             "refresh_interval",
             "transcript_identity",
             "consult",
@@ -70,6 +75,11 @@ impl Core {
         let config = &self.config;
         let auth = &self.authority;
         let value = match req["op"].as_str().ok_or(Error::InvalidRequest)? {
+            "diagnostic_trace_capture_v1" => crate::diagnostics::capture(config, req)?,
+            "diagnostic_trace_read_v1" => crate::diagnostics::show(config, req)?,
+            "skill_evaluate_v1" => crate::skill_evaluation::evaluate(config, req, auth)?,
+            "skill_evaluation_read_v1" => crate::skill_evaluation::show(config, req)?,
+            "skill_evaluation_artifact_v1" => crate::skill_evaluation::artifact(config, req)?,
             "runtime_config_v1" => crate::config::runtime(config),
             "store_status_v1" => {
                 let conn = crate::store::read_only(config)?;

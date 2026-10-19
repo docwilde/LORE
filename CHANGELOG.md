@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.62.24 — 2026-10-19
+
+**Diagnostic traces**
+
+- Add **`trace capture|show`** for linked Claude/Codex actions and successful observations, with scrubbing, source hashes and explicit omission counts; automatic native review capture is opt-in.
+- Keep traces local and separate from the reviewer digest. Provider success flags do not verify task outcomes.
+
+**Skill experiments**
+
+- Add **`skills evaluate`** for exact pending coding skills: freeze baseline, candidate, fixtures and verifier; require training improvement, validation non-regression and preservation of each replay success.
+- Consume final tests once; retain immutable candidates, task traces and reports. Human approval remains required; the included deterministic fixture does not measure real model improvements.
+
+**Quality checks**
+
+- Check a **16 KiB** skill cap, excessive growth and operator-supplied answer markers before execution; label changed proposals/baselines stale and damaged evidence unavailable in pending review.
+- Scripts require human terminal authority and run without inherited credentials. They are trusted local code, with process deadlines and output limits; no sandbox or model adapter is supplied.
+
 ## 0.62.23 — 2026-10-19
 
 **Background review history**
