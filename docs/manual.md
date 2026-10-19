@@ -235,6 +235,7 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_MACHINE_HOST` | `hostname` | this host's machine-memory key; override when the hostname is not the name you use |
 | `LORE_REVIEW_MODEL` | unset | umbrella override for both headless roles |
 | `LORE_DERIVER_MODEL` | `haiku` | extraction — the easy role |
+| `LORE_DIAGNOSTIC_TRACES` | unset | `1`: capture local action/observation traces for admitted native reviews; [evaluation workflow](skill-evaluation.md) |
 | `LORE_DREAMER_MODEL` | `sonnet` | belief reconciliation and promotions — the judgment-heavy role |
 | `LORE_DIALECTIC_MODEL` | session default | model for the `/lore:ask` subagent |
 | `LORE_REVIEW_MIN_MESSAGES` | 3 | skip review below this many user messages |

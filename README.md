@@ -36,6 +36,7 @@ and relations between beliefs do not turn them into approved facts.
 - **Session search.** Local FTS5 index of Claude Code, DOXA, and Codex transcripts.
 - **File maps.** A short `path — purpose` guide to important project files.
 - **Learned skills.** Verified recipes are proposed, evaluated, and updated or retired.
+- **Local skill experiments.** [Capture diagnostic traces and compare pending coding skills](docs/skill-evaluation.md) against frozen tests before human approval.
 - **Cross-machine sync.** Signed hub, peer, or offline transfer; off by default.
 - **Agent integration.** Claude Code and Codex plugins inject startup context;
   Claude review and explicit Codex writes retain the proposal and approval gates.

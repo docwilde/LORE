@@ -305,6 +305,14 @@ fn content_pairs(value: &Value, depth: usize) -> Result<()> {
 }
 fn reviewable(snapshot: &Snapshot) -> Result<()> {
     let mut checked = snapshot.item.clone();
+    if checked["kind"] == "skill" {
+        if let Some(hash) = checked.get("diagnostic_trace_sha256").filter(|v| !v.is_null()) {
+            if !hash.as_str().is_some_and(crate::diagnostics::valid_hash) { return Err(Error::InvalidRequest); }
+            // Public, typed content address only; it grants no task score or
+            // authority. Preserve the exact raw bytes used for approval.
+            checked["diagnostic_trace_sha256"] = Value::Null;
+        }
+    }
     if checked["kind"] == "sync" {
         let op = checked
             .get_mut("op")
@@ -502,7 +510,11 @@ pub fn review(cfg: &Config, req: &Value) -> Result<Value> {
     if req.get("expected").is_some() {
         check_expected(req, &snap)?;
     }
-    Ok(json!({"pid":id,"raw":snap.raw,"sha256":snap.sha256,"inode":snap.inode,"complete":true}))
+    let mut value = json!({"pid":id,"raw":snap.raw,"sha256":snap.sha256,"inode":snap.inode,"complete":true});
+    if snap.item["kind"] == "skill" {
+        value["skill_evaluation"] = crate::skill_evaluation::summary(cfg, id, &snap.sha256, &snap.item);
+    }
+    Ok(value)
 }
 fn listings(cfg: &Config) -> Result<Value> {
     let path = cfg.root.join("pending/.listed");
