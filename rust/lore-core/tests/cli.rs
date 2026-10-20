@@ -367,6 +367,64 @@ fn codex_session_writes_apply_with_interactive_provenance() {
 }
 
 #[test]
+fn memory_and_filemap_mutations_refuse_a_missing_or_misplaced_match() {
+    // The reported case was `memory replace --scope project "<old>" "<new>"`:
+    // both positionals became the text, the match stayed empty and the write
+    // was refused as review_changed. The match is a flag; say so.
+    let fixture = Fixture::new();
+    let env = [("CODEX_THREAD_ID", "fixture-codex-session")];
+    fixture.write(&fixture.project(), "- old project fact\n- other project fact\n");
+    fixture.write(&fixture.map(), "- src/a.rs \u{2014} first\n");
+    let memory = fs::read(fixture.project()).unwrap();
+    let map = fs::read(fixture.map()).unwrap();
+    for args in [
+        vec!["memory", "replace", "--scope", "project", "old project fact", "new project fact"],
+        vec!["memory", "replace", "--scope", "project", "new project fact"],
+        vec!["memory", "replace", "--scope", "project", "--match", "", "new project fact"],
+        vec!["memory", "replace", "--scope", "project", "--match", "old", "--text", "new", "stray"],
+        vec!["memory", "remove", "--scope", "project", "old project fact"],
+        vec!["memory", "remove", "--scope", "project", "--match", "old", "stray"],
+        vec!["memory", "move", "--scope", "project", "--match", "old", "--to-machine", "owned-host", "stray"],
+        vec!["memory", "move", "--scope", "project", "--match", " ", "--to-machine", "owned-host"],
+        vec!["filemap", "remove", "src/a.rs"],
+        vec!["filemap", "replace", "src/b.rs", "second"],
+        vec!["filemap", "remove", "--match", "a.rs", "stray"],
+    ] {
+        let (success, out, err) = fixture.invoke_env(&args, &env);
+        assert!(!success && out.is_empty(), "{args:?}: {out}");
+        assert_eq!(err, "lore-rs: invalid_request\n", "{args:?}");
+        assert_eq!(fs::read(fixture.project()).unwrap(), memory, "{args:?}");
+        assert_eq!(fs::read(fixture.map()).unwrap(), map, "{args:?}");
+    }
+    for (needle, code) in [("absent", "match_not_found"), ("project fact", "match_ambiguous")] {
+        let (success, out, err) = fixture.invoke_env(
+            &["memory", "replace", "--scope", "project", "--match", needle, "new project fact"],
+            &env,
+        );
+        assert!(!success && out.is_empty(), "{needle}: {out}");
+        assert_eq!(err, format!("lore-rs: {code}\n"));
+        assert_eq!(fs::read(fixture.project()).unwrap(), memory);
+    }
+    // A destination project name that resolves to nothing is the same kind
+    // of miss, reported the same way.
+    let (success, out, err) = fixture.invoke_env(
+        &["memory", "move", "--scope", "project", "--match", "old", "--to", "no-such-project"],
+        &env,
+    );
+    assert!(!success && out.is_empty(), "{out}");
+    assert_eq!(err, "lore-rs: match_not_found\n");
+    assert_eq!(fs::read(fixture.project()).unwrap(), memory);
+    let (success, out, err) = fixture.invoke_env(
+        &["memory", "replace", "--scope", "project", "--match", "old", "new project fact"],
+        &env,
+    );
+    assert!(success && err.is_empty(), "{out} {err}");
+    assert_eq!(
+        fs::read_to_string(fixture.project()).unwrap(),
+        "- new project fact\n- other project fact\n"
+    );
+}
+#[test]
 fn codex_session_can_write_config_and_preserves_explicit_source_engine() {
     let fixture = Fixture::new();
     let env = [

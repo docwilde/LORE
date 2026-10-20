@@ -416,8 +416,11 @@ pub fn backfill(cfg: &Config, req: &Value) -> Result<Value> {
                 .cloned()
                 .collect()
         };
-        if matched.len() != 1 {
-            return Err(Error::Changed);
+        // A --project term the caller typed, not a snapshot that moved.
+        match matched.len() {
+            1 => {}
+            0 => return Err(Error::NoMatch),
+            _ => return Err(Error::AmbiguousMatch),
         }
         chosen.insert(matched[0].clone());
     }
@@ -830,10 +833,11 @@ fn resolve(raw: &str, known: &BTreeSet<String>) -> Result<String> {
             .cloned()
             .collect::<Vec<_>>()
     };
-    if matches.len() == 1 {
-        Ok(matches[0].clone())
-    } else {
-        Err(Error::Changed)
+    // A project name the caller typed (`memory move --to`, `project move`).
+    match matches.len() {
+        1 => Ok(matches[0].clone()),
+        0 => Err(Error::NoMatch),
+        _ => Err(Error::AmbiguousMatch),
     }
 }
 pub fn resolve_destination(cfg: &Config, raw: &str) -> Result<String> {

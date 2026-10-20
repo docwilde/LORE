@@ -66,6 +66,17 @@ from that project.
 
 A project means the **git repo root**, so a session started in `repo/viz` shares the repo's memory instead of forking an invisible second scope.
 
+Edit an existing entry by naming it with `--match`, a case-insensitive substring that must hit exactly one entry:
+
+```sh
+lore memory replace --scope project --match "<substring>" "<new fact>"
+lore memory remove --scope project --match "<substring>"
+lore filemap replace --match "<substring>" <path> "<purpose>"
+lore filemap remove --match "<substring>"
+```
+
+The match is only ever the flag; positional words are the new text (memory) or path and purpose (file map). A missing or empty `--match`, or a positional the command does not take, is `invalid_request`. A match that hits no entry is `match_not_found`; one that hits several is `match_ambiguous` and changes nothing — use a longer substring. `review_changed` is reserved for a reviewed snapshot that changed underneath you.
+
 `lore index` and `lore search` read Claude transcripts from `~/.claude/projects` and native Codex transcripts from `${CODEX_HOME:-~/.codex}/sessions`. Both use the same project-scoped FTS5 index. Search hits and `lore session` display the source engine; it is provenance, not a separate memory scope. Codex sessions use ids prefixed with `codex:` in LORE. DOXA's Codex transcripts are already indexed in Claude-shaped form, so their matching native Codex rollouts are skipped when DOXA's thread sidecar is present. Override the native directory with `LORE_CODEX_SESSIONS_DIR`.
 
 - A project-scoped fact defaults to the repo it was learned in. When a session is clearly about a different repo (reviewing another repo's PR, discussing a plugin from its consumer), the reviewer can name that project explicitly; a resolvable name retargets the write and shows as a cross-project note in `/lore:pending`. An unresolvable name stays filed under the session's own project rather than guessing, flagged the same way.

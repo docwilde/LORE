@@ -85,6 +85,16 @@ pub fn match_entries(entries: &[String], needle: &str) -> Vec<usize> {
         .filter_map(|(index, entry)| entry.to_lowercase().contains(&needle).then_some(index))
         .collect()
 }
+/// The single entry a caller's substring names. Zero or several hits are the
+/// caller's match to fix, so they get their own codes: `review_changed` would
+/// send them looking for a concurrent writer or a stale review instead.
+pub fn single_match(hits: &[usize]) -> Result<usize> {
+    match hits {
+        [index] => Ok(*index),
+        [] => Err(Error::NoMatch),
+        _ => Err(Error::AmbiguousMatch),
+    }
+}
 pub fn write_entries(path: &Path, entries: &[String], cap: usize) -> Result<()> {
     // Persist a text-ordered set irrespective of local authorship/receipt order.
     // UTF-8 byte order matches Python's Unicode code point order. Keep reads
@@ -390,19 +400,21 @@ pub fn mutate_locked(
             None
         }
         "replace" | "remove" => {
-            let hits = if exact {
-                entries
+            // An exact key was resolved earlier (sync replay), so a miss means
+            // the file changed since. A substring is the caller's own match.
+            let index = if exact {
+                let hits = entries
                     .iter()
                     .enumerate()
                     .filter_map(|(index, entry)| (entry == needle).then_some(index))
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                if hits.len() != 1 {
+                    return Err(Error::Changed);
+                }
+                hits[0]
             } else {
-                match_entries(&entries, needle)
+                single_match(&match_entries(&entries, needle))?
             };
-            if hits.len() != 1 {
-                return Err(Error::Changed);
-            }
-            let index = hits[0];
             let old = entries[index].clone();
             if action == "remove" {
                 entries.remove(index);
@@ -553,6 +565,11 @@ pub fn direct_action(cfg: &Config, req: &Value, authority: &Authority) -> Result
     if action == "add" && text.is_empty() {
         return Err(Error::InvalidRequest);
     }
+    // An empty substring matches every entry, so it can only ever be refused
+    // later as ambiguous or, on a one-entry file, rewrite that entry unasked.
+    if action != "add" && needle.trim().is_empty() {
+        return Err(Error::InvalidRequest);
+    }
     if !authority.may_write() {
         let id = gate::stage(
             cfg,
@@ -620,11 +637,8 @@ fn move_with_writer(
         cfg.timeout,
     )?;
     let mut src = read_entries(&source)?;
-    let hits = match_entries(&src, needle);
-    if hits.len() != 1 {
-        return Err(Error::Changed);
-    }
-    let text = src[hits[0]].clone();
+    let index = single_match(&match_entries(&src, needle))?;
+    let text = src[index].clone();
     let mut dst = read_entries(&destination)?;
     let src_bucket = scope.bucket(from);
     let provenance = gate::provenance(cfg, "memory", &src_bucket, &text);
@@ -654,7 +668,7 @@ fn move_with_writer(
             return Ok(MoveOutcome::DestinationOnly(error));
         }
     }
-    src.remove(hits[0]);
+    src.remove(index);
     if let Err(error) = write(&source, &src, scope.cap(cfg)) {
         return Ok(MoveOutcome::DestinationOnly(error));
     }
@@ -678,7 +692,10 @@ pub fn move_action(cfg: &Config, req: &Value, authority: &Authority) -> Result<V
     let (scope, key, _) = identity(cfg, req)?;
     let to_scope = Scope::parse(req["to_scope"].as_str().unwrap_or(scope.name()))?;
     let to = req["to"].as_str().ok_or(Error::InvalidRequest)?;
-    let needle = req["match"].as_str().ok_or(Error::InvalidRequest)?;
+    let needle = req["match"]
+        .as_str()
+        .filter(|needle| !needle.trim().is_empty())
+        .ok_or(Error::InvalidRequest)?;
     if !authority.may_write() {
         let id = gate::stage(
             cfg,
@@ -969,5 +986,57 @@ mod tests {
         let review = review(&cfg, &req).unwrap();
         let action_req = json!({"cwd":temp.path(),"scope":"user","action":"remove","entry":"fact","expected":{"key":review["key"],"sha256":review["sha256"]}});
         assert_eq!(action(&cfg, &action_req, &auth()), Err(Error::Changed));
+    }
+    #[test]
+    fn direct_substring_misses_name_the_match_and_leave_memory_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        let path = cfg.root.join("USER.md");
+        write_entries(&path, &["fact one".into(), "fact two".into()], 100).unwrap();
+        let before = fs::read(&path).unwrap();
+        for (verb, needle, expected) in [
+            ("replace", "absent", Error::NoMatch),
+            ("remove", "absent", Error::NoMatch),
+            ("replace", "fact", Error::AmbiguousMatch),
+            ("remove", "fact", Error::AmbiguousMatch),
+            ("replace", "", Error::InvalidRequest),
+            ("remove", "  ", Error::InvalidRequest),
+        ] {
+            let req = json!({"cwd":temp.path(),"scope":"user","action":verb,"match":needle,"text":"new fact"});
+            assert_eq!(direct_action(&cfg, &req, &auth()), Err(expected), "{verb} {needle:?}");
+            assert_eq!(fs::read(&path).unwrap(), before, "{verb} {needle:?}");
+        }
+        assert_eq!(Error::NoMatch.code(), "match_not_found");
+        assert_eq!(Error::AmbiguousMatch.code(), "match_ambiguous");
+        let req = json!({"cwd":temp.path(),"scope":"user","action":"replace","match":"one","text":"fact three"});
+        assert_eq!(direct_action(&cfg, &req, &auth()).unwrap()["status"], "applied");
+        assert_eq!(read_entries(&path).unwrap(), ["fact three", "fact two"]);
+    }
+    #[test]
+    fn move_substring_misses_name_the_match_and_move_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        let source = Scope::Project.path(&cfg, "a").unwrap();
+        let destination = Scope::Project.path(&cfg, "b").unwrap();
+        write_entries(&source, &["fact one".into(), "fact two".into()], 100).unwrap();
+        let before = fs::read(&source).unwrap();
+        for (needle, expected) in [("absent", Error::NoMatch), ("fact", Error::AmbiguousMatch)] {
+            assert_eq!(
+                move_entry(&cfg, Scope::Project, "a", needle, Scope::Project, "b", &auth()),
+                Err(expected)
+            );
+            assert_eq!(fs::read(&source).unwrap(), before);
+            assert!(!destination.exists());
+        }
+    }
+    #[test]
+    fn internal_exact_miss_still_reports_a_changed_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        files::atomic_write(&cfg.root.join("USER.md"), b"- shared fact extended\n").unwrap();
+        assert_eq!(
+            mutate(&cfg, Scope::User, "", "remove-exact", "shared fact", "", "direct", None, None, &auth()),
+            Err(Error::Changed)
+        );
     }
 }

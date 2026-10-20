@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.62.25 — 2026-10-20
+
+**Memory match errors**
+
+- Fix **`memory replace|remove|move`** and **`filemap replace|remove`** reporting `review_changed` when `--match` hit no entry or several. They now return **`match_not_found`** or **`match_ambiguous`** and change nothing: the caller's match needs fixing, not a concurrent writer or stale review.
+- Refuse a missing or empty `--match`, and a positional these commands do not take, as `invalid_request`. Previously `memory replace "<old>" "<new>"` joined both into the text and matched every entry; `filemap remove <path>` removed the only row of a one-row map.
+- Report an unresolved or ambiguous project name (`memory move --to`, `project move`, `backfill --project`) the same way. `review_changed` remains for reviewed-snapshot, exact sync-replay and pending-listing changes.
+
 ## 0.62.24 — 2026-10-19
 
 **Diagnostic traces**
