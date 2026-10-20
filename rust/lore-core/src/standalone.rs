@@ -17,6 +17,7 @@ Usage: lore-rs COMMAND [SUBCOMMAND] [options]
 Context: snapshot inject refresh status statusline motd provenance doctor
 Memory: memory show|entries|usage|review|add|replace|remove|move
         filemap show|add|replace|remove
+        replace/remove/move name one entry with --match SUBSTRING
 Beliefs: belief list|search|show|review|add|retract|edges|dedup-report
          evidence consult ask outcome stats audit crosscheck dream
 Graph: graph stats|neighbours|path|communities|components|degree|context|html|backfill|derive|edge
@@ -297,6 +298,14 @@ fn pos(req: &mut Value, name: &str, p: &[String], join: bool) -> Result<()> {
     }
     Ok(())
 }
+/// `pos` keeps a flag-supplied value and ignores positionals; refuse that
+/// combination instead, since nothing would read the positionals.
+fn no_positionals_beside(req: &Value, name: &str, p: &[String]) -> Result<()> {
+    if req.get(name).is_some() && !p.is_empty() {
+        return Err(Error::InvalidRequest);
+    }
+    Ok(())
+}
 fn id(req: &mut Value, p: &[String]) -> Result<()> {
     if req.get("belief_id").is_none() {
         req["belief_id"] = json!(p
@@ -380,8 +389,15 @@ pub fn run(args: &[String]) -> Result<()> {
         ("memory", "usage") => crate::memory::usage(&cfg, &req)?,
         ("memory", action @ ("add" | "replace" | "remove" | "move")) => {
             req["action"] = json!(action);
+            // The entry to change is named only by --match. Text stays
+            // variadic as in bin/lore.py, so a positional is never the match:
+            // refuse one where it can only be a misplaced match (or a text
+            // already given as --text) instead of dropping it unread.
             if matches!(action, "add" | "replace") {
+                no_positionals_beside(&req, "text", &p)?;
                 pos(&mut req, "text", &p, true)?
+            } else if !p.is_empty() {
+                return Err(Error::InvalidRequest);
             }
             if let Some(to) = req.get("to_machine").cloned() {
                 req["to_scope"] = json!("machine");
@@ -398,7 +414,13 @@ pub fn run(args: &[String]) -> Result<()> {
         ("filemap", "show") => crate::filemap::show(&cfg, &req)?,
         ("filemap", action @ ("add" | "replace" | "remove")) => {
             req["action"] = json!(action);
+            // As for memory: a positional on remove can only be a misplaced
+            // --match, so it is refused rather than silently dropped.
+            if action == "remove" && !p.is_empty() {
+                return Err(Error::InvalidRequest);
+            }
             if action != "remove" {
+                no_positionals_beside(&req, "path", &p)?;
                 pos(&mut req, "path", &p, false)?;
                 pos(&mut req, "purpose", p.get(1..).unwrap_or(&[]), true)?
             }

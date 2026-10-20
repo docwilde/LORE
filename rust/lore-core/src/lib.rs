@@ -42,7 +42,14 @@ pub enum Error {
     UnsafePath,
     TooLarge,
     Timeout,
+    /// A reviewed snapshot or source changed between read and write.
     Changed,
+    /// A caller-supplied substring matched no entry. Distinct from `Changed`:
+    /// the caller's match is what to fix, not a concurrent writer.
+    NoMatch,
+    /// A caller-supplied substring matched more than one entry; a longer
+    /// substring picks one. Refused rather than guessing which to rewrite.
+    AmbiguousMatch,
     OverCap,
     Untrusted,
     Unsupported,
@@ -57,6 +64,8 @@ impl Error {
             Self::TooLarge => "output_too_large",
             Self::Timeout => "timeout",
             Self::Changed => "review_changed",
+            Self::NoMatch => "match_not_found",
+            Self::AmbiguousMatch => "match_ambiguous",
             Self::OverCap => "over_cap",
             Self::Untrusted => "untrusted_write",
             Self::Unsupported => "unavailable_operation",

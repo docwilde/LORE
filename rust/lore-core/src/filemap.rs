@@ -131,19 +131,21 @@ pub(crate) fn mutate_locked(
             }
         }
         "replace" | "remove" => {
-            let hits = if exact {
-                entries
+            // As in memory: an exact key missing means the file changed since
+            // it was resolved; a substring missing is the caller's match.
+            let index = if exact {
+                let hits = entries
                     .iter()
                     .enumerate()
                     .filter_map(|(i, entry)| (entry == needle).then_some(i))
-                    .collect()
+                    .collect::<Vec<_>>();
+                if hits.len() != 1 {
+                    return Err(Error::Changed);
+                }
+                hits[0]
             } else {
-                memory::match_entries(&entries, needle)
+                memory::single_match(&memory::match_entries(&entries, needle))?
             };
-            if hits.len() != 1 {
-                return Err(Error::Changed);
-            }
-            let index = hits[0];
             old = Some(entries[index].clone());
             if action == "remove" {
                 entries.remove(index);
@@ -189,6 +191,10 @@ pub fn action(cfg: &Config, req: &Value, authority: &Authority) -> Result<Value>
         .get("purpose")
         .map_or(Some(""), Value::as_str)
         .ok_or(Error::InvalidRequest)?;
+    // An empty substring matches every row; see memory::direct_action.
+    if action != "add" && needle.trim().is_empty() {
+        return Err(Error::InvalidRequest);
+    }
     if !authority.may_write() {
         let id = gate::stage(
             cfg,
@@ -288,5 +294,29 @@ mod tests {
             "host:~/data"
         );
         assert!(path(&cfg, "../outside").is_err());
+    }
+    #[test]
+    fn substring_misses_name_the_match_and_leave_the_map_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        let authority = Authority::Interactive {
+            agent: "fixture".into(),
+            engine: "codex".into(),
+        };
+        let file = path(&cfg, &project_slug(temp.path())).unwrap();
+        files::atomic_write(&file, "- src/a.rs \u{2014} first\n- src/b.rs \u{2014} second\n".as_bytes()).unwrap();
+        let before = std::fs::read(&file).unwrap();
+        for (verb, needle, expected) in [
+            ("replace", "absent", Error::NoMatch),
+            ("remove", "absent", Error::NoMatch),
+            ("replace", "src/", Error::AmbiguousMatch),
+            ("remove", "src/", Error::AmbiguousMatch),
+            ("replace", "", Error::InvalidRequest),
+            ("remove", " ", Error::InvalidRequest),
+        ] {
+            let req = json!({"cwd":temp.path(),"action":verb,"match":needle,"path":"src/c.rs","purpose":"third"});
+            assert_eq!(action(&cfg, &req, &authority), Err(expected), "{verb} {needle:?}");
+            assert_eq!(std::fs::read(&file).unwrap(), before, "{verb} {needle:?}");
+        }
     }
 }
