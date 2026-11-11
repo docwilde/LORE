@@ -240,6 +240,29 @@ class TestMemoryGate(unittest.TestCase):
                 self.assertEqual(_entries(), [])
                 self.assertEqual(_pending_items(), [])
 
+    def test_empty_replacement_preserves_memory_provenance_and_sync_log(self):
+        with as_writer(AGENT_ENV):
+            for scope in ("user", "project", "machine"):
+                slug = SLUG if scope != "machine" else "fixture-host"
+                self.assertIsNone(lore.memory_add(scope, slug, "load-bearing fact"))
+                path = lore.memory_path(scope, slug)
+                before = path.read_bytes()
+                provenance = lore.PROVENANCE_PATH().read_bytes()
+                with contextlib.closing(lore.db_connect()) as conn:
+                    ops = conn.execute("SELECT * FROM sync_ops ORDER BY seq").fetchall()
+                for exact in (False, True):
+                    for text in ("", " ", "\t\r\n", "\u00a0\u2003"):
+                        with self.subTest(scope=scope, exact=exact, text=text):
+                            self.assertEqual(lore.memory_replace(
+                                scope, slug, "load-bearing fact", text, exact=exact), "empty text")
+                            self.assertEqual(path.read_bytes(), before)
+                            self.assertEqual(lore.PROVENANCE_PATH().read_bytes(), provenance)
+                            with contextlib.closing(lore.db_connect()) as conn:
+                                self.assertEqual(conn.execute(
+                                    "SELECT * FROM sync_ops ORDER BY seq").fetchall(), ops)
+                self.assertIsNone(lore.memory_remove(scope, slug, "load-bearing fact"))
+                self.assertEqual(lore.read_entries(path), [])
+
     def test_hook_replace_and_remove_cannot_mutate_the_store(self):
         with as_writer(AGENT_ENV), quiet():
             lore.cmd_memory(Namespace(mcmd="add", scope="project", cwd=CWD,

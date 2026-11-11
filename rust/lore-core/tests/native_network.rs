@@ -1268,6 +1268,133 @@ fn cursor(cfg: &Config, transport: &Transport) -> String {
         )
         .unwrap()
 }
+
+#[test]
+fn historical_belief_peer_replay_banks_cursor_and_preserves_signed_quarantine() {
+    // #112: a fresh stream must retain signed history, including quarantined
+    // entries, rather than repairing missing identities or unsigned hub copies.
+    let (temp, source) = config();
+    let cases = [
+        ("insert", json!({"uid":"retained-belief","subject":"user",
+                          "claim":"Synthetic historical belief","confidence":0.8})),
+        ("reinforce", json!({"uid":null,"confidence":0.9})),
+        ("edge", json!({"src_uid":"retained-belief","dst_uid":null,
+                        "rel":"explains","source":"derived"})),
+        ("supersede", json!({"uid":"retained-belief","by_uid":null,
+                             "reason":"Synthetic missing historical identity"})),
+    ];
+    let ops: Vec<Value> = cases.iter().enumerate().map(|(i, (verb, payload))| {
+        let mut value = op("unused", i as i64 + 1);
+        value["class"] = json!("belief");
+        value["op"] = json!(verb);
+        value["payload"] = payload.clone();
+        value["mac"] = json!(lore_core::sync_apply::compute_mac(&value, KEY).unwrap());
+        value
+    }).collect();
+    let admitted = lore_core::sync_apply::apply_ops(&source, &ops).unwrap();
+    assert_eq!(admitted["applied"], 1);
+    assert_eq!(admitted["quarantined"], 3);
+
+    // Old immutable unsigned copies must still fail admission, including null
+    // references: quarantine is available only after successful verification.
+    let unsigned: Vec<Value> = ops.iter().enumerate().map(|(i, op)| {
+        let mut value = op.clone();
+        value["mac"] = Value::Null;
+        value["hub_seq"] = json!(i + 1);
+        value
+    }).collect();
+    let (_old_temp, old_destination) = config();
+    let (old_url, old_server) = fixture(vec![(200, json!({"ops":unsigned,"next":null}))]);
+    let old_transport = Transport::new(&old_url, None, "hub".into()).unwrap();
+    let refused = net::pull(&old_destination, &old_transport).unwrap();
+    assert_eq!(refused["unverified"], 4);
+    assert_eq!(refused["quarantined"], 0);
+    assert_eq!(refused["applied"], 0);
+    // A receipt cursor can bank after durable unverified staging. It cannot
+    // establish the issue's stronger zero-unverified replay success gate.
+    assert_eq!(refused["cursor_advanced"], true);
+    assert_eq!(cursor(&old_destination, &old_transport), "4");
+    assert_eq!(store::read_only(&old_destination).unwrap().query_row(
+        "SELECT count(*) FROM beliefs", [], |r| r.get::<_, i64>(0)
+    ).unwrap(), 0);
+    old_server.join().unwrap();
+
+    let server = PeerServer {
+        machine_id: "historical-source".into(),
+        cfg: source.clone(),
+        loopback: true,
+        auth: "none".into(),
+        allow: BTreeSet::new(),
+        secret: Some("historical-fixture-secret".into()),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let task = thread::spawn(move || {
+        for _ in 0..2 {
+            server.connection(listener.accept().unwrap().0).unwrap();
+        }
+    });
+    let (_dest_temp, destination) = config();
+    let transport = Transport::new(&url, Some("historical-fixture-secret".into()),
+                                   "peer:historical-source".into()).unwrap();
+    let report = net::pull(&destination, &transport).unwrap();
+    assert_eq!(report["fetched"], 4);
+    assert_eq!(report["applied"], 1);
+    assert_eq!(report["quarantined"], 3);
+    for field in ["unverified", "failed", "deferred", "unknown", "skipped"] {
+        assert_eq!(report[field], 0, "{field}: {report}");
+    }
+    assert_eq!(report["cursor_advanced"], true);
+    assert_eq!(cursor(&destination, &transport), "4");
+    let conn = store::read_only(&destination).unwrap();
+    for original in &ops {
+        let (payload, mac, state): (String, String, i64) = conn.query_row(
+            "SELECT payload,mac,applied FROM sync_ops WHERE op_id=?",
+            [original["op_id"].as_str().unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        let mut retained = original.clone();
+        retained["payload"] = serde_json::from_str(&payload).unwrap();
+        retained["mac"] = json!(mac);
+        assert_eq!(retained, *original);
+        assert!(lore_core::sync_apply::verify_mac(&retained, Some(KEY)));
+        assert_eq!(state, if original["op"] == "insert" { 1 } else { 5 });
+    }
+    // A log digest alone does not prove state convergence. Compare this
+    // fixture's portable belief fields and related counts as well.
+    let belief_state = |cfg: &Config| {
+        let conn = store::read_only(cfg).unwrap();
+        let state: Value = conn.query_row(
+            "SELECT uid,subject,claim,confidence,status FROM beliefs",
+            [], |r| Ok(json!([r.get::<_, String>(0)?, r.get::<_, String>(1)?,
+                             r.get::<_, String>(2)?, r.get::<_, f64>(3)?,
+                             r.get::<_, String>(4)?])),
+        ).unwrap();
+        for table in ["belief_evidence", "belief_edges", "belief_outcomes"] {
+            let count: i64 = conn.query_row(&format!("SELECT count(*) FROM {table}"),
+                                           [], |r| r.get(0)).unwrap();
+            assert_eq!(count, if table == "belief_evidence" { 1 } else { 0 });
+        }
+        assert_eq!(conn.query_row("SELECT count(*) FROM beliefs", [],
+                                 |r| r.get::<_, i64>(0)).unwrap(), 1);
+        lore_core::digest(&store::canonical_bytes(&state).unwrap())
+    };
+    assert_eq!(belief_state(&source), belief_state(&destination));
+    let source_bundle = temp.path().join("source.json");
+    let replay_bundle = temp.path().join("replay.json");
+    net::export_bundle(&source, &source_bundle).unwrap();
+    net::export_bundle(&destination, &replay_bundle).unwrap();
+    let bundle = |path| serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(bundle(&source_bundle), bundle(&replay_bundle));
+
+    let repeated = net::pull_from(&destination, &transport, Some(0), false).unwrap();
+    assert_eq!(repeated["duplicate"], 4);
+    assert_eq!(repeated["applied"], 0);
+    assert_eq!(cursor(&destination, &transport), "4");
+    assert_eq!(belief_state(&source), belief_state(&destination));
+    task.join().unwrap();
+}
+
 #[test]
 fn large_signed_session_hub_pull_keeps_memory_order_signature_and_duplicates() {
     let (_temp, mut cfg) = config();

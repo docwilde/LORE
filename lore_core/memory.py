@@ -253,6 +253,9 @@ def memory_replace(scope: str, slug: str, needle: str, text: str, *,
                    via: str = "direct", origin: "str | None" = None,
                    source_engine: "str | None" = None,
                    writer: "str | None" = None, exact: bool = False) -> str | None:
+    new = one_line(text)
+    if not new:
+        return "empty text"
     path = memory_path(scope, slug)
     entries = read_entries(path)
     hits = ([i for i, entry in enumerate(entries) if entry == needle]
@@ -263,7 +266,7 @@ def memory_replace(scope: str, slug: str, needle: str, text: str, *,
     if len(hits) > 1:
         listing = "\n".join(f"  - {entries[i]}" for i in hits)
         return f"{needle!r} is ambiguous ({len(hits)} matches) — use a longer substring:\n{listing}"
-    old, new = entries[hits[0]], one_line(text)
+    old = entries[hits[0]]
     entries[hits[0]] = new
     err = write_entries(path, entries, memory_cap(scope), scope)
     if err is None:
