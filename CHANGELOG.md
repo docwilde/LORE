@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Fix **empty memory replacements** (#132): Rust direct/internal mutations and
+  Python `memory_replace` reject text that normalizes to empty before changing
+  the entry, provenance or sync log. Native model/derived requests are refused
+  before staging; deletion still uses `memory remove`.
+- Add end-to-end coverage for **historical belief recovery** (#112), implemented
+  in 0.62.7: authenticated peer replay preserves signed quarantine, banks its
+  cursor, matches portable state, and remains idempotent. Unsigned hub copies
+  stay unapplied; their receipt cursor alone cannot prove recovery.
+
 ## 0.62.25 — 2026-10-20
 
 **Memory match errors**

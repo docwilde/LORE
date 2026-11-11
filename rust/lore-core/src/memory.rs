@@ -385,11 +385,11 @@ pub fn mutate_locked(
     let mut entries = read_entries(&path)?;
     let bucket = scope.bucket(key);
     let text = gate::one_line(&crate::scrub::scrub(text)?);
+    if action != "remove" && text.is_empty() {
+        return Err(Error::InvalidRequest);
+    }
     let old = match action {
         "add" => {
-            if text.is_empty() {
-                return Err(Error::InvalidRequest);
-            }
             if entries
                 .iter()
                 .any(|entry| entry.to_lowercase() == text.to_lowercase())
@@ -562,7 +562,7 @@ pub fn direct_action(cfg: &Config, req: &Value, authority: &Authority) -> Result
         .map_or(Some(""), Value::as_str)
         .ok_or(Error::InvalidRequest)?;
     let text = gate::one_line(&crate::scrub::scrub(text)?);
-    if action == "add" && text.is_empty() {
+    if action != "remove" && text.is_empty() {
         return Err(Error::InvalidRequest);
     }
     // An empty substring matches every entry, so it can only ever be refused
@@ -986,6 +986,95 @@ mod tests {
         let review = review(&cfg, &req).unwrap();
         let action_req = json!({"cwd":temp.path(),"scope":"user","action":"remove","entry":"fact","expected":{"key":review["key"],"sha256":review["sha256"]}});
         assert_eq!(action(&cfg, &action_req, &auth()), Err(Error::Changed));
+    }
+    #[test]
+    fn empty_replacements_preserve_memory_provenance_and_sync_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        let path = cfg.root.join("USER.md");
+        mutate(
+            &cfg,
+            Scope::User,
+            "",
+            "add",
+            "",
+            "load-bearing fact",
+            "direct",
+            None,
+            None,
+            &auth(),
+        )
+        .unwrap();
+        let snapshot = || {
+            let conn = crate::store::connect(&cfg).unwrap();
+            let ops: i64 = conn
+                .query_row("SELECT count(*) FROM sync_ops", [], |row| row.get(0))
+                .unwrap();
+            (
+                fs::read(&path).unwrap(),
+                fs::read(cfg.root.join("provenance.json")).unwrap(),
+                ops,
+            )
+        };
+        let before = snapshot();
+        for text in ["", " ", "\t\r\n", "\u{00a0}\u{2003}"] {
+            for authority in [
+                auth(),
+                Authority::Interactive {
+                    agent: "fixture".into(),
+                    engine: "codex".into(),
+                },
+                Authority::Model {
+                    agent: "fixture".into(),
+                    engine: "codex".into(),
+                    session_id: "s".into(),
+                },
+                Authority::Derived {
+                    agent: "fixture".into(),
+                    engine: "claude".into(),
+                },
+            ] {
+                let req = json!({"cwd":temp.path(),"scope":"user","action":"replace","match":"load-bearing fact","text":text});
+                assert_eq!(
+                    direct_action(&cfg, &req, &authority),
+                    Err(Error::InvalidRequest),
+                    "{text:?} {authority:?}"
+                );
+                assert_eq!(snapshot(), before);
+                assert!(!cfg.root.join("pending").exists());
+            }
+            for verb in ["replace", "replace-exact"] {
+                assert_eq!(
+                    mutate(
+                        &cfg,
+                        Scope::User,
+                        "",
+                        verb,
+                        "load-bearing fact",
+                        text,
+                        "direct",
+                        None,
+                        None,
+                        &auth()
+                    ),
+                    Err(Error::InvalidRequest),
+                    "{verb} {text:?}"
+                );
+                assert_eq!(snapshot(), before);
+            }
+        }
+        let req = json!({"cwd":temp.path(),"scope":"user","action":"replace","match":"load-bearing fact"});
+        assert_eq!(
+            direct_action(&cfg, &req, &auth()),
+            Err(Error::InvalidRequest)
+        );
+        assert_eq!(snapshot(), before);
+        let req = json!({"cwd":temp.path(),"scope":"user","action":"remove","match":"load-bearing fact"});
+        assert_eq!(
+            direct_action(&cfg, &req, &auth()).unwrap()["status"],
+            "applied"
+        );
+        assert!(read_entries(&path).unwrap().is_empty());
     }
     #[test]
     fn direct_substring_misses_name_the_match_and_leave_memory_alone() {
