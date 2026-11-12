@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.62.26 — 2026-11-12
+
+**Empty memory replacements**
 
 - Fix **empty memory replacements** (#132): Rust direct/internal mutations and
   Python `memory_replace` reject text that normalizes to empty before changing
