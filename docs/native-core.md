@@ -57,6 +57,14 @@ CLI, MCP server, review, setup and administrative workflows use the same Rust
 core. DOXA links the library and uses the native carrier for detached work.
 Python modules remain development compatibility references.
 
+The bundled Codex hooks inject curated memory at session startup and, with
+`LORE_GRAPH_CONTEXT=1`, append bounded graph context at startup and on each
+prompt. The Codex prompt adapter performs context retrieval without scheduling
+review, indexing transcripts, or recording memory-refresh stamps. Graph errors
+omit the graph block; startup still supplies its curated snapshot. Injection
+honors `LORE_SKIP` and `LORE_DISABLE_INJECT`; `LORE_DISABLE_BELIEFS` also
+suppresses graph context.
+
 ## Bounds and failure semantics
 
 - JSONL frames and provider stdout are limited to 1 MiB; agent frames and

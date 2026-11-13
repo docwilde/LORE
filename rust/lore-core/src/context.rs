@@ -266,16 +266,19 @@ pub fn build_context(
     crate::scrub::scrub(&text)
 }
 pub fn snapshot(cfg: &Config, req: &Value) -> Result<Value> {
+    let engine = std::env::var("LORE_ENGINE").unwrap_or_default();
+    snapshot_for_engine(cfg, req, &engine)
+}
+pub(crate) fn snapshot_for_engine(cfg: &Config, req: &Value, engine: &str) -> Result<Value> {
     let requested_scope = match req.get("scope") {
         None => std::env::var("LORE_SCOPE").unwrap_or_else(|_| "all".into()),
         Some(value) => value.as_str().ok_or(Error::InvalidRequest)?.to_owned(),
     };
-    let engine = std::env::var("LORE_ENGINE").unwrap_or_default();
     Ok(json!(build_context(
         cfg,
         gate::cwd(req)?,
         &requested_scope,
-        &engine,
+        engine,
         RefreshPolicy::from_config(cfg)
     )?))
 }

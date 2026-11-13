@@ -1260,12 +1260,34 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
             {
                 return Ok(());
             }
-            let snapshot = crate::context::snapshot(cfg, &req)?;
+            let mut snapshot = crate::context::snapshot_for_engine(cfg, &req, engine)?;
+            if engine == "codex" {
+                if let Ok(Value::String(graph)) = crate::context::graph_context_op(cfg, &req) {
+                    if !graph.is_empty() {
+                        let text = snapshot.as_str().ok_or(Error::InvalidRequest)?;
+                        snapshot = json!(format!("{text}\n\n{graph}"));
+                    }
+                }
+            }
             output(
                 json!({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":snapshot}}),
             )
         }
         "prompt" => {
+            if engine == "codex" {
+                if cfg.disabled("LORE_DISABLE_INJECT") {
+                    return Ok(());
+                }
+                return match crate::context::graph_context_op(cfg, &req) {
+                    Ok(Value::String(graph)) if !graph.is_empty() => output(json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "UserPromptSubmit",
+                            "additionalContext": graph
+                        }
+                    })),
+                    _ => Ok(()),
+                };
+            }
             let _ = crate::standalone_hooks::review_at_prompt(cfg, &input, cwd, session, engine);
             if engine == "claude"
                 && ["LORE_LIVE_INDEX", "LORE_STREAM_INDEX"]
