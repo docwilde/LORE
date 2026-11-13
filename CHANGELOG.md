@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.62.27 — 2026-11-12
+
+**Startup memory**
+
+- Keep curated memory available in startup and refresh snapshots when pending
+  proposal enumeration fails. Report the pending count as unknown with its
+  diagnostic code. Pending listings retain their bounded scan and review checks.
+
 ## 0.62.26 — 2026-11-12
 
 **Empty memory replacements**
