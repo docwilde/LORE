@@ -288,6 +288,43 @@ fn native_hook_injection_never_calls_provider() {
         .unwrap()
         .contains("Hook fixture memory"));
 }
+#[test]
+fn native_startup_hook_keeps_memory_when_pending_scan_exceeds_its_limit() {
+    let (t, cfg) = config();
+    let pending = cfg.root.join("pending");
+    lore_core::files::private_dir(&pending).unwrap();
+    std::fs::write(cfg.root.join("USER.md"), "- Startup memory survives overflow\n").unwrap();
+    for index in 0..4097 {
+        std::fs::write(pending.join(format!("fixture-{index}.json")), b"{}").unwrap();
+    }
+    for engine in ["claude", "codex"] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_lore-rs"))
+            .args(["hook", "--engine", engine, "--event", "session-start"])
+            .env_clear()
+            .env("HOME", t.path())
+            .env("LORE_ROOT", &cfg.root)
+            .env("LORE_DISABLE_SYNC", "1")
+            .env("LORE_CLAUDE_BIN", "/this/provider/must/never/be/launched")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        write!(child.stdin.as_mut().unwrap(), "{}", json!({"cwd":t.path(),"session_id":"overflow-fixture"})).unwrap();
+        drop(child.stdin.take());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{engine}: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.stderr.is_empty());
+        let frame: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(frame["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        let context = frame["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(context.contains("Startup memory survives overflow"));
+        assert!(context.contains("Pending review status unavailable (output_too_large)"));
+        assert_eq!(lore_core::pending::ids(&cfg), Err(lore_core::Error::TooLarge));
+        assert_eq!(std::fs::read_dir(&pending).unwrap().count(), 4097);
+    }
+}
 fn interactive() -> Authority {
     Authority::Interactive {
         agent: "fixture-reviewer".into(),

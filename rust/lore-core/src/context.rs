@@ -226,10 +226,19 @@ pub fn build_context(
             parts.push(String::new());
         }
     }
-    let pending = crate::pending::ids(cfg)?.len();
-    if pending > 0 {
-        parts.push(format!("{pending} staged proposal(s) from background review — surface this to the user once early in the session and suggest pending review."));
-        parts.push(String::new());
+    match crate::pending::ids(cfg) {
+        Ok(ids) if !ids.is_empty() => {
+            parts.push(format!("{} staged proposal(s) from background review — surface this to the user once early in the session and suggest pending review.", ids.len()));
+            parts.push(String::new());
+        }
+        Ok(_) => {}
+        Err(error) => {
+            parts.push(format!(
+                "Pending review status unavailable ({}); pending count is unknown.",
+                error.code()
+            ));
+            parts.push(String::new());
+        }
     }
     if matches!(scope, "all" | "project") {
         let count = crate::store::connect(cfg)
@@ -674,6 +683,39 @@ mod tests {
         conn.execute("UPDATE beliefs SET status='retracted' WHERE id=2", [])
             .unwrap();
         assert!(graph_awareness_op(&cfg, &json!({})).unwrap().is_null());
+    }
+    #[test]
+    fn pending_scan_overflow_keeps_curated_context_and_reports_an_unknown_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_root(temp.path().join("lore"));
+        memory::write_entries(
+            &cfg.root.join("USER.md"),
+            &["Curated memory survives a pending backlog".into()],
+            1000,
+        )
+        .unwrap();
+        let render = || build_context(
+            &cfg,
+            temp.path(),
+            "all",
+            "claude",
+            RefreshPolicy { interval_secs: None, on_change: true },
+        );
+        let pending = cfg.root.join("pending");
+        files::private_dir(&pending).unwrap();
+        for index in 0..3 {
+            fs::write(pending.join(format!("fixture-{index}.json")), b"{}").unwrap();
+        }
+        assert!(render().unwrap().contains("3 staged proposal(s)"));
+        for index in 3..4097 {
+            fs::write(pending.join(format!("fixture-{index}.json")), b"{}").unwrap();
+        }
+        assert_eq!(crate::pending::ids(&cfg), Err(Error::TooLarge));
+        let context = render().unwrap();
+        assert!(context.contains("Curated memory survives a pending backlog"));
+        assert!(context.contains("Pending review status unavailable (output_too_large)"));
+        assert!(!context.contains("staged proposal(s) from background review"));
+        assert_eq!(fs::read_dir(&pending).unwrap().count(), 4097);
     }
     #[test]
     fn context_keeps_filemap_body_and_other_host_facts_out_of_snapshot() {
