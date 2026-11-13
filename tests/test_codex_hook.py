@@ -13,6 +13,16 @@ HOOK = Path(__file__).resolve().parents[1] / "codex" / "hooks" / "session_start.
 
 
 class CodexHookTests(unittest.TestCase):
+    def test_packaged_startup_and_prompt_hooks_use_native_carrier(self) -> None:
+        manifest = json.loads((HOOK.parent / "hooks.json").read_text())
+        for event, operation in (("SessionStart", "session-start"),
+                                 ("UserPromptSubmit", "prompt")):
+            hooks = manifest["hooks"][event][0]["hooks"]
+            self.assertEqual(len(hooks), 1)
+            self.assertEqual(hooks[0]["type"], "command")
+            self.assertEqual(hooks[0]["command"],
+                             f'"${{PLUGIN_ROOT}}/bin/lore" hook --engine codex --event {operation}')
+
     def test_session_start_reads_shared_user_memory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

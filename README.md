@@ -98,10 +98,10 @@ This WSL 2 setup has not been verified in LORE CI; see the
 ### Codex
 
 LORE supports Codex through the portable [`plugin.json`](plugin.json) and
-its [SessionStart hook](codex/hooks/hooks.json). Enable the full plugin, then
-review and trust its hook with `/hooks` in Codex. Once trusted, the hook injects
-the shared user and current project snapshot at startup, resume, clear, and
-compaction. Codex requires a new review when a hook changes; see its
+its [startup and prompt hooks](codex/hooks/hooks.json). Enable the full plugin,
+then review and trust its hooks with `/hooks` in Codex. Once trusted, the startup
+hook injects the shared user and current project snapshot at startup, resume,
+clear, compaction, and fork. Codex requires a new review when a hook changes; see its
 [hook trust documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
 Claude Code, Codex, and DOXA read the same store; set `LORE_ROOT` when using a
 store other than `~/.claude/lore`.
@@ -110,7 +110,8 @@ The [Codex skill](codex/skills/lore/SKILL.md) supports explicit recall and
 memory writes. Index local Codex, Claude Code, and DOXA transcripts with
 `lore index`, search them with `lore search "terms" --all`, and read a match
 with `lore session <id>`. Indexing and search stay local and use SQLite FTS5.
-The Codex startup hook does not index transcripts or run the Claude reviewer.
+The Codex injection hooks read context without indexing transcripts or
+scheduling review.
 
 Interactive Codex sessions can apply CLI memory writes directly. Calls
 classified as hooks or detached/model writers stage proposals; inspect them
@@ -118,8 +119,8 @@ with `lore pending` and resolve the exact reviewed
 proposal in the native terminal or DOXA. The MCP tool `lore_remember` always
 stages a proposal. A proposal or search result is not an approved fact.
 
-The plugin declares its startup hook and skills. Register the native MCP server
-separately to give Codex tools for curated memory, beliefs and evidence,
+The plugin declares its startup and prompt hooks and skills. Register the native
+MCP server separately to give Codex tools for curated memory, beliefs and evidence,
 graph traversal, session search, and staged memory proposals. From this checkout:
 
 ```sh
@@ -161,8 +162,10 @@ An absent entry reports `match_not_found`; multiple matches report
 Graph context is experimental and off by default. Enable it in the shared
 settings with `lore config set LORE_GRAPH_CONTEXT 1`. Its defaults are a
 1,200-character budget (`LORE_GRAPH_CONTEXT_CAP`) and one relation hop
-(`LORE_GRAPH_CONTEXT_HOPS`). The Claude prompt hook injects the bounded block;
-automatic graph context in Codex requires a separate `UserPromptSubmit` hook.
+(`LORE_GRAPH_CONTEXT_HOPS`). The Claude prompt hook and bundled Codex startup
+and `UserPromptSubmit` hooks inject the bounded block. Codex retrieves graph
+context on the first prompt and subsequent prompts; retrieval failures leave
+startup memory available and omit the graph block.
 With graph context enabled, `lore graph context --prompt "topic terms"` reads
 the block explicitly. `lore graph stats`, `lore graph neighbours <id>`, and the
 MCP tool `lore_belief_neighbours` support on-demand inspection and traversal.

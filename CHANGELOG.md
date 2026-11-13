@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.62.29 — 2026-11-12
+
+**Codex graph hooks**
+
+- Bundle a native Codex `UserPromptSubmit` hook and include graph context in
+  Codex startup snapshots when `LORE_GRAPH_CONTEXT=1`. The prompt hook retrieves
+  graph context from the first prompt without scheduling review or indexing.
+- Keep startup memory available when graph retrieval fails, honor injection
+  and belief disable switches, and retain graph budgets and citation labels.
+- Use the declared hook engine for startup memory-refresh instructions.
+- Run the startup hook on fork. Review the updated hooks in Codex with `/hooks`
+  and install the matching native carrier with `./task install` after updating
+  the plugin.
+
 ## 0.62.28 — 2026-11-12
 
 **README reference**
