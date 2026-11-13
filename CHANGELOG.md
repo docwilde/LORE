@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.62.28 — 2026-11-12
+
+**README reference**
+
+- Document startup memory availability when pending enumeration fails, carrier
+  setup after plugin updates, and empty replacement and match-error behavior.
+- Clarify interactive CLI writes, staged model proposals, Codex hook trust and
+  MCP registration, and the graph-context defaults and Codex prompt-hook setup.
+- Describe learned skill outcomes, sync conflicts, and memory refresh behavior.
+
 ## 0.62.27 — 2026-11-12
 
 **Startup memory**
