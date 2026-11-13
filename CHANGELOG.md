@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.62.27 — 2026-11-12
+
+**Startup memory**
 
 - Keep curated memory available in startup and refresh snapshots when pending
   proposal enumeration fails. Report the pending count as unknown with its
