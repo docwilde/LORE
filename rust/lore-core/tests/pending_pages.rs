@@ -162,6 +162,27 @@ fn missing_queue_stays_lazy_and_invalid_limits_refuse() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn dangling_pending_directory_is_unavailable_instead_of_an_empty_queue() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = Config::for_root(temp.path().join("store"));
+    files::private_dir(&cfg.root).unwrap();
+    std::os::unix::fs::symlink(
+        temp.path().join("missing-directory"),
+        cfg.root.join("pending"),
+    )
+    .unwrap();
+    assert_eq!(
+        pending_page::list(&cfg, &json!({"cwd":temp.path()})),
+        Err(Error::UnsafePath)
+    );
+    assert!(std::fs::symlink_metadata(cfg.root.join("pending"))
+        .unwrap()
+        .is_symlink());
+    assert!(!temp.path().join("missing-directory").exists());
+}
+
 #[test]
 fn cli_falls_back_to_pages_while_full_namespace_consumers_stay_strict() {
     let (temp, cfg) = fixture(4100);

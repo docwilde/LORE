@@ -41,3 +41,4 @@ remains available.
 The first continuation creates a private local `.pending-page-key` in the store.
 The key authenticates pagination state and is excluded from sync and exports.
 A read of an absent queue does not create a store.
+An unreadable or linked queue directory is refused rather than reported empty.

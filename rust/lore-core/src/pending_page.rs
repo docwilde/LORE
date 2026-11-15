@@ -109,7 +109,12 @@ pub fn list(cfg: &Config, req: &Value) -> Result<Value> {
             Some(value) => Some(value.as_str().ok_or(Error::InvalidRequest)?),
         };
         let path = cfg.root.join("pending");
-        if !path.try_exists()? {
+        let missing = match std::fs::symlink_metadata(&path) {
+            Ok(_) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error.into()),
+        };
+        if missing {
             if cursor.is_some() {
                 return Err(Error::Changed);
             }
