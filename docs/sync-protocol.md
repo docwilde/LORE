@@ -139,7 +139,7 @@ peer) is one JSON object with exactly these fields:
 | `machine_id` | string | yes | no | uuid4, same form. The authoring machine. |
 | `machine_seq` | integer | yes | no | ≥ 1. Gap-free per `machine_id`, assigned by that machine, never by a receiver. |
 | `lamport` | integer | yes | no | ≥ 1. See `sync.md` "Ordering" for how a sender computes it; this document only fixes its wire type and that it is part of the signed tuple. |
-| `class` | string | yes | no | One of `memory`, `filemap`, `belief`, `pending`, `skill`, `session`, `transcript`, `tabset`, `worktree` today. A server MUST NOT reject an op solely because `class` holds a value outside this list — see §8, "the hub never interprets ops": a future class must cross an unmodified hub. |
+| `class` | string | yes | no | One of `memory`, `filemap`, `belief`, `pending`, `skill`, `skill_usage`, `session`, `transcript`, `tabset`, `worktree`. A server MUST NOT reject an op solely because `class` holds a value outside this list — see §8, "the hub never interprets ops": a future class must cross an unmodified hub. |
 | `op` | string | yes | no | Per-class verb, e.g. `add`, `insert`, `reinforce`. Same forward-compatibility rule as `class`. |
 | `project_key` | string or `null` | yes | yes | `null` means user scope. See `sync.md` prerequisite (a) for how a client derives it; this document only fixes that `null` (not `""` or omission) is the wire spelling for "no project". |
 | `payload` | object | yes | no | Per-class shape, Appendix A (informative here; normative in `sync.md`). Scrubbed (`scrub_secrets`) before it is ever written to a local `sync_ops` row, let alone signed. |
@@ -819,6 +819,7 @@ field may change:
 | `pending` | `resolve` | `{uid: string, status: string}` |
 | `skill` | `put` | `{name: string, body: string}` — `body` is the **complete `SKILL.md`**, frontmatter included, so a receiver reproduces the author's file byte for byte by writing it verbatim (ISSUE #73) |
 | `skill` | `remove` | `{name: string}` |
+| `skill_usage` (opt-in) | `snapshot` | `{v: 1, name: string, origin: string, generation: integer, uses: integer, ok: integer, fail: integer}`; `origin` must equal the verified envelope author and `project_key` must be null. Per-author components merge by maximum within a generation; a newer generation replaces that author's component. See [counter bounds and authority](skill-usage-sync.md). |
 | `session` | `upsert` | `{session_id: string, project_key: string\|null, machine_id: string, cwd: string, title: string, first_ts: string, last_ts: string, messages: integer, engine?: string}`; `engine` is informational provenance and defaults to `claude` for older senders. |
 | `session` | `msgs` | `{session_id: string, rows: array}` |
 | `transcript` (opt-in) | `chunk` | `{session_id: string, from_line: integer, to_line: integer, lines: array<string>}` |

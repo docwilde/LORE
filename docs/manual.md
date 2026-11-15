@@ -30,7 +30,7 @@ decisions were made, see [`user-model-channel-separation.md`](user-model-channel
 | `/lore:remember <fact>` | Stores a fact now — picks the scope, condenses to one line, writes through the cap. |
 | `/lore:context` | The exact entries in context right now, verbatim, as one table per scope. |
 | `/lore:filemap [path "purpose"]` | No args prints the file map; args add or update a row. |
-| `/lore:pending` | Lists staged proposals grouped by kind, each with its origin session and a keep/reject/merge judgment — a staged skill shows its body, truncated, not only its description. Decides nothing. Clusters piles over ~50. |
+| `/lore:pending` | Lists staged proposals by kind with proposed keep/reject/merge judgments. Large queues use bounded continuation pages; unavailable entries remain explicit. Full-queue clustering retains its scan bound. Decides nothing. See [pending pages](pending-pages.md). |
 | `/lore:approve <id>` | Review one complete proposal and approve its exact current snapshot in DOXA or a human terminal. Changed proposals require a fresh review; native CLI refuses blind `all`, `--text`, `--match` and `--force` approval shortcuts. |
 | `/lore:reject <id>` | Review one complete proposal and archive that exact snapshot unapplied. The verdict remains in `pending/archive/`. |
 | `/lore:review` | Reviews the current session now instead of waiting for session end. Runs as a TUI-visible background task. `--dry-run` prints the prompt and spends nothing. |
@@ -257,6 +257,9 @@ Every value below is optional and lives in `~/.claude/settings.json` → `"env"`
 | `LORE_CLAUDE_BIN` | `which claude` | claude binary for the worker |
 | `LORE_SKILLS_DIR` | `~/.claude/skills`, or `$LORE_ROOT/skills` under a non-default `LORE_ROOT` | where approved skills install — Claude Code always reads `~/.claude/skills`, so the default `LORE_ROOT` keeps installing there; a scratch/test root installs under itself instead, never into the real one, unless this is set explicitly |
 | `LORE_CODEX_SESSIONS_DIR` | `${CODEX_HOME:-~/.codex}/sessions` | native Codex rollout directory for session search indexing |
+| `LORE_DIAGNOSTIC_RETENTION` | unset | opt-in automatic cleanup of unreferenced diagnostic traces after capture; see [retention](retention.md) |
+| `LORE_DIAGNOSTIC_RETENTION_MAX_AGE_SECONDS` | `2592000` | maximum diagnostic age; a mandatory 24-hour protection floor and evidence references take precedence |
+| `LORE_DIAGNOSTIC_RETENTION_MAX_COUNT` | `1000` | soft trace-count target; recent and protected traces remain |
 | `LORE_REFRESH_ON_CHANGE` | `1` | re-inject the snapshot the prompt after its content changes; `0` opts out |
 | `LORE_REFRESH_SECS` | unset | optional periodic floor for that refresh (change-detection needs no setting) |
 | `LORE_REVIEW_SECS` | unset | mid-session deriver: spawn a detached incremental review at most this often; unset = SessionEnd/PreCompact only |
@@ -325,6 +328,11 @@ If export refuses an op as unsigned — a log that grew before `LORE_SYNC_HMAC_K
 If a store curated memory, beliefs, skills, or a file map for a while before the sync log (or the key) existed at all, `sync resign` alone is not enough: it can only sign ops that are already in the log, and pre-log state has no op to sign. Run `lore sync seed --apply` after resigning — it appends exactly the ops the log is missing, one per piece of state, so export (and a fresh peer's bootstrap) ship the store as it stands today rather than only the fragment written after sync was switched on.
 
 A pull runs detached at SessionStart and never on the prompt loop; a push runs after the review worker finishes. Both are silent when the hub is unreachable — ops accumulate and the next push drains them — and an explicit `lore sync` prints the error. A `409` from the hub means the client's log has a gap: it is reported, never retried around, because a lost op means a store that is no longer a function of its log.
+
+With `skill_usage` enabled, `sync seed` also baselines local legacy counters and
+records subsequent per-author observations. The class travels through network
+sync and offline bundles only when selected. Shared totals cannot authorize
+reviewed skill actions. See [skill usage sync](skill-usage-sync.md).
 
 Ops are signed with `LORE_SYNC_HMAC_KEY`, which every machine of one account holds and the hub never sees. An op whose MAC is missing or wrong is staged as a pending proposal tagged `unverified` and applied by nothing but a human — a memory entry reaches the model's context verbatim, so an op that could be forged is a prompt injection with a persistence layer.
 

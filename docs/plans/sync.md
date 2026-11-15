@@ -1,12 +1,19 @@
 # One memory on every machine: sync through an op log and a hub — specification
 
-Status: **accepted 2026-09-16, in implementation**. The identity work this
-document stacked on shipped as 0.49.0 (`lore project move`). Owner's decisions
-on the open questions at the end: all ten recommendations adopted, with three
-amendments. Transport B (Tailscale peer-to-peer) is IN scope rather than
-deferred -- sync offers both a credentials hub and a peer-to-peer path, not one
-or the other. `docwilde/lore-hub` is PRIVATE for now. The hub is verified
-against a locally deployed instance; the Hetzner deployment waits.
+Status: **core sync shipped; maintenance extensions prepared for 0.62.30**.
+LORE provides portable project identity, signed operation logs, merge and
+quarantine rules, hub clients, direct peers and offline transfer. The private
+`docwilde/lore-hub` repository contains the API, local Compose deployment,
+backup/restore tools and runbook. DOXA uses the native LORE integration and
+pins v0.62.29. The dated PR sequence below records implementation scope rather
+than an outstanding branch stack.
+
+The deployment scope is a disposable private Tailscale test on
+`docwilde-workstation`; a permanent Hetzner deployment is outside this work.
+See [the private hub test](../private-hub-test.md) and
+[maintenance work](maintenance.md) for current validation and remaining gates.
+The ten design decisions at the end are accepted with the documented
+amendments.
 
 ## The problem
 
@@ -54,7 +61,7 @@ different confidentiality decision than a file-map row).
 | Beliefs, evidence, edges, edge assertions, outcomes | `state.db` tables (`store.py:86-172`) | `INTEGER PRIMARY KEY` id; edges `(src, dst, rel)` on those ids | **on** | a `uid` beside the int id (next section); every op addresses beliefs by uid |
 | Pending proposals + archive | `pending/<stamp>-<nn>.json` (`gate.py:203-221`, `pending.py:250-260`) | filename stamp, per machine | **on** | a `uid` field in the JSON; stage/resolve ops; local filename stays local |
 | Skills | `~/.claude/skills/<name>/SKILL.md` (`config.py:107`) | name | **on** | put/remove ops carrying the whole file, frontmatter included (ISSUE #73) |
-| Skill usage | `skill_usage.json` (`deriver.py:564-590`) | skill name | off | per-machine counters; a merge rule (sum, max?) needs its own measurement — deferred |
+| Skill usage | local `skill_usage.json`, shared signed scalar components | skill name + signed author + generation | off | coordinate-wise maximum per author/generation, sum across authors; legacy observations stay local; see [usage sync](../skill-usage-sync.md) |
 | Session index | `sessions`, `msg` FTS (`store.py:73-82`) | `session_id` (Claude Code's UUID) | **on** | a `machine_id` column on `sessions`; rows travel as-is (already scrubbed at index time, `store.py:299-304`) |
 | Transcripts | `~/.claude/projects/<slug>/<id>.jsonl` (Claude Code's own directory) | session id | off (opt-in) | scrubbed line-by-line chunks; land under `ROOT/transcripts/`, never in Claude Code's directory |
 | DOXA tabsets | `~/.doxa/tabsets/<sha256(scope path)[:24]>.json` (`doxa/tabsets.py:20-24, 361-366`) | scope path | off (opt-in) | keyed by `(project_key, machine_id)`; other machines' records visible as remote, restored only on their own machine |
@@ -733,8 +740,9 @@ vacuously.
 
 ## PR sequence
 
-Each PR independently verifiable, each one branch, in this order. LORE
-PRs stack on #64 until it merges, then rebase.
+This sequence records the accepted implementation order. Core LORE transports
+and identities, the private hub tools, and the native DOXA integration are
+available; current acceptance gaps are recorded separately in maintenance.md.
 
 | # | Repo | Branch | Lands | Acceptance |
 |---|---|---|---|---|
@@ -748,7 +756,7 @@ PRs stack on #64 until it merges, then rebase.
 | 8 | DOXA | `feat/lore-sync` | pin bump, tabset `project_key`/`machine_id`, worktree `machine_id`, status bar | `test_tabsets.py`/`test_worktrees.py` green; restore unchanged with sync off |
 | 9 | LORE | `feat/sync-peer` | Transport B: `sync serve`, peer client | same wire contract as A; two machines converge with no hub |
 
-## Open decisions
+## Accepted design decisions
 
 1. **Canonical order: Lamport + machine id, or the hub's `hub_seq`?**
    Recommend Lamport. It is transport-agnostic, so Transport B needs no

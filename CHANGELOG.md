@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.62.30 — Unreleased
+
+**Bounded memory maintenance**
+
+- Add pending continuation pages and CLI fallback for oversized queues while
+  retaining complete-proposal human review and strict full-scan consumers.
+- Add opt-in diagnostic retention with reference protection, recent-capture
+  protection and reviewed cleanup plans. Add explicit owner-selected codegraph
+  orphan cleanup bound to the complete inventory and file proofs.
+- Add default-off signed skill usage components, convergent per-author counts,
+  reset generations, conservative legacy baselines, seed and offline transfer.
+  Shared observations cannot authorize skill update or retirement.
+
+**Verification tools**
+
+- Add retained-source replay inspection, isolated historical replay and
+  fresh-stream cursor evidence. Issue #112 retains its exact state-parity gate.
+- Add an isolated private hub verifier and subscription coding-suite tools with
+  explicit budgets and independent verifiers. Live Codex compatibility and
+  private hub convergence remain validation gaps in the draft maintenance work.
+
 ## 0.62.29 — 2026-11-12
 
 **Codex graph hooks**
