@@ -99,6 +99,52 @@ fn continuation_rejects_tampering_scope_changes_and_namespace_changes() {
 }
 
 #[test]
+fn long_project_scope_keeps_continuations_bounded_and_usable() {
+    let (temp, cfg) = fixture(3);
+    let mut cwd = temp.path().join("long-project");
+    for _ in 0..12 {
+        cwd = cwd.join("a".repeat(100));
+    }
+    files::private_dir(&cwd.join(".git")).unwrap();
+    let mut req = json!({"cwd":cwd,"limit":1});
+    let mut seen = BTreeSet::new();
+    loop {
+        let page = pending_page::list(&cfg, &req).unwrap();
+        for row in page["items"].as_array().unwrap() {
+            assert!(seen.insert(row["pid"].as_str().unwrap().to_owned()));
+        }
+        if page["has_more"] == false {
+            break;
+        }
+        assert!(page["next_cursor"].as_str().unwrap().len() <= 2048);
+        req["cursor"] = page["next_cursor"].clone();
+        assert!(seen.len() <= 3);
+    }
+    assert_eq!(seen.len(), 3);
+}
+
+#[test]
+fn cli_pages_when_a_small_queue_exceeds_the_output_byte_budget() {
+    let (temp, cfg) = fixture(10);
+    for n in 0..10 {
+        std::fs::write(
+            cfg.root
+                .join("pending")
+                .join(format!("fixture-{n:05}.json")),
+            json!({"kind":"memory","scope":"user","text":"ordinary words ".repeat(10_000)})
+                .to_string(),
+        )
+        .unwrap();
+    }
+    let page = lore_core::standalone_ops::pending_list(&cfg, &json!({"cwd":temp.path()})).unwrap();
+    assert!(page.is_object());
+    assert!(serde_json::to_vec_pretty(&page).unwrap().len() < 64 * 1024);
+    assert_eq!(page["unavailable_count"], 10);
+    assert_eq!(page["page_complete"], false);
+    assert_eq!(page["has_more"], false);
+}
+
+#[test]
 fn page_filters_project_proposals_and_reports_unavailable_entries() {
     let (temp, cfg) = fixture(1);
     let own = temp.path().join("own");

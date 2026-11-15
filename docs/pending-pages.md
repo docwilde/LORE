@@ -1,8 +1,8 @@
 # Reviewing a large pending queue
 
 `lore pending` returns its ordinary list for small queues. When the bounded
-full-directory listing is too large, the CLI returns a page with `items` and
-`next_cursor`. Request pages explicitly with:
+full-directory listing or rendered output is too large, the CLI returns a page
+with `items` and `next_cursor`. Request pages explicitly with:
 
 ```sh
 lore pending page --limit 50
@@ -11,12 +11,15 @@ lore pending page --limit 50 --cursor '<next_cursor>'
 
 Continue until `has_more` is false. A page may contain no visible items while
 `has_more` is true: its bounded scan can encounter proposals for other projects.
-Each call scans at most 256 directory entries, returns at most 50 proposals,
-and bounds rendered item data to 40 KiB. Directory order determines page order.
+Each call processes at most 256 new directory entries, returns at most 50
+proposals, and bounds rendered item data to 40 KiB. A continuation replays up to 65,536
+directory names to locate its logical entry position; it reads proposal files
+only for the new page. Directory order determines page order. Queues exceeding
+65,536 entries report `output_too_large` rather than a complete result.
 No global pending count is inferred from a page.
 
-The continuation binds the store, project scope and queue revision, and expires
-after fifteen minutes. A changed queue or expired cursor reports
+The continuation binds the store, a fixed-size digest of the project scope and
+the queue revision, and expires after fifteen minutes. A changed queue or expired cursor reports
 `review_changed`; restart with the first page. Changing the page size retains
 the same continuation semantics. Invalid or altered cursors are refused.
 

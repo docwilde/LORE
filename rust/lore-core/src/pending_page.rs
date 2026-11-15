@@ -57,11 +57,11 @@ fn encode(cfg: &Config, value: &Value) -> Result<String> {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(&cursor_key(cfg, true)?).map_err(|_| Error::Unavailable)?;
     mac.update(&payload);
-    Ok(format!(
-        "{}.{}",
-        hex(&payload),
-        hex(&mac.finalize().into_bytes())
-    ))
+    let cursor = format!("{}.{}", hex(&payload), hex(&mac.finalize().into_bytes()));
+    if cursor.len() > CURSOR_BYTES {
+        return Err(Error::TooLarge);
+    }
+    Ok(cursor)
 }
 fn decode(cfg: &Config, text: &str) -> Result<Value> {
     if text.len() > CURSOR_BYTES {
@@ -99,6 +99,7 @@ pub fn list(cfg: &Config, req: &Value) -> Result<Value> {
     #[cfg(unix)]
     {
         let slug = config::project_slug(gate::cwd(req)?);
+        let scope = crate::digest(slug.as_bytes());
         let limit = req
             .get("limit")
             .map_or(Some(50), Value::as_u64)
@@ -126,8 +127,8 @@ pub fn list(cfg: &Config, req: &Value) -> Result<Value> {
         let original = revision(&stream.metadata()?);
         if let Some(cursor) = cursor {
             let state = decode(cfg, cursor)?;
-            if state["version"] != 1
-                || state["scope"] != slug
+            if state["version"] != 2
+                || state["scope"] != scope
                 || state["revision"] != original
                 || state["expires"]
                     .as_u64()
@@ -162,7 +163,7 @@ pub fn list(cfg: &Config, req: &Value) -> Result<Value> {
                 .filter(|id| config::valid_id(id));
             let result = match id {
                 None => Err(Error::InvalidRequest),
-                Some(id) => pending::snapshot(&path.join(&name)).and_then(|snap| {
+                Some(id) => pending::snapshot_at(stream.directory(), &name).and_then(|snap| {
                     if !pending::visible(&snap.item, &slug) {
                         return Ok(None);
                     }
@@ -207,7 +208,7 @@ pub fn list(cfg: &Config, req: &Value) -> Result<Value> {
             json!(encode(
                 cfg,
                 &json!({
-                    "version":1,"scope":slug,"revision":original,"position":resume,"expires":now()?+CURSOR_LIFETIME
+                    "version":2,"scope":scope,"revision":original,"position":resume,"expires":now()?+CURSOR_LIFETIME
                 })
             )?)
         };

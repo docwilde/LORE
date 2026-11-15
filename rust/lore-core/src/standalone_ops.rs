@@ -1716,7 +1716,16 @@ pub fn pending_list(cfg: &Config, req: &Value) -> Result<Value> {
         match crate::pending::list(cfg, req) {
             Err(Error::TooLarge) => return crate::pending_page::list(cfg, req),
             Err(error) => return Err(error),
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                let size = serde_json::to_vec_pretty(&value)
+                    .map_err(|_| Error::Unavailable)?
+                    .len();
+                return if size > crate::MAX_FRAME_BYTES - 1 {
+                    crate::pending_page::list(cfg, req)
+                } else {
+                    Ok(value)
+                };
+            }
         }
     }
     let mut all = Vec::new();

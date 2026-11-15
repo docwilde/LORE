@@ -136,7 +136,9 @@ pub fn snapshot(path: &Path) -> Result<Snapshot> {
     let directory = files::open_directory(path.parent().ok_or(Error::UnsafePath)?)?;
     snapshot_at(&directory, path.file_name().ok_or(Error::UnsafePath)?)
 }
-fn snapshot_at(directory: &File, name: &std::ffi::OsStr) -> Result<Snapshot> {
+/// Read and validate the exact proposal relative to a pinned directory. Shares
+/// the path-based snapshot's byte, identity, ownership and parsing checks.
+pub(crate) fn snapshot_at(directory: &File, name: &std::ffi::OsStr) -> Result<Snapshot> {
     let mut file = files::open_regular_at(directory, name, crate::MAX_REVIEW_BYTES)?;
     let before = file.metadata()?;
     let metadata = file.metadata()?;
@@ -1063,6 +1065,136 @@ pub fn resolve(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_at_stays_bound_when_a_store_ancestor_is_replaced_and_restored() {
+        use std::ffi::OsStr;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("store");
+        let replacement = temp.path().join("replacement");
+        let parked = temp.path().join("parked");
+        files::private_dir(&root.join("pending")).unwrap();
+        files::private_dir(&replacement.join("pending")).unwrap();
+        let original =
+            "{\"kind\":\"memory\", \"scope\":\"user\", \"text\":\"original proposal\"}\n";
+        let foreign = br#"{"kind":"memory","scope":"user","text":"foreign proposal"}"#;
+        let path = root.join("pending/proposal.json");
+        fs::write(&path, original).unwrap();
+        fs::write(replacement.join("pending/proposal.json"), foreign).unwrap();
+        let expected = snapshot(&path).unwrap();
+        let stream = files::DirectoryStream::open(&root.join("pending")).unwrap();
+        let before = stream.metadata().unwrap();
+
+        fs::rename(&root, &parked).unwrap();
+        fs::rename(&replacement, &root).unwrap();
+        // Negative control: reopening the pathname really reaches the other
+        // store during this deterministic replacement window.
+        assert_eq!(snapshot(&path).unwrap().item["text"], "foreign proposal");
+        let pinned = snapshot_at(stream.directory(), OsStr::new("proposal.json")).unwrap();
+        assert_eq!(pinned.raw, original);
+        assert_eq!(pinned.raw, expected.raw);
+        assert_eq!(pinned.item, expected.item);
+        assert_eq!(pinned.sha256, expected.sha256);
+        assert_eq!(pinned.inode, expected.inode);
+        fs::rename(&root, &replacement).unwrap();
+        fs::rename(&parked, &root).unwrap();
+
+        let after = files::open_directory(&root.join("pending"))
+            .unwrap()
+            .metadata()
+            .unwrap();
+        assert_eq!(before.dev(), after.dev());
+        assert_eq!(before.ino(), after.ino());
+        assert_eq!(before.mtime(), after.mtime());
+        assert_eq!(before.mtime_nsec(), after.mtime_nsec());
+        assert_eq!(before.ctime(), after.ctime());
+        assert_eq!(before.ctime_nsec(), after.ctime_nsec());
+        assert_eq!(snapshot(&path).unwrap().raw, original);
+        assert_eq!(
+            fs::read(replacement.join("pending/proposal.json")).unwrap(),
+            foreign
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_at_refuses_links_oversize_and_invalid_proposal_bytes() {
+        use std::{ffi::OsStr, os::unix::fs::symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let directory = files::open_directory(temp.path()).unwrap();
+        let valid = br#"{"kind":"memory","text":"original"}"#;
+        fs::write(temp.path().join("valid.json"), valid).unwrap();
+        symlink("valid.json", temp.path().join("linked.json")).unwrap();
+        symlink("missing.json", temp.path().join("dangling.json")).unwrap();
+        fs::write(temp.path().join("hard-source.json"), valid).unwrap();
+        fs::hard_link(
+            temp.path().join("hard-source.json"),
+            temp.path().join("hard.json"),
+        )
+        .unwrap();
+        fs::create_dir(temp.path().join("directory.json")).unwrap();
+        for name in [
+            "linked.json",
+            "dangling.json",
+            "hard-source.json",
+            "hard.json",
+            "directory.json",
+            "../valid.json",
+            "/valid.json",
+        ] {
+            assert!(
+                matches!(
+                    snapshot_at(&directory, OsStr::new(name)),
+                    Err(Error::UnsafePath)
+                ),
+                "{name}"
+            );
+        }
+
+        fs::write(
+            temp.path().join("large.json"),
+            vec![b' '; crate::MAX_REVIEW_BYTES + 1],
+        )
+        .unwrap();
+        assert!(matches!(
+            snapshot_at(&directory, OsStr::new("large.json")),
+            Err(Error::TooLarge)
+        ));
+        let empty_object = r#"{"text":""}"#;
+        let exact = format!(
+            r#"{{"text":"{}"}}"#,
+            "x".repeat(crate::MAX_REVIEW_BYTES - empty_object.len())
+        );
+        assert_eq!(exact.len(), crate::MAX_REVIEW_BYTES);
+        fs::write(temp.path().join("exact.json"), &exact).unwrap();
+        assert_eq!(
+            snapshot_at(&directory, OsStr::new("exact.json"))
+                .unwrap()
+                .raw,
+            exact
+        );
+
+        for (name, bytes) in [
+            ("invalid.json", b"not json".as_slice()),
+            ("array.json", b"[]".as_slice()),
+            ("utf8.json", &[0xff]),
+        ] {
+            fs::write(temp.path().join(name), bytes).unwrap();
+            assert!(
+                matches!(
+                    snapshot_at(&directory, OsStr::new(name)),
+                    Err(Error::InvalidRequest)
+                ),
+                "{name}"
+            );
+        }
+        let path_snapshot = snapshot(&temp.path().join("valid.json")).unwrap();
+        let relative_snapshot = snapshot_at(&directory, OsStr::new("valid.json")).unwrap();
+        assert_eq!(relative_snapshot.raw.as_bytes(), valid);
+        assert_eq!(relative_snapshot.raw, path_snapshot.raw);
+        assert_eq!(relative_snapshot.item, path_snapshot.item);
+        assert_eq!(relative_snapshot.sha256, path_snapshot.sha256);
+        assert_eq!(relative_snapshot.inode, path_snapshot.inode);
+    }
     #[test]
     fn project_bound_proposals_are_hidden_outside_their_project() {
         let own = "own-project";
