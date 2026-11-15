@@ -185,7 +185,7 @@ fn snapshot_at(directory: &File, name: &std::ffi::OsStr) -> Result<Snapshot> {
         inode,
     })
 }
-fn visible(item: &Value, slug: &str) -> bool {
+pub(crate) fn visible(item: &Value, slug: &str) -> bool {
     // File maps and reviewed skills carry their project in `project`, without
     // a `scope` field. Use the same project identity as agent context so their
     // proposals cannot be listed or approved from an unrelated checkout.
@@ -428,52 +428,56 @@ pub fn list(cfg: &Config, req: &Value) -> Result<Value> {
         if rows.len() >= limit {
             break;
         }
-        let mut row = json!({"pid":id});
-        for field in [
-            "kind",
-            "action",
-            "scope",
-            "project",
-            "subject",
-            "id",
-            "confidence",
-            "session_id",
-            "source_project",
-            "derived_by",
-            "created",
-            "writer",
-            "origin_project",
-            "subject_unresolved",
-            "to",
-        ] {
-            if let Some(value) = snap.item.get(field).filter(|value| !value.is_null()) {
-                row[field] = scrub_display(value, 0)?;
-            }
-        }
-        for field in [
-            "text",
-            "claim",
-            "match",
-            "path",
-            "purpose",
-            "name",
-            "description",
-            "evidence",
-            "reason",
-            "writer_evidence",
-        ] {
-            if let Some(value) = snap.item.get(field).filter(|value| !value.is_null()) {
-                let text = value
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| value.to_string());
-                row[field] = json!(crate::scrub::scrub(&text)?);
-            }
-        }
-        rows.push(row);
+        rows.push(display_row(&id, &snap.item)?);
     }
     Ok(json!(rows))
 }
+pub(crate) fn display_row(id: &str, item: &Value) -> Result<Value> {
+    let mut row = json!({"pid":id});
+    for field in [
+        "kind",
+        "action",
+        "scope",
+        "project",
+        "subject",
+        "id",
+        "confidence",
+        "session_id",
+        "source_project",
+        "derived_by",
+        "created",
+        "writer",
+        "origin_project",
+        "subject_unresolved",
+        "to",
+    ] {
+        if let Some(value) = item.get(field).filter(|value| !value.is_null()) {
+            row[field] = scrub_display(value, 0)?;
+        }
+    }
+    for field in [
+        "text",
+        "claim",
+        "match",
+        "path",
+        "purpose",
+        "name",
+        "description",
+        "evidence",
+        "reason",
+        "writer_evidence",
+    ] {
+        if let Some(value) = item.get(field).filter(|value| !value.is_null()) {
+            let text = value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.to_string());
+            row[field] = json!(crate::scrub::scrub(&text)?);
+        }
+    }
+    Ok(row)
+}
+
 fn check_expected(req: &Value, snapshot: &Snapshot) -> Result<()> {
     let expected = req["expected"]
         .as_object()

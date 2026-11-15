@@ -23,7 +23,8 @@ Beliefs: belief list|search|show|review|add|retract|edges|dedup-report
 Graph: graph stats|neighbours|path|communities|components|degree|context|html|backfill|derive|edge
 Codegraph: codegraph store --cwd WORKTREE --input FILE --expected-sha256 HASH --expected-revision N
 Sessions: search session index history recent|prefix|metadata
-Review: review backfill pending list|show approve reject
+Review: review backfill pending list|page|show approve reject
+        pending page [--cursor CURSOR] [--limit 1..50]
 Skills: skills list|candidates|usage|evaluate PID --suite FILE
         skills evaluation SHA256
         skills artifact --kind candidate|trace|suite --sha256 SHA256
@@ -252,7 +253,7 @@ fn validate_flags(group: &str, sub: &str, req: &Value) -> Result<()> {
         ("history",_) => "limit offset prefix session_id",
         ("review",_) => "transcript latest foreground dry_run workers full incremental engine session_id model",
         ("backfill",_) => "project list jobs force dry_run",
-        ("pending",_) => "pid all cluster limit",
+        ("pending",_) => "pid all cluster limit cursor",
         ("approve"|"reject",_) => "pid expected",
         ("consult"|"ask"|"dialectic",_) => "query limit",
         ("outcome",_) => "belief_id event source note",
@@ -542,6 +543,7 @@ pub fn run(args: &[String]) -> Result<()> {
         }
         ("history", "metadata") => crate::history::metadata(&cfg, &req)?,
         ("pending", "" | "list") => crate::standalone_ops::pending_list(&cfg, &req)?,
+        ("pending", "page") => crate::pending_page::list(&cfg, &req)?,
         ("pending", "show") => {
             pos(&mut req, "pid", &p, false)?;
             crate::pending::review(&cfg, &req)?

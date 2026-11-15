@@ -183,6 +183,112 @@ pub fn directory_names(path: &Path, cap: usize) -> Result<Vec<std::ffi::OsString
     }
     Ok(names)
 }
+
+/// A pinned directory stream with opaque, platform-local continuation cookies.
+#[cfg(unix)]
+pub(crate) struct DirectoryStream {
+    stream: *mut libc::DIR,
+    directory: File,
+}
+#[cfg(unix)]
+impl DirectoryStream {
+    pub(crate) fn open(path: &Path) -> Result<Self> {
+        Self::at(&open_directory(path)?)
+    }
+    pub(crate) fn at(source: &File) -> Result<Self> {
+        use std::os::fd::IntoRawFd;
+        let meta = source.metadata()?;
+        if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
+            return Err(Error::UnsafePath);
+        }
+        let fd = unsafe {
+            libc::openat(
+                source.as_raw_fd(),
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(Error::UnsafePath);
+        }
+        let directory = unsafe { File::from_raw_fd(fd) };
+        let fd = directory.try_clone()?.into_raw_fd();
+        let stream = unsafe { libc::fdopendir(fd) };
+        if stream.is_null() {
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(Error::Unavailable);
+        }
+        Ok(Self { stream, directory })
+    }
+    pub(crate) fn metadata(&self) -> Result<fs::Metadata> {
+        Ok(self.directory.metadata()?)
+    }
+    fn clear_errno() -> Result<()> {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            *libc::__errno_location() = 0;
+        }
+        #[cfg(target_os = "macos")]
+        unsafe {
+            *libc::__error() = 0;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err(Error::Unsupported);
+        Ok(())
+    }
+    pub(crate) fn position(&self) -> Result<i64> {
+        Self::clear_errno()?;
+        let position = unsafe { libc::telldir(self.stream) };
+        if position < 0 {
+            return Err(Error::Unavailable);
+        }
+        Ok(position as i64)
+    }
+    pub(crate) fn seek(&mut self, position: i64) -> Result<()> {
+        let position = libc::c_long::try_from(position).map_err(|_| Error::InvalidRequest)?;
+        if position < 0 {
+            return Err(Error::InvalidRequest);
+        }
+        Self::clear_errno()?;
+        unsafe {
+            libc::seekdir(self.stream, position);
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(0) {
+            return Err(Error::Changed);
+        }
+        Ok(())
+    }
+    pub(crate) fn next(&mut self) -> Result<Option<std::ffi::OsString>> {
+        use std::{ffi::CStr, os::unix::ffi::OsStrExt};
+        loop {
+            Self::clear_errno()?;
+            let entry = unsafe { libc::readdir(self.stream) };
+            if entry.is_null() {
+                return if std::io::Error::last_os_error().raw_os_error() == Some(0) {
+                    Ok(None)
+                } else {
+                    Err(Error::Unavailable)
+                };
+            }
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            return Ok(Some(std::ffi::OsStr::from_bytes(name).to_os_string()));
+        }
+    }
+}
+#[cfg(unix)]
+impl Drop for DirectoryStream {
+    fn drop(&mut self) {
+        unsafe {
+            libc::closedir(self.stream);
+        }
+    }
+}
+
 pub fn read_regular(path: &Path, cap: usize) -> Result<Vec<u8>> {
     let mut file = open_regular(path, cap)?;
     let mut bytes = Vec::new();
