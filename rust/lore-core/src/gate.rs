@@ -286,6 +286,11 @@ pub fn stage(cfg: &Config, item: &Value, authority: &Authority) -> Result<String
     let dir = cfg.root.join("pending");
     files::private_dir(&dir)?;
     let _namespace = crate::pending::namespace_lock(cfg)?;
+    // Sync proposals retain foreign data; its diagnostic hashes name evidence
+    // on the source machine rather than local publication references.
+    if payload["kind"] != "sync" {
+        crate::retention::verify_trace_references(cfg, &payload)?;
+    }
     let directory = files::open_directory(&dir)?;
     let stamp = crate::utcnow().replace(['-', ':', 'T', 'Z'], "");
     for index in 0..10000 {

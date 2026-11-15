@@ -132,13 +132,21 @@ fn graph_basis(graph: &Value, scope: &Scope, query: &str, path: &str) -> Result<
 fn load(path: &Path) -> Result<Option<Record>> {
     if !path.try_exists()? { return Ok(None); }
     let bytes = files::read_regular(path, MAX_RECORD_BYTES)?;
+    decode_record(&bytes).map(Some)
+}
+
+fn decode_record(bytes: &[u8]) -> Result<Record> {
     let record: Record = serde_json::from_slice(&bytes).map_err(|_| Error::Changed)?;
     if record.schema_version != 1 || record.revision == 0 || !hex64(&record.source_sha256)
         || !hex64(&record.graph_sha256)
         || crate::digest(&graph_bytes(&record.graph)?) != record.graph_sha256 {
         return Err(Error::Changed);
     }
-    Ok(Some(record))
+    Ok(record)
+}
+
+fn namespace_lock(cfg: &Config) -> Result<files::Locks> {
+    files::Locks::acquire(&cfg.root, &[cfg.root.join("codegraph-v1/.namespace")], cfg.timeout)
 }
 
 fn verify(record: &Record, scope: &Scope, query: &str, path: &str, check_source: bool) -> Result<()> {
@@ -195,6 +203,7 @@ pub fn store(cfg: &Config, req: &Value, authority: &Authority) -> Result<Value> 
     let source_sha256 = graph_basis(graph, &scope, query, path)?;
     if source_hash(&scope.root, path)? != source_sha256 { return Err(Error::Changed); }
     let file = location(cfg, &scope, query, path);
+    let _namespace = namespace_lock(cfg)?;
     let _lock = files::Locks::acquire(&cfg.root, &[file.clone()], cfg.timeout)?;
     let current = load(&file)?;
     let revision = match current {
@@ -218,6 +227,94 @@ pub fn store(cfg: &Config, req: &Value, authority: &Authority) -> Result<Value> 
     files::atomic_write(&file, &bytes)?;
     Ok(json!({"status":"stored","revision":revision,"source_sha256":source_sha256,
         "graph_sha256":graph_sha256,"binding":"unknown"}))
+}
+
+/// Inventory exact stored records without consulting any current worktree or
+/// inferring orphanhood. The owner must explicitly select reviewed orphan keys
+/// on apply. Missing/recreated Git markers never trigger automatic cleanup.
+pub fn cleanup_plan(cfg: &Config, _req: &Value) -> Result<Value> {
+    let first = cleanup_inventory(cfg)?;
+    if first != cleanup_inventory(cfg)? { return Err(Error::Changed); }
+    crate::retention::envelope(first)
+}
+
+fn cleanup_inventory(cfg: &Config) -> Result<Value> {
+    use crate::retention;
+    use std::{collections::BTreeMap, ffi::OsStr};
+    let mut snapshots = BTreeMap::new();
+    let root = retention::optional_directory(&cfg.root)?;
+    let root_identity = root.as_ref().map(retention::directory_identity).transpose()?;
+    let directory = retention::optional_directory(&cfg.root.join("codegraph-v1"))?;
+    let directory_identity = directory.as_ref().map(retention::directory_identity).transpose()?;
+    if let Some(directory) = directory {
+        for name in retention::names_at(&directory, 4096)? {
+            let name = name.to_str().ok_or(Error::UnsafePath)?;
+            let key = name.strip_suffix(".json").filter(|s| crate::diagnostics::valid_hash(s))
+                .ok_or(Error::InvalidRequest)?;
+            let object = retention::object_at(&directory, OsStr::new(name), MAX_RECORD_BYTES)?;
+            let record = decode_record(&object.bytes)?;
+            let stored_scope = Scope { root: PathBuf::from(&record.worktree_root),
+                project_key: record.project_key.clone(), worktree_identity: record.worktree_identity.clone() };
+            if !stored_scope.root.is_absolute() || record.worktree_root.len() > 4096
+                || record.worktree_root.chars().any(char::is_control)
+                || !stored_scope.root.components().all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
+                || !crate::diagnostics::valid_hash(&record.worktree_identity)
+                || record.project_key.is_empty() || record.project_key.len() > 4096 {
+                return Err(Error::Changed);
+            }
+            query(&json!({"query":record.query,"path":record.path}))?;
+            verify(&record, &stored_scope, &record.query, &record.path, false)?;
+            if location(cfg, &stored_scope, &record.query, &record.path).file_stem().and_then(|s|s.to_str()) != Some(key) {
+                return Err(Error::Changed);
+            }
+            snapshots.insert(key.to_owned(), json!({"revision":record.revision,"proof":object.proof,
+                "worktree_root":record.worktree_root,"worktree_identity":record.worktree_identity,
+                "project_key":record.project_key,"query":record.query,"path":record.path,
+                "source_sha256":record.source_sha256,"graph_sha256":record.graph_sha256,
+                "orphan_status":"owner_assertion_required"}));
+        }
+    }
+    if root_identity != retention::optional_directory(&cfg.root)?.as_ref().map(retention::directory_identity).transpose()? {
+        return Err(Error::Changed);
+    }
+    Ok(json!({"schema":"lore.codegraph-cleanup-plan.v1","root":cfg.root,
+        "root_identity":root_identity,"directory_identity":directory_identity,"snapshots":snapshots}))
+}
+
+/// Apply a reviewed inventory plus a nonempty explicit list of orphan keys.
+/// The entire inventory (including each record's revision, inode and bytes)
+/// must still match. No project remapping or worktree migration is performed.
+pub fn cleanup_apply(cfg: &Config, req: &Value, authority: &Authority) -> Result<Value> {
+    use crate::retention;
+    use std::{collections::BTreeSet, ffi::OsStr};
+    authority.require_review()?;
+    let planned = retention::checked_plan(req, "lore.codegraph-cleanup-plan.v1")?;
+    let keys = req["reviewed_orphan_keys"].as_array().filter(|a| !a.is_empty() && a.len() <= 128)
+        .ok_or(Error::InvalidRequest)?;
+    let mut unique = BTreeSet::new();
+    let mut paths = Vec::new();
+    for key in keys {
+        let key = key.as_str().filter(|s| crate::diagnostics::valid_hash(s)).ok_or(Error::InvalidRequest)?;
+        if !unique.insert(key) || planned["snapshots"].get(key).is_none() { return Err(Error::InvalidRequest); }
+        paths.push(cfg.root.join("codegraph-v1").join(format!("{key}.json")));
+    }
+    // No locks or directories are created for a stale plan against a missing store.
+    if retention::optional_directory(&cfg.root)?.is_none() { return Err(Error::Changed); }
+    let _namespace = namespace_lock(cfg)?;
+    let _files = files::Locks::acquire(&cfg.root, &paths, cfg.timeout)?;
+    if cleanup_inventory(cfg)? != planned { return Err(Error::Changed); }
+    let dir = files::open_directory(&cfg.root.join("codegraph-v1"))?;
+    if retention::directory_identity(&dir)? != planned["directory_identity"] { return Err(Error::Changed); }
+    let mut removed = Vec::new();
+    for key in unique {
+        let proof = serde_json::from_value(planned["snapshots"][key]["proof"].clone())
+            .map_err(|_| Error::InvalidRequest)?;
+        if let Err(e) = retention::remove_exact(&dir, OsStr::new(&format!("{key}.json")), &proof, MAX_RECORD_BYTES) {
+            return Err(if removed.is_empty() { e } else { Error::MayHaveApplied });
+        }
+        removed.push(key);
+    }
+    Ok(json!({"dry_run":false,"removed":removed}))
 }
 
 #[cfg(test)]
@@ -379,5 +476,131 @@ mod tests {
         assert_eq!(source_hash(&root, "src/lib.rs"), Err(Error::UnsafePath));
         assert_eq!(read(&cfg, &request), Err(Error::UnsafePath));
         assert_eq!(store(&cfg, &request, &owner()), Err(Error::UnsafePath));
+    }
+
+    fn inventory_tree(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(path: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+            if path.is_dir() { for e in fs::read_dir(path).unwrap() { walk(&e.unwrap().path(), out); } }
+            else { out.insert(path.to_owned(), fs::read(path).unwrap()); }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        if root.exists() { walk(root, &mut out); }
+        out
+    }
+    fn selected(mut plan: Value, keys: &[String]) -> Value {
+        plan["reviewed_orphan_keys"] = json!(keys);
+        plan
+    }
+    fn snapshot_key(plan: &Value) -> String {
+        plan["plan"]["snapshots"].as_object().unwrap().keys().next().unwrap().clone()
+    }
+
+    #[test]
+    fn cleanup_dry_run_is_lazy_and_never_infers_orphans_from_missing_worktrees() {
+        let (_temp,cfg,root,snapshot) = fixture();
+        assert_eq!(cleanup_plan(&cfg,&json!({})).unwrap()["plan"]["snapshots"],json!({}));
+        assert!(!cfg.root.exists());
+        store(&cfg,&req(&root,&snapshot,0),&owner()).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        let before = inventory_tree(&cfg.root);
+        let plan = cleanup_plan(&cfg,&json!({})).unwrap();
+        let key = snapshot_key(&plan);
+        assert_eq!(plan["plan"]["snapshots"][&key]["orphan_status"],"owner_assertion_required");
+        assert_eq!(plan["plan"]["snapshots"][&key]["worktree_root"],json!(root));
+        assert_eq!(inventory_tree(&cfg.root),before);
+        assert_eq!(cleanup_apply(&cfg,&plan,&owner()),Err(Error::InvalidRequest));
+        assert_eq!(inventory_tree(&cfg.root),before);
+        assert!(cfg.root.join("codegraph-v1").join(format!("{key}.json")).exists());
+    }
+
+    #[test]
+    fn explicitly_reviewed_orphan_removal_preserves_unselected_snapshot_and_evidence() {
+        let (_temp,cfg,root,snapshot) = fixture();
+        store(&cfg,&req(&root,&snapshot,0),&owner()).unwrap();
+        let first = cleanup_plan(&cfg,&json!({})).unwrap();
+        let orphan = snapshot_key(&first);
+        let mut imports = snapshot.clone();
+        imports["graph"]["query"] = json!("imports");
+        let mut request = req(&root,&imports,0);
+        request["query"] = json!("imports");
+        store(&cfg,&request,&owner()).unwrap();
+        for name in ["USER.md","beliefs.json","review-proofs/keep.json","skill-evaluations/reports/keep.json"] {
+            files::atomic_write(&cfg.root.join(name),b"curated evidence negative control").unwrap();
+        }
+        let before = inventory_tree(&cfg.root);
+        // Orphan cleanup works even after the original absolute worktree and
+        // its Git marker disappear; no migration or scope inference occurs.
+        fs::remove_dir_all(&root).unwrap();
+        let plan = cleanup_plan(&cfg,&json!({})).unwrap();
+        assert_eq!(plan["plan"]["snapshots"].as_object().unwrap().len(),2);
+        let apply = selected(plan,&[orphan.clone()]);
+        assert_eq!(cleanup_apply(&cfg,&apply,&owner()).unwrap()["removed"],json!([orphan]));
+        let removed = cfg.root.join("codegraph-v1").join(format!("{orphan}.json"));
+        for (path,bytes) in before {
+            if path == removed { assert!(!path.exists()); }
+            else { assert_eq!(fs::read(&path).unwrap(),bytes,"{}",path.display()); }
+        }
+        assert_eq!(cleanup_plan(&cfg,&json!({})).unwrap()["plan"]["snapshots"].as_object().unwrap().len(),1);
+    }
+
+    #[test]
+    fn stale_revision_hash_or_plan_bytes_refuse_cleanup_before_deletion() {
+        for change in 0..4 {
+            let (_temp,cfg,root,snapshot) = fixture();
+            store(&cfg,&req(&root,&snapshot,0),&owner()).unwrap();
+            let plan = cleanup_plan(&cfg,&json!({})).unwrap();
+            let key = snapshot_key(&plan);
+            let path = cfg.root.join("codegraph-v1").join(format!("{key}.json"));
+            let mut apply = selected(plan,&[key]);
+            match change {
+                0 => { store(&cfg,&req(&root,&snapshot,1),&owner()).unwrap(); },
+                1 => { let bytes=fs::read(&path).unwrap(); fs::write(&path,bytes).unwrap(); },
+                2 => apply["plan_sha256"] = json!("f".repeat(64)),
+                _ => apply["plan"]["snapshots"] = json!({}),
+            }
+            assert!(cleanup_apply(&cfg,&apply,&owner()).is_err());
+            assert!(path.exists());
+        }
+    }
+
+    #[test]
+    fn cleanup_requires_carrier_human_review_and_exact_explicit_selection() {
+        let (_temp,cfg,root,snapshot) = fixture();
+        store(&cfg,&req(&root,&snapshot,0),&owner()).unwrap();
+        let plan = cleanup_plan(&cfg,&json!({})).unwrap();
+        let key = snapshot_key(&plan);
+        let mut apply = selected(plan,&[key.clone()]);
+        apply["human_reviewed"] = json!(true);
+        for authority in [Authority::Model {agent:"test".into(),engine:"codex".into(),session_id:"s".into()},
+            Authority::Interactive {agent:"test".into(),engine:"codex".into()}] {
+            assert_eq!(cleanup_apply(&cfg,&apply,&authority),Err(Error::Untrusted));
+        }
+        apply["reviewed_orphan_keys"] = json!([key,key]);
+        assert_eq!(cleanup_apply(&cfg,&apply,&owner()),Err(Error::InvalidRequest));
+        apply["reviewed_orphan_keys"] = json!(["f".repeat(64)]);
+        assert_eq!(cleanup_apply(&cfg,&apply,&owner()),Err(Error::InvalidRequest));
+        assert_eq!(cleanup_plan(&cfg,&json!({})).unwrap()["plan"]["snapshots"].as_object().unwrap().len(),1);
+    }
+
+    #[test]
+    fn malformed_linked_or_unrecognized_snapshot_state_is_never_cleaned() {
+        use std::os::unix::fs::symlink;
+        for defect in 0..4 {
+            let (temp,cfg,root,snapshot) = fixture();
+            store(&cfg,&req(&root,&snapshot,0),&owner()).unwrap();
+            let plan = cleanup_plan(&cfg,&json!({})).unwrap();
+            let key = snapshot_key(&plan);
+            let path = cfg.root.join("codegraph-v1").join(format!("{key}.json"));
+            match defect {
+                0 => fs::write(&path,b"{}").unwrap(),
+                1 => { fs::hard_link(&path,temp.path().join("linked")).unwrap(); },
+                2 => { fs::rename(&path,temp.path().join("outside")).unwrap();
+                    symlink(temp.path().join("outside"),&path).unwrap(); },
+                _ => fs::write(cfg.root.join("codegraph-v1/unverified.json"),b"{}").unwrap(),
+            }
+            assert!(cleanup_plan(&cfg,&json!({})).is_err());
+            assert!(cleanup_apply(&cfg,&selected(plan,&[key]),&owner()).is_err());
+            assert!(fs::symlink_metadata(&path).is_ok());
+        }
     }
 }
