@@ -30,16 +30,28 @@ and relations between beliefs do not turn them into approved facts.
 
 ## What you get
 
-- **Claude Code, Codex, and DOXA memory.** Share capped, reviewed user and
-  project facts across engines; host facts stay local.
-- **Beliefs with evidence.** Query conclusions, citations, and their graph on demand.
+[LORE 0.62.30](https://github.com/docwilde/LORE/releases/tag/v0.62.30) adds
+paged pending review, protected cleanup, and optional shared skill usage.
+
+- **Claude Code, Codex, and DOXA memory.** Share one native store for capped
+  user and project facts across engines; host facts stay local.
+- **Beliefs with evidence.** Query conclusions, citations, and their graph on
+  demand, or enable experimental, bounded graph context.
 - **Session search.** Local FTS5 index of Claude Code, DOXA, and Codex transcripts.
 - **File maps.** A short `path — purpose` guide to important project files.
+- **Bounded pending review.** [Page through large queues](docs/pending-pages.md)
+  while preserving human review of each complete, exact proposal.
+- **Reviewed cleanup.** [Preview diagnostic retention and select orphaned
+  codegraph snapshots](docs/retention.md) before applying a reviewed plan.
 - **Learned skills.** Recipes carry outcome history and staged updates or retirement.
-- **Local skill experiments.** [Capture diagnostic traces and compare pending coding skills](docs/skill-evaluation.md) against frozen tests before human approval.
-- **Cross-machine sync.** Signed hub, peer, or offline transfer; off by default.
+- **Local skill experiments.** [Compare exact pending coding skills](docs/skill-evaluation.md)
+  against frozen tests before human approval. The experimental subscription
+  coding adapter is disabled by default and requires an explicit budget for
+  attempted calls and independent verification.
+- **Cross-machine sync.** Signed hub, peer, or offline transfer, with optional
+  [skill usage counters](docs/skill-usage-sync.md); off by default.
 - **Agent integration.** Claude Code and Codex plugins inject startup context;
-  interactive CLI writes apply directly, while review and model tools stage proposals.
+  interactive CLI writes apply directly, while hooks and model tools stage proposals.
 
 Engine-origin labels add context, not authority. The [manual](docs/manual.md)
 explains the write gates, hooks, and belief model.
@@ -70,13 +82,6 @@ model preferences, context refresh and sync transport settings from
 overrides saved values, including explicit empty values. A custom store
 uses only process overrides unless it belongs to the chosen settings
 directory. Store paths and identity remain process configuration. Saved credentials require a private, owned settings file.
-
-In [v0.62.27](https://github.com/docwilde/LORE/releases/tag/v0.62.27), startup
-and refresh snapshots load curated memory even when the pending-review scan
-fails. The snapshot reports the pending count as unknown with a diagnostic
-code. Full pending scans retain their 4,096-entry bound. Large queues have a
-[bounded page workflow](docs/pending-pages.md); approval still requires the
-exact current proposal and human review.
 
 `/lore:setup` walks each `/lore:doctor` finding behind its own confirmation: disabling Claude Code's built-in auto-memory, adding the permission allowlist, porting existing entries, priming the session index.
 
@@ -172,6 +177,35 @@ the block explicitly. `lore graph stats`, `lore graph neighbours <id>`, and the
 MCP tool `lore_belief_neighbours` support on-demand inspection and traversal.
 Graph-retrieved beliefs retain their own evidence and citation status.
 
+## Review and cleanup
+
+Startup and refresh snapshots keep curated memory available when a pending
+scan fails, reporting the pending count as unknown with a diagnostic code.
+`lore pending` falls back to a bounded page when the ordinary listing is too
+large. Request pages explicitly and inspect a selected proposal with:
+
+```sh
+lore pending page --limit 50
+lore pending page --limit 50 --cursor '<next_cursor>'
+lore pending show PROPOSAL_ID
+```
+
+Follow `next_cursor` until `has_more` is false; a page can have no visible
+items and still have more to scan. Changed queues or expired cursors require
+a fresh first page. Full-queue operations retain their 4,096-entry bound.
+Approval and rejection still require human review of the complete current
+proposal, bound to its exact bytes and file identity. See the
+[pending page workflow](docs/pending-pages.md).
+
+Preview cleanup with `lore trace retention-plan` or
+`lore codegraph cleanup-plan`. Manual application requires human review of a
+plan whose complete inventory and file proofs still match. Trace cleanup
+protects recent captures and referenced evidence; codegraph cleanup removes
+only the orphan snapshots explicitly selected by the owner. Automatic trace
+retention is off by default; opt in with
+`lore config set LORE_DIAGNOSTIC_RETENTION 1`. See
+[retention and reviewed cleanup](docs/retention.md) for policies and application.
+
 ## Sync — one memory on every machine
 
 Sync is **off until configured**. LORE records portable changes in a local
@@ -198,6 +232,16 @@ lore sync seed --apply           # back-fill ops for state older than the log it
 Machines must share `LORE_SYNC_HMAC_KEY` to verify operations. You can choose
 which data classes sync; see the [manual](docs/manual.md#sync--one-memory-on-every-machine)
 for setup and the [protocol](docs/sync-protocol.md) for the wire format.
+
+[Skill usage sync](docs/skill-usage-sync.md) is separately off by default.
+Enable it on each participating machine with `lore sync classes +skill_usage`,
+then run `lore sync seed --apply`. Signed per-author `uses`, `ok`, and `fail`
+counters merge without double counting and preserve resets. Existing totals
+stay local as a baseline; later increases can sync over the network or in
+offline bundles. Reasons and review evidence stay local. Shared counts help
+rank recipes; skill updates and retirement still require human review of an
+exact proposal.
+
 Signed historical belief operations with missing UID references are kept in
 the log as quarantined data and shown by `lore sync status`; they do not enter
 curated memory. A fresh direct-peer pull can replay a retained signed log when
