@@ -1,7 +1,7 @@
 # Issue #112 evidence audit and local resolution draft
 
-Audit workspace: `/home/docwilde/Projects/lore`. No comment was published and
-the issue was not closed. This file is a local evidence handoff and draft.
+Audit workspace: `/home/docwilde/Projects/lore`. This file records retained
+evidence and proposed issue text; it does not publish an issue update.
 
 ## Retained source provenance
 
@@ -40,134 +40,82 @@ Indexed session search in the local native LORE API returned the November 11
 discussion and synthetic test summary, not an original replay receipt. Read-only
 FTS queries of the retained workstation backup returned no `4555` or `issue112`
 messages. The `4568` hits were September 26 metadata, which does not establish
-the September 30 replay. Bounded filesystem metadata searches found no retained
-replay reports or manual-transfer bundles. This is a search result, not proof
-that no other archive exists.
+the September 30 replay. Initial metadata searches located no original replay
+report or manual-transfer bundle. This is a search result, not proof that no
+other archive exists.
 
 ## Native preflight results
 
-The new verifier first ran locally with native `Config::from_env` credential
-resolution. None of the 4,717 MACs verified under this machine's current config.
-No destination was allocated and no receiver call was made. The input database
-digest remained unchanged. MAC presence alone is not authentication evidence;
-the audit does not infer whether this is a different configured key or another
-signature/provenance discrepancy.
+Local native preflight verified zero operations under the local configuration
+and allocated no destination. Its retained report,
+`scripts/verify-sync-replay-issue112-report.json`, is a configuration-mismatch
+negative control. On `docwilde-workstation`, native `Config::from_env` resolved
+the host's existing configuration and authenticated **all 4,717 MACs** with zero
+unverified operations. No key export, restoration or configuration change was
+needed. The host preflight is retained in
+`scripts/verify-sync-replay-issue112-workstation-preflight.json`.
 
-The scrubbed JSON is retained in
-`scripts/verify-sync-replay-issue112-report.json`, with the original temporary
-copy at `/tmp/lore-issue112-evidence/replay-report.json`. The initial result was
-produced against committed baseline `8db708b88f532248cb17e51ee1ee8a2896e4f2fb`
-(v0.62.29), in a disposable source copy to avoid unrelated in-flight changes.
-The retained report was reproduced through the final script entrypoint in the
-shared workspace with `/tmp/lore-recovery-target` after its build integrated.
-It exited `2` as expected, with `signature_gate=false` and no replay destination.
+## Source-backed transport receipt and provenance
 
-The same verifier then ran **on `docwilde-workstation`** with that host's own
-native `Config::from_env` resolution. All **4,717 / 4,717 MACs verified**, with
-zero unverified operations. Inspect-only exited `0`, allocated no destination,
-and left the backup digest unchanged. This establishes that the local refusal
-was caused by the different local configuration; authentication is available
-on the original host without exporting or changing credentials.
+The authoritative transport evidence is the retained native v0.62.30
+[receipt](verify-sync-replay-issue112-transport-report.json) and
+[provenance](verify-sync-replay-issue112-transport-provenance.json). Earlier
+offline results remain in `verify-sync-replay-issue112-workstation-report.json`.
 
-The workstation is Linux x86-64 with glibc 2.43; the copied verifier requires
-at most glibc 2.34. The staged executable's SHA-256 is
-`d17ed22748f6de8b0e7f83f6424551544c70058d64d3220338d72795ec7a12bf`,
-confirmed remotely before execution. It was staged only in the private
-directory `/tmp/lore-recovery-issue112.gGukwR`. Native inspect-only output is
-retained in `scripts/verify-sync-replay-issue112-workstation-preflight.json`;
-the remote copy is `/tmp/lore-recovery-issue112.gGukwR/preflight.json`.
+On the workstation, `--transport` served an isolated SQLite Backup API copy of
+the authenticated source through `sync_network::PeerServer::connection` on
+`127.0.0.1`, using an ephemeral port and in-memory bearer. Native `pull` and
+`pull_from` received history into a separate private temporary destination.
+No hub or public listener was used. The original backup, live store and saved
+configuration were preserved; the native listener closed and both temporary
+stores were removed after verification.
 
-```sh
-/tmp/lore-recovery-issue112.gGukwR/verify-sync-replay --inspect-only \
-  /home/docwilde/.claude/lore/state.db.bak-issue112-20261002T003337Z
-```
+| Receipt check | Recorded result |
+| --- | --- |
+| Authenticated source | 4,717 verified MACs; zero unverified |
+| First full pull | 4,717 operations over 10 pages |
+| Final durable state | 4,704 applied; 13 quarantined; zero deferred/failed/unknown/unverified |
+| Stored cursor | 0 initially; **4,717 banked** after complete drain |
+| Repeat delivery | 4,717 duplicates; zero new effects; stored cursor 4,717 |
+| Resume from stored cursor | Zero fetched; stored cursor 4,717 |
+| Signed history | Original IDs, payloads, MACs and display timestamps preserved in source copy and destination |
+| Cleanup | Listener closure verified; both temporary stores removed |
 
-No matching-key restoration is needed for this retained backup on the
-workstation. The local preflight report is retained as a configuration-mismatch
-negative control, not evidence of a historical signature gap.
+The run used 21 requests. First-pass reporting included 85 staged signed
+effects within the temporary store; no proposal was approved. Signed-log and
+database state were idempotent on redelivery. Source SHA-256 remained the value
+above; the signed-log digest was
+`3fa9f463871f488c058a758bdc17c775383bf1f22af372bcbe094bb0f3fb23d4`.
+The receipt SHA-256 is
+`97be06e684911db1554449ff5b63a5ed1b511322dde1f601171b77198dba0b8c`;
+the provenance records executable/module hashes and the exact invocation.
 
-## Authentic isolated workstation replay
+Authentication, durable settlement and the banked fresh-stream cursor are
+established for this retained source. `transport.cursor_gate` and
+`transport.delivery_gate` are true. Exact semantic parity remains false, so the
+verifier exited `2`; `transport_replay_gate` and `issue112_success_gate` are false.
 
-After successful host-native inspection, the same executable replayed the
-retained history on the workstation using its existing native configuration:
+## Exact parity differences
 
-```sh
-/tmp/lore-recovery-issue112.gGukwR/verify-sync-replay \
-  /home/docwilde/.claude/lore/state.db.bak-issue112-20261002T003337Z \
-  /tmp/lore-recovery-issue112.gGukwR
-```
+The receipt retains per-field and row-multiset hashes without claims or raw
+records. No digest fields were dropped to make the result pass.
 
-The report is retained in `scripts/verify-sync-replay-issue112-workstation-report.json`.
-The original remote report is `/tmp/lore-recovery-issue112.gGukwR/replay-report.json`.
-All destination paths were inside a newly allocated private temporary directory;
-it was automatically removed after verification. The live store, source backup
-and saved configuration were unchanged. The backup SHA-256 still matches the
-value above. No peer or hub was contacted.
-
-- Final durable states: **4,704 applied, 13 quarantined, zero deferred, failed,
-  unknown or unverified**. The six provisionally deferred operations from early
-  pages settled when later pages supplied their dependencies.
-- Native first-pass reporting included 85 staged signed effects inside the
-  temporary store. No proposal was approved. Settlement alone does not establish
-  equality of curated file-backed state.
-- Original operation IDs, payloads, MACs and display timestamps were retained:
-  the canonical history digest matched.
-- Repeat delivery: **4,717 duplicates**, zero applied, staged, deferred, failed,
-  unknown or unverified; database and signed-log state were idempotent.
-- Matching portable counts **and** digests: 210 edges, 89 edge assertions,
-  two outcomes, 294 sessions and zero dream-reviewed pairs.
-- Unresolved parity: both sides have 2,159 beliefs and 2,181 evidence rows,
-  but their respective semantic digests differ. Indexed message counts differ:
-  11,481 in the source and 11,477 in the destination.
-
-The verifier exited `2`, correctly leaving `offline_replay_gate=false` and
-`issue112_success_gate=false`. Authentication and durable settlement now have
-authentic evidence; full state parity and a banked transport cursor do not.
-
-A second authentic run added bounded field diagnostics and reproduced exactly
-the same source/log digests, durable settlement, 85 staged effects and repeat
-delivery results. It used `verify-sync-replay-details`, SHA-256
-`69d77abb9d6fc3135e84f40a4ddf42eadabe640d7dbc1f663813d1051122a216`,
-verified remotely before execution. This was built without debug symbols from
-the final verifier module, SHA-256
-`a0c165ccf1ee5f277e2c667b9e4dc4a8133b3d014fc59e4e2a3686593a5bd363`.
-Its host-native inspect-only preflight again authenticated all 4,717 operations.
-The final retained workstation report includes these diagnostic results:
-
-| Component | Divergent portable field multisets | Distinct source/destination rows |
+| Component | Source/destination rows | Remaining difference |
 | --- | --- | --- |
-| beliefs | `writer` | 2,159 / 2,159 |
-| evidence | `project_key`, `note` | 2,090 / 2,090 |
-| messages | all fields reflect a row-count difference | 11,322 / 11,318 |
+| beliefs | 2,159 / 2,159 | 1,976 rows differ in `writer`; other UID-anchored fields, including claims, match |
+| evidence | 2,181 / 2,181 | 35 source-only and 35 destination-only rows; divergent fields are `project_key` and `note` |
+| messages | 11,481 / 11,477 | Four source-only rows; zero destination-only rows |
 
-The message discrepancy persists after distinct-row projection; duplicate
-multiplicity alone does not explain it. All other UID-anchored belief field
-multisets matched. These diagnostics do not explain the writer, evidence or
-message differences causally, and do not weaken the exact parity gate.
+Distinct message counts are 11,322 / 11,318, so duplicate multiplicity alone
+does not explain the four-row difference. The hashes locate differences but do
+not establish their cause. Matching portable counts and digests were recorded
+for 210 edges, 89 edge assertions, two outcomes, 294 sessions and zero
+dream-reviewed pairs.
 
-The final report's remote path is
-`/tmp/lore-recovery-issue112.gGukwR/replay-report-details.json`. The earlier
-`replay-report.json` remains retained remotely as the independent first run.
-The second temporary destination was also automatically removed and the source
-backup digest remained unchanged.
-
-Validation: the final diagnostic build passed all nine tests in the shared
-workspace using:
-
-```sh
-CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
-  CARGO_TARGET_DIR=/tmp/lore-recovery-target \
-  cargo test --locked --offline --test sync_verification
-```
-
-`bash -n scripts/verify-sync-replay`, scoped `rustfmt --check`, and
-scoped `git diff --check` also passed. Negative controls cover invalid/absent
-MACs, unresolved non-null UIDs, semantic divergence despite identical history,
-live database names, sidecars, symlinks, oversized input and absent keys. Positive
-controls cover unchanged source bytes, read-only inspection, signed quarantine,
-repeat delivery, portable row IDs and cross-page dependency settlement. A
-duplicate-row negative control confirms that distinct-row diagnostics do not
-weaken the exact state gate.
+The retained provenance records **14 passing tests**. Controls establish that
+a banked cursor cannot waive unresolved dependencies or semantic differences,
+and distinct-row diagnostics cannot weaken the exact state gate. See the
+[workflow](verify-sync-replay.md) for the recorded test command.
 
 ## Historical null-reference cause
 
@@ -190,43 +138,45 @@ quarantine rule preserves that uncertainty; no identity is inferred from text.
 1. Resolve or explain the belief `writer`, evidence `project_key`/`note`, and
    four-message distinct-row discrepancies using bounded, scrubbed evidence. Do not
    weaken parity gates, infer missing identities or re-author history to make
-   the report pass. Authentication and durable settlement passed on the host.
+   the report pass. Authentication, durable settlement and cursor banking passed
+   on the host.
 2. The exact September 30/changelog source snapshot and original private replay
    report remain unlocated. The later 4,717-operation backup cannot be relabeled
    as the 4,568-operation changelog run (4,555 settled plus 13 quarantined).
 3. Contemporaneous memory, file-map, pending and skill file snapshots are absent
    from this database-only backup. They are needed for complete portable state
    counts/digests. A matching signed log is insufficient.
-4. A fresh-stream transport receipt and its banked destination cursor remain
-   unproven for this retained history. The existing synthetic regression proves
-   the mechanism, not that an authentic historical replay met the issue gate.
 
 ## Draft issue update (not published)
 
 The v0.62.7 quarantine and fresh-stream recovery rules remain in place, and
 v0.62.26 added synthetic authenticated replay coverage. We now have a bounded,
-reusable offline evidence verifier that checks every MAC before replay, retains
-original signed history, compares portable database state, checks final durable
-settlement and repeats delivery to verify database/log idempotence.
+reusable verifier with offline and isolated native loopback transport modes.
 
 A retained issue112-named October 2 database backup was located on the original
 workstation. It contains 4,717 operations and the same 13 null belief reference
 cases. Workstation-native preflight authenticated all 4,717 operations using its
 existing configuration, with no credential export or change. Authentic isolated
-replay settled 4,704 operations and quarantined 13, with zero final unverified,
-failed or deferred. Signed history was preserved. Repeat delivery produced
-4,717 duplicates and no additional effects; the source backup remained unchanged.
+native transport fetched all 4,717 operations over 10 pages, settled 4,704 and
+quarantined 13, with zero final unverified, failed or deferred. The destination
+banked cursor **4,717**. Repeat delivery produced 4,717 duplicates and no new
+effects; resume fetched zero and retained cursor 4,717. Original signed history
+and the source backup were preserved; the listener and temporary stores were
+cleaned up. The retained transport receipt and provenance record this proof.
 
 Portable state parity still fails: belief/evidence row counts match but their
-semantic digests differ in writer metadata and evidence project/note projections,
-and the destination has four fewer distinct portable message rows.
+semantic digests differ for 1,976 belief writers and 35 evidence rows in project/
+note fields. Four message rows occur only in the source, including after
+distinct-row projection. Contemporaneous memory, file-map, pending and skill
+snapshots are missing, so complete file-state parity is unproven.
 The scrubbed report records these differences without private payloads or keys.
 The earlier local zero-verification report reflected different local config,
 not a historical signature gap.
 
-Keep this issue open pending explanation of those state differences, a banked
-fresh-stream cursor and matching portable state counts/digests, including
-contemporaneous file-backed state.
+Keep this issue open pending explanation of those state differences and matching
+portable state counts/digests, including contemporaneous file-backed state.
+The banked fresh-stream cursor requirement is satisfied for this retained source;
+the exact success gate remains false.
 The exact historical changelog replay report is still missing. This evidence
 does not authorize repairing identities, replacing immutable hub rows or
 re-authoring history. A hub is optional; an authenticated fresh stream is the
