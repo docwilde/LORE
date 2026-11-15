@@ -183,6 +183,130 @@ pub fn directory_names(path: &Path, cap: usize) -> Result<Vec<std::ffi::OsString
     }
     Ok(names)
 }
+
+/// A pinned directory stream with bounded, portable logical entry positions.
+#[cfg(unix)]
+pub(crate) struct DirectoryStream {
+    stream: *mut libc::DIR,
+    directory: File,
+    position: i64,
+}
+#[cfg(unix)]
+const MAX_DIRECTORY_POSITION: i64 = 65_536;
+#[cfg(unix)]
+impl DirectoryStream {
+    pub(crate) fn open(path: &Path) -> Result<Self> {
+        Self::at(&open_directory(path)?)
+    }
+    pub(crate) fn at(source: &File) -> Result<Self> {
+        use std::os::fd::IntoRawFd;
+        let meta = source.metadata()?;
+        if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
+            return Err(Error::UnsafePath);
+        }
+        let fd = unsafe {
+            libc::openat(
+                source.as_raw_fd(),
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(Error::UnsafePath);
+        }
+        let directory = unsafe { File::from_raw_fd(fd) };
+        let fd = directory.try_clone()?.into_raw_fd();
+        let stream = unsafe { libc::fdopendir(fd) };
+        if stream.is_null() {
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(Error::Unavailable);
+        }
+        Ok(Self {
+            stream,
+            directory,
+            position: 0,
+        })
+    }
+    /// Read entries relative to the exact directory being enumerated, even
+    /// when a store ancestor is moved or its pathname is replaced.
+    pub(crate) fn directory(&self) -> &File {
+        &self.directory
+    }
+    pub(crate) fn metadata(&self) -> Result<fs::Metadata> {
+        Ok(self.directory.metadata()?)
+    }
+    fn clear_errno() -> Result<()> {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            *libc::__errno_location() = 0;
+        }
+        #[cfg(target_os = "macos")]
+        unsafe {
+            *libc::__error() = 0;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err(Error::Unsupported);
+        Ok(())
+    }
+    pub(crate) fn position(&self) -> Result<i64> {
+        Ok(self.position)
+    }
+    pub(crate) fn seek(&mut self, position: i64) -> Result<()> {
+        if !(0..=MAX_DIRECTORY_POSITION).contains(&position) {
+            return Err(Error::InvalidRequest);
+        }
+        Self::clear_errno()?;
+        unsafe {
+            libc::rewinddir(self.stream);
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(0) {
+            return Err(Error::Changed);
+        }
+        self.position = 0;
+        // libc telldir cookies can belong to one DIR instance (notably on
+        // macOS). Replay logical entries rather than persisting those cookies.
+        for _ in 0..position {
+            if self.next()?.is_none() {
+                return Err(Error::Changed);
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn next(&mut self) -> Result<Option<std::ffi::OsString>> {
+        use std::{ffi::CStr, os::unix::ffi::OsStrExt};
+        loop {
+            Self::clear_errno()?;
+            let entry = unsafe { libc::readdir(self.stream) };
+            if entry.is_null() {
+                return if std::io::Error::last_os_error().raw_os_error() == Some(0) {
+                    Ok(None)
+                } else {
+                    Err(Error::Unavailable)
+                };
+            }
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            if self.position >= MAX_DIRECTORY_POSITION {
+                return Err(Error::TooLarge);
+            }
+            self.position += 1;
+            return Ok(Some(std::ffi::OsStr::from_bytes(name).to_os_string()));
+        }
+    }
+}
+#[cfg(unix)]
+impl Drop for DirectoryStream {
+    fn drop(&mut self) {
+        unsafe {
+            libc::closedir(self.stream);
+        }
+    }
+}
+
 pub fn read_regular(path: &Path, cap: usize) -> Result<Vec<u8>> {
     let mut file = open_regular(path, cap)?;
     let mut bytes = Vec::new();
@@ -546,6 +670,71 @@ impl Drop for Locks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn directory_stream_logical_seek_resumes_on_a_fresh_stream() {
+        let temp = tempfile::tempdir().unwrap();
+        for n in 0..300 {
+            fs::write(temp.path().join(format!("entry-{n:03}")), b"fixture").unwrap();
+        }
+        let mut first = DirectoryStream::open(temp.path()).unwrap();
+        assert_eq!(first.position().unwrap(), 0);
+        for position in 1..=257 {
+            assert!(first.next().unwrap().is_some());
+            assert_eq!(first.position().unwrap(), position);
+        }
+        let expected = first.next().unwrap().unwrap();
+        drop(first);
+
+        let mut reopened = DirectoryStream::open(temp.path()).unwrap();
+        reopened.seek(257).unwrap();
+        assert_eq!(reopened.position().unwrap(), 257);
+        assert_eq!(reopened.next().unwrap(), Some(expected));
+        assert_eq!(reopened.position().unwrap(), 258);
+        reopened.seek(0).unwrap();
+        let first_name = reopened.next().unwrap();
+        reopened.seek(0).unwrap();
+        assert_eq!(reopened.next().unwrap(), first_name);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn directory_stream_seek_refuses_invalid_positions_and_early_eof() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("one"), b"fixture").unwrap();
+        fs::write(temp.path().join("two"), b"fixture").unwrap();
+        let mut stream = DirectoryStream::open(temp.path()).unwrap();
+        let first = stream.next().unwrap();
+        for invalid in [-1, i64::MIN, MAX_DIRECTORY_POSITION + 1, i64::MAX] {
+            assert_eq!(stream.seek(invalid), Err(Error::InvalidRequest));
+            assert_eq!(stream.position().unwrap(), 1);
+        }
+        assert_eq!(stream.seek(3), Err(Error::Changed));
+        assert_eq!(stream.position().unwrap(), 2);
+        stream.seek(0).unwrap();
+        assert_eq!(stream.next().unwrap(), first);
+        stream.seek(2).unwrap();
+        assert!(stream.next().unwrap().is_none());
+        assert_eq!(stream.position().unwrap(), 2);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn directory_stream_cap_allows_eof_but_refuses_an_extra_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut empty = DirectoryStream::open(temp.path()).unwrap();
+        // Exercise the boundary without manufacturing 65,536 fixture files.
+        empty.position = MAX_DIRECTORY_POSITION;
+        assert!(empty.next().unwrap().is_none());
+        assert_eq!(empty.position().unwrap(), MAX_DIRECTORY_POSITION);
+
+        fs::write(temp.path().join("one"), b"fixture").unwrap();
+        fs::write(temp.path().join("two"), b"fixture").unwrap();
+        let mut full = DirectoryStream::open(temp.path()).unwrap();
+        full.position = MAX_DIRECTORY_POSITION - 1;
+        assert!(full.next().unwrap().is_some());
+        assert_eq!(full.position().unwrap(), MAX_DIRECTORY_POSITION);
+        assert_eq!(full.next(), Err(Error::TooLarge));
+        assert_eq!(full.position().unwrap(), MAX_DIRECTORY_POSITION);
+    }
     #[cfg(unix)]
     #[test]
     fn pinned_create_claim_recover_unlink_and_retire_ignore_replaced_directories() {

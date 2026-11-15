@@ -21,6 +21,7 @@ impl Core {
             "scrub",
             "snapshot",
             "pending",
+            "pending_page_v1",
             "pending_for_sessions_v1",
             "pending_cluster_v1",
             "sync_state",
@@ -30,6 +31,10 @@ impl Core {
             "codegraph_snapshot_store_v1",
             "diagnostic_trace_capture_v1",
             "diagnostic_trace_read_v1",
+            "diagnostic_retention_plan_v1",
+            "diagnostic_retention_apply_v1",
+            "codegraph_cleanup_plan_v1",
+            "codegraph_cleanup_apply_v1",
             "skill_evaluate_v1",
             "skill_evaluation_read_v1",
             "skill_evaluation_artifact_v1",
@@ -77,6 +82,10 @@ impl Core {
         let value = match req["op"].as_str().ok_or(Error::InvalidRequest)? {
             "diagnostic_trace_capture_v1" => crate::diagnostics::capture(config, req)?,
             "diagnostic_trace_read_v1" => crate::diagnostics::show(config, req)?,
+            "diagnostic_retention_plan_v1" => crate::retention::plan(config, req)?,
+            "diagnostic_retention_apply_v1" => crate::retention::apply(config, req, auth)?,
+            "codegraph_cleanup_plan_v1" => crate::codegraph_snapshot::cleanup_plan(config, req)?,
+            "codegraph_cleanup_apply_v1" => crate::codegraph_snapshot::cleanup_apply(config, req, auth)?,
             "skill_evaluate_v1" => crate::skill_evaluation::evaluate(config, req, auth)?,
             "skill_evaluation_read_v1" => crate::skill_evaluation::show(config, req)?,
             "skill_evaluation_artifact_v1" => crate::skill_evaluation::artifact(config, req)?,
@@ -104,6 +113,7 @@ impl Core {
                 json!({"projects_dir":config.projects,"slug":crate::config::project_slug(crate::gate::cwd(req)?)})
             }
             "pending" => crate::pending::list(config, req)?,
+            "pending_page_v1" => crate::pending_page::list(config, req)?,
             "pending_for_sessions_v1" => crate::pending::for_sessions(config, req)?,
             "pending_cluster_v1" => {
                 let mut request = req.clone();

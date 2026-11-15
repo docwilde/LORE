@@ -22,13 +22,16 @@ Beliefs: belief list|search|show|review|add|retract|edges|dedup-report
          evidence consult ask outcome stats audit crosscheck dream
 Graph: graph stats|neighbours|path|communities|components|degree|context|html|backfill|derive|edge
 Codegraph: codegraph store --cwd WORKTREE --input FILE --expected-sha256 HASH --expected-revision N
+           codegraph cleanup-plan|cleanup-apply --json REVIEWED_PLAN
 Sessions: search session index history recent|prefix|metadata
-Review: review backfill pending list|show approve reject
+Review: review backfill pending list|page|show approve reject
+        pending page [--cursor CURSOR] [--limit 1..50]
 Skills: skills list|candidates|usage|evaluate PID --suite FILE
         skills evaluation SHA256
         skills artifact --kind candidate|trace|suite --sha256 SHA256
 Diagnostics: trace capture --transcript FILE --session-id ID --engine claude|codex
              trace show SHA256
+             trace retention-plan|retention-apply --json REVIEWED_PLAN
 Administration: setup teardown reset project move config show|set|unset
 Sync: sync status|health|whoami|push|pull|bootstrap|serve|export|import|classes|login|resign|seed
 Integration: mcp hook
@@ -252,12 +255,13 @@ fn validate_flags(group: &str, sub: &str, req: &Value) -> Result<()> {
         ("history",_) => "limit offset prefix session_id",
         ("review",_) => "transcript latest foreground dry_run workers full incremental engine session_id model",
         ("backfill",_) => "project list jobs force dry_run",
-        ("pending",_) => "pid all cluster limit",
+        ("pending",_) => "pid all cluster limit cursor",
         ("approve"|"reject",_) => "pid expected",
         ("consult"|"ask"|"dialectic",_) => "query limit",
         ("outcome",_) => "belief_id event source note",
         ("skills",_) => "prompt limit pid suite sha256 kind",
-        ("trace",_) => "transcript session_id engine sha256",
+        ("trace",_) => "transcript session_id engine sha256 policy plan_sha256 plan",
+        ("codegraph", "cleanup-plan"|"cleanup-apply") => "plan_sha256 plan reviewed_orphan_keys",
         ("dream",_) => "dry_run engine",
         ("audit",_) => "sample",
         ("project", "move") => "old new dry_run",
@@ -348,6 +352,7 @@ pub fn run(args: &[String]) -> Result<()> {
             | "pending"
             | "project"
             | "trace"
+            | "codegraph"
     );
     let (sub, tail) = if grouped && args.get(1).is_some_and(|s| !s.starts_with('-')) {
         (args[1].as_str(), &args[2..])
@@ -366,6 +371,10 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     let mut core = Core::new(cfg.clone(), auth.clone());
     let value = match (group, sub) {
+        ("trace", "retention-plan") => crate::retention::plan(&cfg, &req)?,
+        ("trace", "retention-apply") => crate::retention::apply(&cfg, &req, &auth)?,
+        ("codegraph", "cleanup-plan") => crate::codegraph_snapshot::cleanup_plan(&cfg, &req)?,
+        ("codegraph", "cleanup-apply") => crate::codegraph_snapshot::cleanup_apply(&cfg, &req, &auth)?,
         ("trace", "capture") => crate::diagnostics::capture(&cfg, &req)?,
         ("trace", "show") => {
             pos(&mut req, "sha256", &p, false)?;
@@ -542,6 +551,7 @@ pub fn run(args: &[String]) -> Result<()> {
         }
         ("history", "metadata") => crate::history::metadata(&cfg, &req)?,
         ("pending", "" | "list") => crate::standalone_ops::pending_list(&cfg, &req)?,
+        ("pending", "page") => crate::pending_page::list(&cfg, &req)?,
         ("pending", "show") => {
             pos(&mut req, "pid", &p, false)?;
             crate::pending::review(&cfg, &req)?

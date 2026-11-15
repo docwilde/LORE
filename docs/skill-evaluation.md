@@ -100,7 +100,8 @@ are not a filesystem, network or memory sandbox. Use a pinned external
 container/runtime in the runner for experiments requiring that isolation.
 The model/runtime strings identify the chosen experiment configuration;
 LORE cannot attest a remote model's weights or the interpreter's libraries.
-LORE provides no model adapter or API spending policy here.
+An optional subscription CLI adapter and versioned regression corpus are
+described below. The deterministic fixture itself makes no model calls.
 
 Train, replay and validation run first. A candidate must improve training
 passes, match or beat the baseline's validation count, and preserve **each**
@@ -134,3 +135,140 @@ There is no automatic best-snapshot selector or performance-based promotion.
 This workflow covers procedural skill experiments. It does not establish
 the truth of beliefs or factual memories, generate gold reference runs, or
 infer causal errors from a trajectory's first differing action.
+
+## 4. Prepare a subscription-backed coding suite
+
+The [model coding corpus](../examples/skill-evaluation/model-coding/README.md)
+contains four small LORE regression tasks, one per split. Tasks repair actual
+source files; a separate offline verifier runs behavioral tests. They reduce
+historical empty-replacement, worker-window, worktree-identity and startup
+pending-list failures. [Provenance and license](../examples/skill-evaluation/model-coding/PROVENANCE.md)
+identify exact source commits and deliberate reductions. `corpus.json` pins
+task/check hashes; no gold patches enter model inputs. This public, four-task
+corpus is a regression experiment, not an uncontaminated or statistically
+representative coding benchmark.
+
+Use Linux, Python 3.11+, Git, bubblewrap with working user/PID/network
+namespaces, and a direct pinned Claude Code or Codex CLI binary. Do not use an
+auto-updating shim. Copy the appropriate disabled configuration example out
+of the corpus and fill in **every** operator value:
+
+```sh
+cp examples/skill-evaluation/model-coding/claude.subscription.example.json /absolute/claude-benchmark.json
+# Or: codex.subscription.example.json
+sha256sum /absolute/direct/model-cli /usr/bin/bwrap
+install -d -m 700 /absolute/private-budget
+```
+
+Select `provider`, explicit `model`, descriptive pinned `runtime`, executable
+paths/hashes, operator-designated subscription OAuth `auth_file`, limits, and
+an unused private ledger path. Auth files must be regular, owned by the current
+user and mode 0600 or stricter. The adapter inspects metadata and mounts only
+that file read-only; it never parses or prints credential contents. An existing
+subscription auth file can be designated without exposing the rest of HOME.
+The CLI gets a new disposable home, no user settings/plugins/history, and no
+inherited environment or API tokens. Expired read-only auth fails; refresh it
+outside the experiment. Do not put credentials in the corpus or config JSON.
+
+Claude uses safe mode, `forceLoginMethod=claudeai`, two maximum turns, no tools,
+hooks/MCP/auto-memory, and `--no-session-persistence`. Its auth status must
+report `claude.ai` and a subscription plan. `--bare` is excluded because it
+disables OAuth. See the [Claude CLI reference](https://code.claude.com/docs/en/cli-reference).
+Codex forces `forced_login_method="chatgpt"`, requires ChatGPT login status,
+ignores user config/rules, uses ephemeral execution without a shared daemon,
+and disables hooks and execution/app/browser/patch/subagent tools. The
+[Codex configuration reference](https://developers.openai.com/codex/config-reference)
+documents the login restriction and individual feature controls. Feature
+flags alone are insufficient for some model catalogs, so Codex additionally
+requires an offline tool profile for the **exact binary and model**:
+
+```sh
+python3 scripts/skill-benchmark-codex-profile.py \
+  --cli /absolute/direct/codex --model EXACT_MODEL \
+  --output /absolute/codex-tool-profile.json
+```
+
+This probe uses the CLI's bundled catalog, an empty home, no credentials and a
+localhost fake provider. It hardens the catalog, checks that only the inert
+`request_user_input` entry remains, and forges shell, patch and input calls.
+All must be refused, with no file effects; input must be unavailable in Default
+mode. The profile binds the binary hash, model and catalog hash. It is an
+operator-owned test artifact, not a remote attestation. Preparation embeds it
+in the frozen runner. A CLI version/model failing the probe cannot run. The
+live path has no configurable API provider/base URL or fallback. Codex's
+unbounded-connection-retry feature is disabled; built-in provider retry
+settings cannot be overridden in the inspected CLI. Transport/request
+accounting remains subject to the pinned CLI. No CLI-wide turn cap is assumed
+for Codex; the adapter never retries a task invocation.
+
+Preparation defaults to **no subscription quota consumption** and makes no
+provider calls. To inspect a disabled suite:
+
+```sh
+python3 scripts/skill-benchmark.py prepare \
+  --config /absolute/claude-benchmark.json --output /absolute/disabled-suite
+```
+
+After separately authorizing a full run's budget, prepare a new enabled suite:
+
+```sh
+python3 scripts/skill-benchmark.py prepare \
+  --config /absolute/claude-benchmark.json --output /absolute/enabled-suite \
+  --enable-subscription --max-calls 8
+# Codex also needs: --codex-profile /absolute/codex-tool-profile.json
+
+# Human terminal; existing pending proposal and native authority are required:
+lore skills evaluate PROPOSAL_ID --suite /absolute/enabled-suite/suite.json
+```
+
+The input config must stay disabled. `--enable-subscription` enables only the
+new frozen runner; no API-key mode exists. One locked ledger bounds attempted
+CLI model invocations across both arms/all splits for the exact configuration.
+A slot is reserved before auth preflight; failure/interruption consumes it.
+The four-case suite needs at most eight model invocations, with no adapter
+retries, and can stop earlier at native train/replay/validation gates. Ledger
+re-use with a different configuration is refused. Budgets count CLI task
+invocations, not tokens or exact provider HTTP requests. Full runs need their
+own explicit budget; a smoke approval is not full-run consent.
+
+For an explicitly approved **single training-task adapter smoke**, each command
+below permits at most one CLI model invocation, no retry and 120 seconds around
+the run and verification. Use a fresh ledger per provider/config and run only
+the provider(s) whose budget was authorized:
+
+```sh
+python3 scripts/skill-benchmark-smoke.py \
+  --config /absolute/claude-benchmark.json --output /absolute/claude-smoke \
+  --enable-subscription
+python3 scripts/skill-benchmark-smoke.py \
+  --config /absolute/codex-benchmark.json --output /absolute/codex-smoke \
+  --codex-profile /absolute/codex-tool-profile.json --enable-subscription
+```
+
+Smoke artifacts include safe phase counts, requested identities, executable
+hashes, provider-reported model/turn metadata when available, and independent
+verification status. No native evaluation report is attached, no pending or
+memory changes occur, and no final test is consumed. A successful smoke shows
+adapter compatibility, not candidate improvement or model competence.
+Use `--timeout-seconds 90` to narrow a smoke's overall deadline. Nonzero
+subprocess exits retain only an allow-listed failure category, numeric exit
+code, recognized event types and recognized HTTP status codes. Raw error
+messages, accounts, credentials and response source never enter diagnostics.
+The [recorded smoke report](../examples/skill-evaluation/model-coding/smoke-report.json)
+keeps successful and failed attempts; it is not a candidate evaluation.
+
+Models receive only the current task's source/public tests and the exact skill
+text through stdin, returning one JSON source file. They cannot access other
+splits, frozen checks, corpus metadata or host credentials through model tools.
+The subscription CLI has network in its own sandbox; verification runs in a
+different sandbox without network/auth, using only the generated source and
+frozen checks. Both use bounded pipes/deadlines. Raw CLI/auth logs are discarded;
+only safe metadata/hashes reach native retained excerpts. Missing isolation
+fails closed. CLI/bwrap hashes do not pin OS libraries or attest remote model
+weights; the online sandbox is not a domain-filtering network proxy.
+
+Offline checks, with fake executables and no subscription access:
+
+```sh
+python3 -m unittest discover -s tests -p test_skill_benchmark_adapter.py
+```

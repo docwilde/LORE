@@ -19,6 +19,8 @@ pub(crate) fn put(cfg: &config::Config, area: &str, value: &Value) -> Result<Str
     if bytes.len() > ARTIFACT_CAP { return Err(Error::TooLarge); }
     let hash = crate::digest(&bytes);
     let path = cfg.root.join(area).join(format!("{hash}.json"));
+    let _evidence = crate::retention::evidence_lock(cfg)?;
+    crate::retention::verify_trace_references(cfg, value)?;
     let _lock = files::Locks::acquire(&cfg.root, std::slice::from_ref(&path), cfg.timeout)?;
     if path.try_exists()? {
         if files::read_regular(&path, ARTIFACT_CAP)? != bytes { return Err(Error::Changed); }
@@ -26,6 +28,26 @@ pub(crate) fn put(cfg: &config::Config, area: &str, value: &Value) -> Result<Str
         files::atomic_write(&path, &bytes)?;
     }
     Ok(hash)
+}
+
+/// Retention accepts only intact, recognized diagnostic objects. Evaluation
+/// traces and other content-addressed evidence are never retention candidates.
+pub(crate) fn validate_trace(bytes: &[u8], hash: &str) -> Result<Value> {
+    if !valid_hash(hash) || crate::digest(bytes) != hash { return Err(Error::Changed); }
+    let trace: Value = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
+    if trace["schema"] != "lore.diagnostic-trace.v1"
+        || !trace["session_id"].as_str().is_some_and(config::valid_id)
+        || !matches!(trace["engine"].as_str(), Some("claude" | "codex"))
+        || !trace["source_sha256"].as_str().is_some_and(valid_hash)
+        || trace["source_bytes"].as_u64().is_none()
+        || trace["task_outcome"] != "unverified"
+        || !trace["events"].is_array() || !trace["complete"].is_boolean()
+        || trace.get("captured_at_unix_seconds").is_some_and(|v| v.as_u64().is_none())
+        || ["source_lines", "truncated_events", "dropped_events", "unsupported_blocks"]
+            .iter().any(|key| trace[key].as_u64().is_none()) {
+        return Err(Error::InvalidRequest);
+    }
+    Ok(trace)
 }
 
 pub(crate) fn get(cfg: &config::Config, area: &str, hash: &str) -> Result<Value> {
@@ -141,9 +163,15 @@ pub fn capture(cfg: &config::Config, req: &Value) -> Result<Value> {
     trace["source_sha256"] = proof["sha256"].clone();
     trace["source_bytes"] = proof["size"].clone();
     trace["task_outcome"] = json!("unverified");
+    // Recapturing the same old transcript must create fresh bytes: a count
+    // limit cannot evict an in-flight review by reusing an aged object.
+    trace["captured_at_unix_seconds"] = json!(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map_err(|_| Error::Unavailable)?.as_secs());
     let hash = put(cfg, "diagnostic-traces", &trace)?;
+    let retention = crate::retention::automatic(cfg).unwrap_or_else(|e|
+        json!({"status":"refused","error_code":e.code()}));
     Ok(json!({"sha256":hash,"source_sha256":proof["sha256"],"events":trace["events"].as_array().map(Vec::len),
-        "complete":trace["complete"],"task_outcome":"unverified"}))
+        "complete":trace["complete"],"task_outcome":"unverified","retention":retention}))
 }
 
 pub fn show(cfg: &config::Config, req: &Value) -> Result<Value> {
@@ -196,5 +224,21 @@ mod tests {
         let hash=put(&cfg,"diagnostic-traces",&t).unwrap();
         files::atomic_write(&cfg.root.join("diagnostic-traces").join(format!("{hash}.json")),b"{}").unwrap();
         assert_eq!(get(&cfg,"diagnostic-traces",&hash),Err(Error::Changed));
+    }
+
+    #[test]
+    fn capture_persists_a_recent_timestamp_and_a_valid_retention_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config::Config::for_root(dir.path().join("store"));
+        let transcript = dir.path().join("session.jsonl");
+        std::fs::write(&transcript,b"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n").unwrap();
+        let result = capture(&cfg,&json!({"transcript":transcript,"session_id":"test","engine":"codex"})).unwrap();
+        let hash = result["sha256"].as_str().unwrap();
+        let bytes = files::read_regular(&cfg.root.join("diagnostic-traces").join(format!("{hash}.json")),ARTIFACT_CAP).unwrap();
+        let trace = validate_trace(&bytes,hash).unwrap();
+        let at = trace["captured_at_unix_seconds"].as_u64().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert!(now >= at && now-at < 60);
+        assert!(result["retention"].is_object());
     }
 }

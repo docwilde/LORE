@@ -16,6 +16,8 @@ pub mod history;
 pub mod index;
 pub mod memory;
 pub mod pending;
+pub mod pending_page;
+pub mod retention;
 pub mod review;
 pub mod scrub;
 pub mod skills;

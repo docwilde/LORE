@@ -1,0 +1,12 @@
+{
+  "schema": "lore.skill-benchmark-runtime.v1",
+  "provider": "claude",
+  "codex_profile": null,
+  "model": "OPERATOR_SELECT_EXACT_CLAUDE_MODEL",
+  "runtime": "claude-code.PINNED_VERSION+bwrap.PINNED_VERSION",
+  "cli": {"path": "/absolute/direct/claude", "sha256": "OPERATOR_SHA256"},
+  "sandbox": {"path": "/usr/bin/bwrap", "sha256": "OPERATOR_SHA256"},
+  "auth_file": "/absolute/dedicated-subscription-auth/.credentials.json",
+  "limits": {"model_seconds": 60, "verify_seconds": 10, "output_bytes": 262144, "source_bytes": 65536},
+  "spend": {"subscription_enabled": false, "max_calls": 0, "ledger": "/absolute/private-budget/claude.jsonl"}
+}

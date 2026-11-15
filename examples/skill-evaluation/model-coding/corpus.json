@@ -1,0 +1,55 @@
+{
+  "schema": "lore.skill-coding-corpus.v1",
+  "version": "lore-regressions-v1",
+  "license": "AGPL-3.0-only",
+  "provenance": "PROVENANCE.md",
+  "answer_markers": [
+    "You are the background memory reviewer",
+    "WORKER_TRANSCRIPT_MAX_BYTES = 2_000_000",
+    "pending_count and pending_error in the startup snapshot"
+  ],
+  "cases": [
+    {
+      "id": "train-empty-replace",
+      "split": "train",
+      "fixture": "tasks/train-empty-replace"
+    },
+    {
+      "id": "replay-worker-window",
+      "split": "replay",
+      "fixture": "tasks/replay-worker-window"
+    },
+    {
+      "id": "validation-worktree-identity",
+      "split": "validation",
+      "fixture": "tasks/validation-worktree-identity"
+    },
+    {
+      "id": "test-startup-pending",
+      "split": "test",
+      "fixture": "tasks/test-startup-pending"
+    }
+  ],
+  "files": {
+    "checks/replay-worker-window.py": "522213e4eb531886f7c1b770a2fc0f661873a18acbf4c3b82ccf480fc487bda5",
+    "checks/test-startup-pending.py": "bfa62c95f814ff06bcce140dbe255180f9f0c9edb91395b0e6918c1dc907b37b",
+    "checks/train-empty-replace.py": "2f132758e201e241fd31a4e6198347e6058d843ad849a5feba3026844b109ff6",
+    "checks/validation-worktree-identity.py": "010d1c9fff532c97700cb61d55fc9b6cdc9d2b5d9db082b248b4e6b13737cb81",
+    "tasks/replay-worker-window/TASK.md": "8bedf470f822e29b6a255838a4eb73f90b9b9a027b0c343d25daa022aa9117d2",
+    "tasks/replay-worker-window/benchmark.py": "149bc3ad45351af582748dccfc35bf0b7052315bc9e8f8665f8a62153e5e5076",
+    "tasks/replay-worker-window/case.json": "9632ebd618a50d5b54a2c1d8369e8c064f8b17c268c254b031606e9b8003e810",
+    "tasks/replay-worker-window/test_public.py": "7f77a12bb1d00465a9c6dbf08157dad6d0163a1a20f8b8fee04dbd6a1c36afa3",
+    "tasks/test-startup-pending/TASK.md": "3251515474d1d0d8479ba97245309f5d76695c9db5e46023525fc0f66730f985",
+    "tasks/test-startup-pending/benchmark.py": "c26f8c80249858d6d70d7f0b135d3e3e88abdff38f9267ce91ff3b0558bfb9dc",
+    "tasks/test-startup-pending/case.json": "8610d3b1b6d820c8f99757fffd7f1c78ee892ce6db9b4213e18637a121612dc3",
+    "tasks/test-startup-pending/test_public.py": "a70850d62f6cea8e3bb23c78014cbbe6a5d6a7688b065647eb530d42877e9d12",
+    "tasks/train-empty-replace/TASK.md": "14fe51286d769b152561c125d5a0d7792b9197ffbbaca779d74633c26aa69916",
+    "tasks/train-empty-replace/benchmark.py": "b13a0fdeace7d470aa4faf24df8b27409cfe6a43d5e8db4d9c573e52a8e54e80",
+    "tasks/train-empty-replace/case.json": "5737421e8643909ac64d376a733322880f4ba776d49f114b06d4600d1625617a",
+    "tasks/train-empty-replace/test_public.py": "936dd832df4b603de405a4dfeef5bf42385d266baabb5a19202869c2fba25703",
+    "tasks/validation-worktree-identity/TASK.md": "f064476080adc0c983b371c1975ffe9765f8b90591a61fb543e4c57c93356951",
+    "tasks/validation-worktree-identity/benchmark.py": "3e012db18f1376a8892b57d2a32dd3ddb1bf5537399646eafa372be61f6de711",
+    "tasks/validation-worktree-identity/case.json": "3ea32ce88d65acd2d18d87a9fb5a9bb9c9ceee97e36ccbd3875153ac33b1def3",
+    "tasks/validation-worktree-identity/test_public.py": "295f3f18fd7aad4ebb140d529b793109c38b0049330e3f575cf25d8110a48fd0"
+  }
+}

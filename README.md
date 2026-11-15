@@ -74,8 +74,9 @@ directory. Store paths and identity remain process configuration. Saved credenti
 In [v0.62.27](https://github.com/docwilde/LORE/releases/tag/v0.62.27), startup
 and refresh snapshots load curated memory even when the pending-review scan
 fails. The snapshot reports the pending count as unknown with a diagnostic
-code. The pending directory scan is bounded at 4,096 entries; pending listings
-and review commands retain their bounds and approval checks.
+code. Full pending scans retain their 4,096-entry bound. Large queues have a
+[bounded page workflow](docs/pending-pages.md); approval still requires the
+exact current proposal and human review.
 
 `/lore:setup` walks each `/lore:doctor` finding behind its own confirmation: disabling Claude Code's built-in auto-memory, adding the permission allowlist, porting existing entries, priming the session index.
 
@@ -225,6 +226,7 @@ and interoperability test oracle.
 ## Reference
 
 - **Manual** — every command, config variable, hook, and store mechanics: [`docs/manual.md`](docs/manual.md)
+- **Maintenance** — [large pending queues](docs/pending-pages.md), [retention and reviewed snapshot cleanup](docs/retention.md), and [optional skill usage sync](docs/skill-usage-sync.md)
 - **Design rationale** — [`docs/user-model-channel-separation.md`](docs/user-model-channel-separation.md), [`docs/memory-proposal-quality.md`](docs/memory-proposal-quality.md), [`docs/write-gate.md`](docs/write-gate.md)
 - **Sync** — the wire contract in [`docs/sync-protocol.md`](docs/sync-protocol.md), the design and merge rules in [`docs/plans/sync.md`](docs/plans/sync.md)
 - **[CHANGELOG.md](CHANGELOG.md)** — one line per release, newest first

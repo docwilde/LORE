@@ -64,11 +64,8 @@ __all__ = [
 ]
 
 
-# docs/plans/sync.md "Configuration": the default ON class set. Off-by-
-# default classes (transcripts, tabsets, worktrees, skill_usage) have no
-# write path in lore_core today -- DOXA owns tabsets/worktrees, and neither
-# transcripts nor skill_usage sync in this PR -- so they are not in this map
-# at all; a class this module has never heard of is simply never enabled.
+# Default classes remain unchanged. Skill counters use the opt-in
+# `skill_usage` spelling on both the wire and the class allow-list.
 DEFAULT_SYNC_CLASSES = "memory,filemap,beliefs,pending,skills,sessions"
 
 # Wire `class` (docs/sync-protocol.md S3 -- singular: memory, filemap,
@@ -84,6 +81,7 @@ CLASS_CONFIG_NAMES = {
     "pending": "pending",
     "skill": "skills",
     "session": "sessions",
+    "skill_usage": "skill_usage",
 }
 
 

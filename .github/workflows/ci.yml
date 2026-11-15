@@ -20,6 +20,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check native macOS carrier
         run: cargo check --locked --workspace
+      - name: Test native macOS pending continuations
+        env:
+          TMPDIR: ${{ runner.temp }}/lore-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          chmod 700 "$TMPDIR"
+          cargo test --locked --test pending_pages
   test:
     runs-on: ubuntu-latest
     # The whole suite runs in about a second; anything approaching this

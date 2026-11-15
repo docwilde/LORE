@@ -94,6 +94,7 @@ from .pending import archive
 from .store import db_connect, resolve_or_create_synthetic_slug
 from .sync_oplog import (
     CLASS_CONFIG_NAMES,
+    canonical_bytes,
     class_enabled,
     compute_mac,
     get_or_create_machine,
@@ -186,6 +187,7 @@ class InvalidOp(ValueError):
 _KNOWN_CLASSES = {
     "memory", "filemap", "belief", "pending", "skill", "session",
     "transcript", "tabset", "worktree",
+    "skill_usage",
 }
 
 # An absent reference cannot arrive in a later page: the signed payload will
@@ -1165,7 +1167,7 @@ _APPLIERS = {
 }
 
 
-def _dispatch(conn: sqlite3.Connection, op: dict) -> bool:
+def _dispatch(conn: sqlite3.Connection, op: dict, *, key=None) -> bool:
     """Apply one op's domain effect; True when it landed, False when it is
     waiting on something that has not arrived yet.
 
@@ -1173,6 +1175,9 @@ def _dispatch(conn: sqlite3.Connection, op: dict) -> bool:
     author a second, locally-owned op describing the same mutation -- see the
     module docstring.
     """
+    if op["class"] == "skill_usage":
+        from .skill_usage_sync import apply_verified
+        return apply_verified(conn, op, hmac_key() if key is None else key)
     handler = _APPLIERS.get(op["class"])
     if handler is None:
         return True  # unknown class: recorded, not refused (S3/S8)
@@ -1180,7 +1185,7 @@ def _dispatch(conn: sqlite3.Connection, op: dict) -> bool:
         return handler(conn, op)
 
 
-def _dispatch_isolated(conn: sqlite3.Connection, op: dict) -> "bool | str":
+def _dispatch_isolated(conn: sqlite3.Connection, op: dict, *, key=None) -> "bool | str":
     """`_dispatch`, with one op's failure contained to that op: True when it
     landed, False when it is waiting on a dependency, and the reason as a
     STRING when applying it raised.
@@ -1202,7 +1207,7 @@ def _dispatch_isolated(conn: sqlite3.Connection, op: dict) -> "bool | str":
     a pull must still stop it.
     """
     try:
-        return _dispatch(conn, op)
+        return _dispatch(conn, op, key=key)
     except InvalidOp as exc:
         return str(exc)
     except Exception as exc:                                    # noqa: BLE001
@@ -1249,6 +1254,36 @@ def _mark(conn: sqlite3.Connection, op_id: str, state: int) -> None:
     conn.execute("UPDATE sync_ops SET applied = ? WHERE op_id = ?", (state, op_id))
 
 
+def _failed_usage_retry(conn: sqlite3.Connection, op: dict,
+                        verified: bool) -> bool | None:
+    """Retry only the original authenticated counter receipt after a failure.
+
+    None keeps ordinary deduplication; False refuses a conflicting or damaged
+    failed proof. This indexed lookup bounds every stored string before loading
+    it. The failed INSERT in _record already holds SQLite's write transaction,
+    so checking the receipt and applying its counters cannot race another retry.
+    """
+    row = conn.execute(
+        "SELECT substr(machine_id,1,129),machine_seq,lamport,"
+        "substr(class,1,65),substr(op,1,65),substr(project_key,1,2049),"
+        "CASE WHEN length(CAST(payload AS BLOB)) <= ? THEN payload END,"
+        "substr(mac,1,65) FROM sync_ops WHERE op_id=? AND applied=?",
+        (MAX_OP_BYTES, op["op_id"], APPLIED_FAILED)).fetchone()
+    if row is None:
+        return None
+    if not verified or row[3:5] != ("skill_usage", "snapshot"):
+        return False
+    try:
+        prior = dict(zip(("machine_id", "machine_seq", "lamport", "class",
+                          "op", "project_key", "payload", "mac"), row))
+        prior["op_id"] = op["op_id"]
+        prior["payload"] = json.loads(prior["payload"])
+        return (prior["mac"] == op.get("mac")
+                and canonical_bytes(prior) == canonical_bytes(op))
+    except (TypeError, ValueError, RecursionError):
+        return False
+
+
 def apply_ops(conn: sqlite3.Connection, ops: "list[dict]", *,
               key: "str | None" = None, retry: bool = True) -> dict:
     """THE apply function. Sorts `ops` into canonical order, verifies each
@@ -1284,7 +1319,7 @@ def apply_ops(conn: sqlite3.Connection, ops: "list[dict]", *,
               "unverified": 0, "duplicate": 0, "unknown": 0,
               "failed": 0, "skipped": 0}
     machine_id, _label = get_or_create_machine(conn)
-    deferred_ids: "set[str]" = set()
+    deferred_ids: set[str] = set()
 
     for op in canonical_order(ops):
         # Validate
@@ -1309,9 +1344,12 @@ def apply_ops(conn: sqlite3.Connection, ops: "list[dict]", *,
         else:
             state = APPLIED_UNVERIFIED
         if not _record(conn, op, state):
-            report["duplicate"] += 1
-            conn.commit()
-            continue
+            retry_usage = (_failed_usage_retry(conn, op, verified)
+                           if op["class"] == "skill_usage" else None)
+            if retry_usage is not True:
+                report["failed" if retry_usage is False else "duplicate"] += 1
+                conn.commit()
+                continue
         if not verified:
             reason = ("no LORE_SYNC_HMAC_KEY configured on this machine"
                       if not key else
@@ -1343,7 +1381,7 @@ def apply_ops(conn: sqlite3.Connection, ops: "list[dict]", *,
             continue
 
         # Apply
-        outcome = _dispatch_isolated(conn, op)
+        outcome = _dispatch_isolated(conn, op, key=key)
         if outcome is True:
             _mark(conn, op["op_id"], APPLIED_YES)
             report["applied"] += 1
@@ -1481,7 +1519,8 @@ def retry_deferred(conn: sqlite3.Connection, *, key: "str | None" = None) -> int
     means `APPLIED_UNKNOWN`, which this query never selects, and the class test
     runs after verification, so everything at 0 is verified again.
     """
-    del key  # see the docstring: a held op was verified when it was recorded
+    # Content retains its original verification. Counters deliberately require
+    # their signature again, because human approval cannot attest an author.
     landed = 0
     while True:
         rows = conn.execute(
@@ -1512,7 +1551,7 @@ def retry_deferred(conn: sqlite3.Connection, *, key: "str | None" = None) -> int
                 # The receive allow-list may have changed since this verified
                 # op was held. Keep it held so re-enabling the class can retry.
                 continue
-            outcome = _dispatch_isolated(conn, op)
+            outcome = _dispatch_isolated(conn, op, key=key)
             if outcome is True:
                 _mark(conn, op["op_id"], APPLIED_YES)
                 progress += 1
@@ -1549,6 +1588,11 @@ def apply_op_after_approval(op: dict) -> "str | None":
     problem = _envelope_error(op)
     if problem:
         return f"the staged proposal does not carry a usable op envelope: {problem}"
+    if op["class"] == "skill_usage":
+        if _class_disabled("skill_usage"):
+            return "skill usage sync is disabled"
+        if not verify_mac(op, hmac_key()):
+            return "skill usage requires its original verified signature"
     conn = db_connect()
     try:
         # The slot may have been filled since this was staged -- by the op the

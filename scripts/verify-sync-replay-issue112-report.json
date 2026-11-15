@@ -1,0 +1,26 @@
+{
+  "engine_version": "0.62.29",
+  "evidence_gaps": [
+    "No transport was contacted; a banked fresh-stream cursor is unproven.",
+    "The database backup contains no contemporaneous memory, file-map, pending or skill file snapshot; full portable state parity is unproven."
+  ],
+  "format": "lore-sync-replay-evidence",
+  "issue112_success_gate": false,
+  "mode": "offline-retained-database",
+  "offline_replay_gate": false,
+  "replay_performed": false,
+  "signature_gate": false,
+  "source": {
+    "log_sha256": "3fa9f463871f488c058a758bdc17c775383bf1f22af372bcbe094bb0f3fb23d4",
+    "operations": 4717,
+    "sha256": "e73ed19c1a6e8b097a8bcb0e9258ab4e34e17e28b71495defc020780d9118baf",
+    "unchanged": true,
+    "unverified_macs": 4717,
+    "verified_macs": 0
+  },
+  "transport": {
+    "banked_cursor": null,
+    "exercised": false
+  },
+  "version": 1
+}

@@ -1,0 +1,53 @@
+{
+  "format": "lore-sync-replay-provenance",
+  "version": 1,
+  "mode": "authentic-retained-backup-native-loopback-peer",
+  "host_alias": "docwilde-workstation",
+  "host_architecture": "x86_64",
+  "host_glibc": "2.43",
+  "native_version": "0.62.30",
+  "source_backup": "/home/docwilde/.claude/lore/state.db.bak-issue112-20261002T003337Z",
+  "source_sha256": "e73ed19c1a6e8b097a8bcb0e9258ab4e34e17e28b71495defc020780d9118baf",
+  "source_log_sha256": "3fa9f463871f488c058a758bdc17c775383bf1f22af372bcbe094bb0f3fb23d4",
+  "source_snapshot_scope": "Later retained October 2 backup; not the exact September 30 changelog source.",
+  "verifier_executable_sha256": "0e7f92ec9f7c7842671638cf2dcbbe8dcd6db8c8d8c1ccb0beda684b572ff5d5",
+  "verifier_module_sha256": "c97cb31591e7be6d49d4f755f0bd86c33a2f1e9f98bd586fb4b32b1e4905491b",
+  "report_sha256": "97be06e684911db1554449ff5b63a5ed1b511322dde1f601171b77198dba0b8c",
+  "report_remote_path": "/tmp/lore-recovery-issue112.gGukwR/transport-report.json",
+  "native_apis": [
+    "sync_network::PeerServer::connection",
+    "sync_network::pull",
+    "sync_network::pull_from"
+  ],
+  "credential_resolution": "Native Config::from_env on workstation; no credentials exported or modified.",
+  "served_source": "SQLite Backup API copy in a newly allocated private temporary directory.",
+  "bind_policy": "IPv4 loopback only, ephemeral port and in-memory bearer; no public listener.",
+  "cleanup": "Native listener closure verified; both temporary stores removed; remote post-run find returned no lore-replay directories.",
+  "expected_native_exit": 2,
+  "test_command": "env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/lore-recovery-target cargo test --locked --offline --test sync_verification",
+  "tests_passed": 14,
+  "remaining_proof_gaps": [
+    "Exact portable database parity: writer metadata, evidence project/note and four source-only message rows.",
+    "Contemporaneous memory, file-map, pending and skill file snapshots are absent."
+  ],
+  "invocation": [
+    "env",
+    "-u",
+    "HTTP_PROXY",
+    "-u",
+    "HTTPS_PROXY",
+    "-u",
+    "ALL_PROXY",
+    "-u",
+    "http_proxy",
+    "-u",
+    "https_proxy",
+    "-u",
+    "all_proxy",
+    "/tmp/lore-recovery-issue112.gGukwR/verify-sync-replay-transport",
+    "--transport",
+    "/home/docwilde/.claude/lore/state.db.bak-issue112-20261002T003337Z",
+    "/tmp/lore-recovery-issue112.gGukwR"
+  ],
+  "documentation_handoff": "Parent owns final docs/source gate: update offline-only workflow wording and the local issue draft with this authentic cursor proof; retain strict semantic and file-state gaps."
+}

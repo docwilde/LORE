@@ -1,0 +1,169 @@
+{
+  "schema": "lore.skill-adapter-smoke-summary.v1",
+  "recorded_at": "2026-11-15T05:08:57.573118+00:00",
+  "purpose": "adapter plumbing only; not skill improvement or model competence",
+  "task": "train-empty-replace",
+  "corpus": "lore-regressions-v1",
+  "cli_versions": {
+    "claude": "2.1.319",
+    "codex": "0.169.0",
+    "bubblewrap": "0.13.1"
+  },
+  "authorized_cli_task_invocations": 3,
+  "actual_cli_task_invocations": 3,
+  "actual_auth_preflights": 4,
+  "provider_http_request_count": null,
+  "adapter_generation_retries": 0,
+  "budget_note": "The auth-only failed attempt consumed its own ledger slot but invoked no coding model. Each subsequent approved attempt used a new ledger; none was reset.",
+  "attempts": [
+    {
+      "schema": "lore.skill-adapter-smoke.v1",
+      "task": "train-empty-replace",
+      "kind": "adapter_smoke_only",
+      "maximum_cli_model_invocations": 1,
+      "passed": true,
+      "provider": "claude",
+      "model": "opus",
+      "runtime": "claude.2.1.319+bwrap.subscription",
+      "cli_sha256": "dabafec82ca1319fa43d8be36a10fc61b1d11821cb98ad5df04ad95e199b8eed",
+      "sandbox_sha256": "33516b9cd1fa6432307ad71f23765fa30604b0a8d769dac0d2ba054e85aeec83",
+      "runner": {
+        "adapter": "subscription-cli-v1",
+        "provider": "claude",
+        "model": "opus",
+        "runtime": "claude.2.1.319+bwrap.subscription",
+        "cli_model_invocations": 1,
+        "auth_preflights": 1,
+        "metadata": {
+          "provider_reported_models": [
+            "claude-opus-5-5"
+          ],
+          "provider_reported_turns": 2
+        },
+        "source_sha256": "1d63128fb6eae5259cd270b62be44f196eadb56c0288db66d3edd8636f231f92"
+      },
+      "events": [
+        "attempt_reserved",
+        "auth_preflight_started",
+        "auth_preflight_passed",
+        "model_invocation_started",
+        "model_invocation_completed"
+      ],
+      "cli_model_invocations": 1,
+      "auth_preflights": 1,
+      "attempt": "claude_original",
+      "ledger_sha256": "a86f1a738fabefa4228b5c3ce4c35034d02142b02487edf4c4869fc71b59433a",
+      "report_sha256": "0915764d454e18edbf597f1c34e9c69274dd60009e165b8f077143d03b67e88e"
+    },
+    {
+      "schema": "lore.skill-adapter-smoke.v1",
+      "task": "train-empty-replace",
+      "kind": "adapter_smoke_only",
+      "maximum_cli_model_invocations": 1,
+      "passed": false,
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "runtime": "codex.0.169.0+bwrap.subscription",
+      "cli_sha256": "b452ca20f838a8855a88a41050ee4a694033fff4ea3ecdad5633e6e0e8d13f2b",
+      "sandbox_sha256": "33516b9cd1fa6432307ad71f23765fa30604b0a8d769dac0d2ba054e85aeec83",
+      "reason": "chatgpt_auth_required",
+      "events": [
+        "attempt_reserved",
+        "auth_preflight_started"
+      ],
+      "cli_model_invocations": 0,
+      "auth_preflights": 1,
+      "attempt": "codex_auth_only",
+      "ledger_sha256": "ff62a3b29a5ef3a10e8648769b7128a3d8aa06a899f8f5d640c44a366bcd425e",
+      "report_sha256": "6879c31604b62113e2d326f4bc1ff2de3ffdd18d063472cba5b964c4a9e70311"
+    },
+    {
+      "schema": "lore.skill-adapter-smoke.v1",
+      "task": "train-empty-replace",
+      "kind": "adapter_smoke_only",
+      "maximum_cli_model_invocations": 1,
+      "passed": false,
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "runtime": "codex.0.169.0+bwrap.subscription",
+      "cli_sha256": "b452ca20f838a8855a88a41050ee4a694033fff4ea3ecdad5633e6e0e8d13f2b",
+      "sandbox_sha256": "33516b9cd1fa6432307ad71f23765fa30604b0a8d769dac0d2ba054e85aeec83",
+      "reason": "subprocess_failed",
+      "events": [
+        "attempt_reserved",
+        "auth_preflight_started",
+        "auth_preflight_passed",
+        "model_invocation_started"
+      ],
+      "cli_model_invocations": 1,
+      "auth_preflights": 1,
+      "attempt": "codex_first_task",
+      "ledger_sha256": "a2c600be37e4f3face55140e54d6157c8d72af95f38416997fa3eb097e96aff2",
+      "report_sha256": "31b4558c571653871b570ac4bd0050d967fcaf665b4f4d6da4bfd6554f52d859"
+    },
+    {
+      "schema": "lore.skill-adapter-smoke.v1",
+      "task": "train-empty-replace",
+      "kind": "adapter_smoke_only",
+      "maximum_cli_model_invocations": 1,
+      "passed": false,
+      "timeout_seconds": 90,
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "runtime": "codex.0.169.0+bwrap.subscription",
+      "cli_sha256": "b452ca20f838a8855a88a41050ee4a694033fff4ea3ecdad5633e6e0e8d13f2b",
+      "sandbox_sha256": "33516b9cd1fa6432307ad71f23765fa30604b0a8d769dac0d2ba054e85aeec83",
+      "reason": "subprocess_failed",
+      "failure": {
+        "category": "unclassified_process_failure",
+        "exit_code": 1,
+        "event_types": [
+          "error",
+          "item.completed",
+          "thread.started",
+          "turn.failed",
+          "turn.started"
+        ],
+        "http_status_codes": []
+      },
+      "events": [
+        "attempt_reserved",
+        "auth_preflight_started",
+        "auth_preflight_passed",
+        "model_invocation_started"
+      ],
+      "cli_model_invocations": 1,
+      "auth_preflights": 1,
+      "attempt": "codex_diagnostic_task",
+      "ledger_sha256": "9c84b0d5dfda3106501b6ab85e07e48587088c13f4f8321049dc0f0ffb2d36b1",
+      "report_sha256": "62481fc94adc93d1c34a5817cfdc94966097b85e9c447ca2784e5d93997a8ccd"
+    }
+  ],
+  "codex_offline_tool_audit": {
+    "cli_sha256": "b452ca20f838a8855a88a41050ee4a694033fff4ea3ecdad5633e6e0e8d13f2b",
+    "model": "gpt-6.1-sol",
+    "catalog_sha256": "e502ce345c5222f1499de74bd9cbce0f5f755665cd86ff3a1d3659f56c55c70e",
+    "tool_names": [
+      "request_user_input"
+    ],
+    "rejected_calls": [
+      "exec_command",
+      "apply_patch",
+      "request_user_input"
+    ],
+    "offline_requests": 2
+  },
+  "native_evaluation_report_created": false,
+  "pending_or_memory_modified": false,
+  "final_test_consumed": false,
+  "verification": {
+    "offline_adapter_tests_passed": 16,
+    "real_offline_verifier_tasks_passed": 4,
+    "owned_path_ruff_findings": 0
+  },
+  "remaining_requirements": [
+    "Codex live coding compatibility unresolved: exit1, unclassified_process_failure, no HTTP status. Raw provider/auth logs were discarded; no evidence of a specific root cause. No further calls authorized.",
+    "Any further Codex diagnostic run requires a separately authorized plan and fresh budget/ledger; do not refresh or rotate credentials as part of diagnosis.",
+    "Full native baseline/candidate evaluation requires human terminal authority, exact pending proposal, model/runtime/auth configuration, and a separately authorized budget (at most8 CLI task invocations per provider for this corpus)."
+  ]
+}

@@ -1,0 +1,187 @@
+{
+  "durable_states": {
+    "applied": 4704,
+    "deferred": 0,
+    "failed": 0,
+    "quarantined": 13,
+    "unknown": 0,
+    "unverified": 0
+  },
+  "engine_version": "0.62.29",
+  "evidence_gaps": [
+    "No transport was contacted; a banked fresh-stream cursor is unproven.",
+    "The database backup contains no contemporaneous memory, file-map, pending or skill file snapshot; full portable state parity is unproven."
+  ],
+  "first_pass": {
+    "applied": 4698,
+    "deferred": 6,
+    "duplicate": 0,
+    "failed": 0,
+    "may_have_applied": 0,
+    "quarantined": 13,
+    "skipped": 0,
+    "staged": 85,
+    "unknown": 0,
+    "unverified": 0
+  },
+  "format": "lore-sync-replay-evidence",
+  "idempotent_database_and_log": true,
+  "issue112_success_gate": false,
+  "mode": "offline-retained-database",
+  "offline_replay_gate": false,
+  "portable_database": {
+    "destination": {
+      "assertions": {
+        "count": 89,
+        "sha256": "a1abb4aa3580109f0dbaedff2cfa6ccd411fc989c4db9ad74fe33f62eca09d77"
+      },
+      "beliefs": {
+        "count": 2159,
+        "sha256": "008f79aeb1294ec54f870c75a1cc25f4e83a7504065f2653c1d3abc51deca5c5"
+      },
+      "dream_reviewed": {
+        "count": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "edges": {
+        "count": 210,
+        "sha256": "374b76b58712d9f816172297922d06b94541cf1010eb0494bbb9bb876a2a7272"
+      },
+      "evidence": {
+        "count": 2181,
+        "sha256": "cb966c673dbb25da017ab172b7874cecfa7b6c006195209c4ef012defec09ea6"
+      },
+      "messages": {
+        "count": 11477,
+        "sha256": "fc6e8fc73fa0b204aefaab0bdd3041f8c7d92b58c6ff38e1a7b22b162930bbbd"
+      },
+      "outcomes": {
+        "count": 2,
+        "sha256": "95e50d9514850050f4b5fc850fc38068b81841f27fab1b9b392783923bc98bc2"
+      },
+      "sessions": {
+        "count": 294,
+        "sha256": "f9040c3d5a16215f1adb38f57db632a46c6d5b0acc5afab76fdeafbffe323cb8"
+      }
+    },
+    "differences": {
+      "beliefs": {
+        "distinct_rows": {
+          "destination": {
+            "count": 2159,
+            "sha256": "008f79aeb1294ec54f870c75a1cc25f4e83a7504065f2653c1d3abc51deca5c5"
+          },
+          "matches": false,
+          "source": {
+            "count": 2159,
+            "sha256": "bba34a6b66926a0350ee066fd79b184fe91544a22ca2684f5af91ce8498e616f"
+          }
+        },
+        "field_multiset_differences": [
+          "writer"
+        ]
+      },
+      "evidence": {
+        "distinct_rows": {
+          "destination": {
+            "count": 2090,
+            "sha256": "87a7176111129c4bea2b3c2ca4d3f7c6e509fadf7f0147aeaf5dee6e769bfac8"
+          },
+          "matches": false,
+          "source": {
+            "count": 2090,
+            "sha256": "2d788b0ea0ddd2367acf5274c5103ea770c6faad3a2b013a2c6611809abc4373"
+          }
+        },
+        "field_multiset_differences": [
+          "project_key",
+          "note"
+        ]
+      },
+      "messages": {
+        "distinct_rows": {
+          "destination": {
+            "count": 11318,
+            "sha256": "c41a7845d8a9201e853ce88701bf8e72339e5f162aee3c728070216e3287804c"
+          },
+          "matches": false,
+          "source": {
+            "count": 11322,
+            "sha256": "e415c40db9604dc36ef82cd444b91983dc09ddb015d19f44a856f1a6d72fa180"
+          }
+        },
+        "field_multiset_differences": [
+          "session_id",
+          "project_key",
+          "timestamp",
+          "role",
+          "content"
+        ]
+      }
+    },
+    "matches": false,
+    "projection": "uid-semantic-v1",
+    "source": {
+      "assertions": {
+        "count": 89,
+        "sha256": "a1abb4aa3580109f0dbaedff2cfa6ccd411fc989c4db9ad74fe33f62eca09d77"
+      },
+      "beliefs": {
+        "count": 2159,
+        "sha256": "bba34a6b66926a0350ee066fd79b184fe91544a22ca2684f5af91ce8498e616f"
+      },
+      "dream_reviewed": {
+        "count": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "edges": {
+        "count": 210,
+        "sha256": "374b76b58712d9f816172297922d06b94541cf1010eb0494bbb9bb876a2a7272"
+      },
+      "evidence": {
+        "count": 2181,
+        "sha256": "e78e3607287a83c5cf9ca9fd1e119b5dcd288a66f47d072dd15c537248d15e5e"
+      },
+      "messages": {
+        "count": 11481,
+        "sha256": "c678c22eb1f1424f2af636bd6306aeeb03524b7f041727091c5a91c2724029ce"
+      },
+      "outcomes": {
+        "count": 2,
+        "sha256": "95e50d9514850050f4b5fc850fc38068b81841f27fab1b9b392783923bc98bc2"
+      },
+      "sessions": {
+        "count": 294,
+        "sha256": "f9040c3d5a16215f1adb38f57db632a46c6d5b0acc5afab76fdeafbffe323cb8"
+      }
+    }
+  },
+  "repeat": {
+    "applied": 0,
+    "deferred": 0,
+    "duplicate": 4717,
+    "failed": 0,
+    "may_have_applied": 0,
+    "quarantined": 0,
+    "skipped": 0,
+    "staged": 0,
+    "unknown": 0,
+    "unverified": 0
+  },
+  "replay_performed": true,
+  "signature_gate": true,
+  "signed_history_preserved": true,
+  "source": {
+    "log_sha256": "3fa9f463871f488c058a758bdc17c775383bf1f22af372bcbe094bb0f3fb23d4",
+    "operations": 4717,
+    "sha256": "e73ed19c1a6e8b097a8bcb0e9258ab4e34e17e28b71495defc020780d9118baf",
+    "unchanged": true,
+    "unverified_macs": 0,
+    "verified_macs": 4717
+  },
+  "transport": {
+    "banked_cursor": null,
+    "exercised": false
+  },
+  "version": 1
+}

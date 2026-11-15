@@ -1,0 +1,106 @@
+{
+  "kind": "sanitized-private-hub-maintenance-evidence",
+  "completed_run_date_utc": "2026-11-15",
+  "acceptance": {
+    "functional_convergence": "passed",
+    "strict_tailnet_control_and_tunnel": "not_verified",
+    "completed_run_transport": "private_lan_ssh_forward",
+    "ssh_server_is_tailnet": false,
+    "verifier_tailnet_hardening_postdates_completed_run": true
+  },
+  "tested_versions": {
+    "native_cli": "0.62.29",
+    "native_cli_sha256": "181d7416827c56bf96b2a559a93205363bef7f735e26e102837ecc75201b2180",
+    "hub": "0.2.0",
+    "hub_source_commit": "8ddb0a032a4b23e25df3a03762e6d427285b477d"
+  },
+  "source_proof": {
+    "staged_files_verified": 52,
+    "installed_package_files_verified": 12,
+    "matches_expected_commit_archive": true,
+    "archive_sha256": "1e26d4521d7f32c8af90abe5d7e30302e22fbfbb863072b3d63f3e22f2d31e32"
+  },
+  "functional_results": {
+    "scope": "synthetic_user_memory",
+    "native_commands": 18,
+    "native_commands_exit_zero": true,
+    "all_native_stderr_empty": true,
+    "health_status": 200,
+    "unauthenticated_get_ops_status": 401,
+    "unauthenticated_post_ops_status": 401,
+    "A_push_accepted": 2,
+    "B_bootstrap_applied": 2,
+    "B_push_accepted": 2,
+    "A_pull_applied": 2,
+    "exact_fixture_facts": 4,
+    "curated_files": 1,
+    "curated_byte_identical": true,
+    "independently_verified_signed_ops_per_store": 4,
+    "failed": 0,
+    "unverified": 0,
+    "deferred": 0,
+    "banked_cursors": {
+      "A": {
+        "pushed_seq": 2,
+        "pulled_cursor": "4"
+      },
+      "B": {
+        "pushed_seq": 4,
+        "pulled_cursor": "2"
+      }
+    },
+    "repeat": {
+      "A": {
+        "forced_replay_accepted": 0,
+        "forced_replay_duplicates": 2,
+        "ordinary_push_accepted": 0,
+        "ordinary_push_duplicates": 0,
+        "ordinary_pull_fetched": 0,
+        "ordinary_pull_applied": 0,
+        "unpushed": 0,
+        "unverified": 0,
+        "quarantined": 0,
+        "conflicts": 0
+      },
+      "B": {
+        "forced_replay_accepted": 0,
+        "forced_replay_duplicates": 2,
+        "ordinary_push_accepted": 0,
+        "ordinary_push_duplicates": 0,
+        "ordinary_pull_fetched": 0,
+        "ordinary_pull_applied": 0,
+        "unpushed": 0,
+        "unverified": 0,
+        "quarantined": 0,
+        "conflicts": 0
+      }
+    },
+    "ledger_curated_bytes_and_cursor_positions_stable_on_repeat": true
+  },
+  "cleanup_verified_after_completed_run": {
+    "containers_absent": true,
+    "volume_absent": true,
+    "networks_absent": true,
+    "client_fixture_roots_removed": true,
+    "ssh_forward_stopped": true,
+    "unrelated_database_container_unchanged": true,
+    "source_and_private_logs_retained": true
+  },
+  "later_status_check": {
+    "checked_at_utc": "2026-11-15T05:28:50.811535+00:00",
+    "fresh_remote_verification": false,
+    "pinned_tailnet_ssh_exit": 255,
+    "pinned_tailnet_ssh_timed_out": true,
+    "matching_local_forwards_remaining": 0,
+    "stack_recreated_during_followup": false
+  },
+  "original_receipt_sha256": {
+    "completed_run": "a1e62fb000d061a80f4ee643164acc4a23a875fc77dab5c7142ba95701f0e0ca",
+    "later_status_check": "01a14a15a29506e7a286152a8f25d61cb6d046921f585925e970d57e897b4f92"
+  },
+  "remaining_gaps": [
+    "No successful strict Tailnet-only control and tunnel convergence receipt.",
+    "Later Tailnet SSH timeout prevented fresh remote cleanup confirmation.",
+    "Synthetic user-memory results do not establish project mapping, pagination, retention, or real-data recovery."
+  ]
+}

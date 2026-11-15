@@ -267,6 +267,7 @@ pub fn seed(cfg: &Config, apply: bool) -> Result<Value> {
     if cfg.sync.key.is_none() {
         return Err(Error::Untrusted);
     }
+    let usage_preflight = crate::skills::sync_seed::skill_usage(cfg, false)?;
     let mut conn = store::connect(cfg)?;
     let machine = store::machine_id(&conn)?;
     let log = ops(&conn)?;
@@ -368,7 +369,7 @@ pub fn seed(cfg: &Config, apply: bool) -> Result<Value> {
         classes[class] =
             json!({"enabled":enabled(cfg,class),"candidates":n,"seeded":if apply{n}else{0}})
     }
-    let saved = if apply && !plan.is_empty() {
+    let saved = if apply && (!plan.is_empty() || usage_preflight["enabled"] == true) {
         Some(backup(cfg, &conn)?)
     } else {
         None
@@ -387,8 +388,17 @@ pub fn seed(cfg: &Config, apply: bool) -> Result<Value> {
         }
         tx.commit()?;
     }
+    drop(conn);
+    let usage = if apply {
+        crate::skills::sync_seed::skill_usage(cfg, true).map_err(|error| {
+            if !plan.is_empty() { Error::MayHaveApplied } else { error }
+        })?
+    } else { usage_preflight };
+    let usage_candidates = usage["candidates"].as_u64().ok_or(Error::Unavailable)?;
+    let usage_seeded = usage["seeded"].as_u64().ok_or(Error::Unavailable)?;
+    classes["skill_usage"] = usage;
     Ok(
-        json!({"machine_id":machine,"classes":classes,"total_candidates":plan.len(),"total_seeded":if apply{plan.len()}else{0},"applied":apply,"backup":saved}),
+        json!({"machine_id":machine,"classes":classes,"total_candidates":plan.len() as u64+usage_candidates,"total_seeded":(if apply{plan.len()}else{0}) as u64+usage_seeded,"applied":apply,"backup":saved}),
     )
 }
 fn belief_plan(conn: &Connection, log: &[Value], plan: &mut Vec<Descriptor>) -> Result<()> {

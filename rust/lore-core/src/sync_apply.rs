@@ -31,6 +31,7 @@ const CLASSES: &[&str] = &[
     "belief",
     "pending",
     "skill",
+    "skill_usage",
     "session",
     "transcript",
     "tabset",
@@ -216,7 +217,7 @@ fn disabled(cfg: &Config, class: &str) -> bool {
         "belief" => Some("beliefs"),
         "skill" => Some("skills"),
         "session" => Some("sessions"),
-        "memory" | "filemap" | "pending" => Some(class),
+        "memory" | "filemap" | "pending" | "skill_usage" => Some(class),
         _ => None,
     };
     !cfg.sync.enabled || name.is_some_and(|name| !cfg.sync.classes.contains(name))
@@ -1207,6 +1208,10 @@ fn dispatch(cfg: &Config, conn: &Connection, op: &Value) -> Result<Applied> {
         "session" => session(conn, op),
         "pending" => pending_op(cfg, op),
         "skill" => skill(cfg, conn, op),
+        "skill_usage" => {
+            crate::skills::usage_sync::apply_verified(cfg, conn, op)?;
+            Ok(Applied::Complete)
+        }
         "transcript" => transcript(cfg, conn, op),
         "tabset" | "worktree" => remote_record(conn, op),
         _ => Ok(Applied::Unknown),
@@ -1216,7 +1221,7 @@ fn dispatch(cfg: &Config, conn: &Connection, op: &Value) -> Result<Applied> {
 fn database_class(op: &Value) -> bool {
     matches!(
         op["class"].as_str(),
-        Some("belief" | "session" | "tabset" | "worktree")
+        Some("belief" | "session" | "tabset" | "worktree" | "skill_usage")
     )
 }
 fn state(conn: &Connection, op: &Value) -> Result<Option<i64>> {
@@ -1464,6 +1469,11 @@ pub fn retry_deferred(cfg: &Config) -> Result<usize> {
 pub fn approve(cfg: &Config, op: &Value, authority: &Authority) -> Result<()> {
     authority.require_review()?;
     validate_envelope(op)?;
+    // Human review may approve content, but cannot attest another machine's
+    // measured counter. Preserve the original proof without applying it.
+    if op["class"] == "skill_usage" && !verify_mac(op, cfg.sync.key.as_deref()) {
+        return Err(Error::Untrusted);
+    }
     if missing_required_belief_uid(op) {
         return Err(Error::InvalidRequest);
     }
