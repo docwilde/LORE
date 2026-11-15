@@ -10,6 +10,13 @@ than an outstanding branch stack.
 
 The deployment scope is a disposable private Tailscale test on
 `docwilde-workstation`; a permanent Hetzner deployment is outside this work.
+Functional convergence of four signed user-memory facts completed over LAN
+SSH, with owned-resource cleanup verified afterward. This does not satisfy
+the strict Tailnet-only control and tunnel gate: the later pinned Tailnet SSH
+check timed out, and no successful strict rerun or fresh remote cleanup check
+is established. The follow-up did not recreate the disposable stack. A
+[sanitized receipt](../../scripts/verify-private-hub-report.json) preserves
+the completed result and this remaining gap.
 See [the private hub test](../private-hub-test.md) and
 [maintenance work](maintenance.md) for current validation and remaining gates.
 The ten design decisions at the end are accepted with the documented

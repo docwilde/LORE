@@ -21,8 +21,10 @@ Status: implementation prepared for **0.62.30**, awaiting review and release.
   retained-source inspection, isolated replay, portable-state digests, repeat
   delivery and fresh-stream cursor checks.
 - [Private hub verifier](../private-hub-test.md): isolated synthetic stores,
-  source/version checks and owned-resource cleanup. Successful live convergence
-  remains a validation gate, not a deployment claim.
+  source/version checks and owned-resource cleanup. Functional convergence of
+  four signed facts passed over LAN SSH, with cleanup verified afterward.
+  The [sanitized receipt](../../scripts/verify-private-hub-report.json) records
+  that result separately from the remaining strict Tailnet-only gate.
 
 ## Outstanding acceptance gates
 
@@ -35,9 +37,12 @@ Status: implementation prepared for **0.62.30**, awaiting review and release.
   tool profile passes its probes, but live Codex coding attempts have failed.
   Claude's training-task adapter smoke passes. These results do not establish
   skill improvement or generalization.
-- **Private hub convergence needs a passing receipt.** The authorized target is
-  `docwilde-workstation` with private Tailscale access and disposable data.
-  Existing databases are excluded; a permanent Hetzner service is outside scope.
+- **Strict Tailnet-only hub acceptance remains open.** Functional convergence
+  passed over LAN SSH; control and tunneling over Tailnet have no passing
+  receipt. The later pinned Tailnet SSH check timed out, so it did not freshly
+  reconfirm remote cleanup. Cleanup was verified after the completed run, and
+  the follow-up did not recreate the disposable stack. Existing databases are
+  excluded; a permanent Hetzner service is outside scope.
 - **Codex hook migration requires UI trust.** Published LORE 0.62.29 is installed
   for Claude and Codex. Keep the working custom Codex hooks until the packaged
   hooks are discovered, enabled and trusted after restart; then remove only the

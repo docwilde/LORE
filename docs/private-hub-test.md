@@ -1,9 +1,19 @@
 # Disposable private hub convergence check
 
+Functional convergence completed over LAN SSH on 2026-11-15 UTC: four signed
+synthetic user-memory facts converged exactly, and owned-resource cleanup was
+verified afterward. Strict Tailnet-only acceptance remains open. The later
+pinned Tailnet control path timed out; no successful strict rerun or fresh
+remote cleanup verification is established. The follow-up did not recreate
+the disposable stack. See the [sanitized evidence summary](../scripts/verify-private-hub-report.json).
+
 `scripts/verify-private-hub.py` checks an already running, disposable Docker
-Compose hub over a literal Tailscale IP. It uses the installed native `lore-rs`
-binary and Python's standard library. It does not build the client, invoke a
-provider, use real LORE state, or change client configuration.
+Compose hub using the installed native `lore-rs` binary and Python's standard
+library. Its frozen route guard now pins control and tunnel SSH to the literal
+Tailnet IP from the API URL and requires matching remote connection proof.
+That hardening followed the recorded LAN run; the earlier passing receipt
+does not validate the current strict route. The verifier does not build the
+client, invoke a provider, use real LORE state, or change client configuration.
 
 The verifier checks four signed synthetic user-memory additions across two
 isolated `LORE_ROOT`s: A writes and pushes two facts, B bootstraps and writes two
@@ -43,18 +53,21 @@ authenticate its Git origin.
 
 ## Run
 
-For the authorized maintenance test:
+To rerun the strict acceptance gate, provision only an explicitly authorized
+disposable stack and replace the placeholders below. This example does not
+record private endpoints or local evidence locations:
 
 ```sh
 python3 scripts/verify-private-hub.py \
-  --ssh-host docwilde-workstation \
-  --remote-dir /tmp/lore-hub-maintenance-01a1dd \
-  --project loremaintenance01a1dd \
-  --volume loremaintenance01a1dd_pgdata \
-  --api-url http://100.104.12.127:18089 \
+  --ssh-host "<authorized-ssh-alias>" \
+  --remote-dir "/tmp/<disposable-source-directory>" \
+  --project "<disposable-project>" \
+  --volume "<disposable-project>_pgdata" \
+  --api-url "http://<tailnet-ip>:<disposable-port>" \
   --source-sha 8ddb0a032a4b23e25df3a03762e6d427285b477d \
-  --source-archive /tmp/lore-hub-maintenance-source.tar.gz \
-  --report-dir /tmp/lore-private-hub-evidence-01a1dd-verified \
+  --source-archive "/tmp/<trusted-source-archive>.tar.gz" \
+  --report-dir "/tmp/<new-private-report-directory>" \
+  --preserve-container "<unrelated-database-container>" \
   --ssh-tunnel \
   --cleanup
 ```
@@ -80,20 +93,23 @@ nonterminal writes stage proposals. The verifier rejects staged fixture writes
 and requires their pending directories to remain empty; it never changes the
 real write gate or memory files.
 
-Omit `--ssh-tunnel` to require direct Tailnet HTTP. With `--ssh-tunnel`, the
-verifier first records whether direct HTTP works, checks that the authorized
-SSH server has a private address, and opens a temporary SSH forward bound only
-to local `127.0.0.1`. Native clients then reach the Tailnet-bound API through
-that forward. The report records whether SSH itself uses a Tailnet address;
-a LAN SSH route is not reported as Tailnet transport. The forward is stopped
-at exit. In this environment the authorized alias used a private LAN address,
-while direct HTTP and SSH to the Tailnet IP timed out. A successful forwarded
-convergence check does not establish direct Tailnet reachability. No routing
-or firewall rules were changed.
+Both modes now require Tailnet control SSH before Docker preflight. The
+verifier derives `HostName` from the API URL, retains the authorized alias as
+`HostKeyAlias`, requires `StrictHostKeyChecking=yes`, disables existing SSH
+multiplexing, and checks that remote `SSH_CONNECTION` terminates at that exact
+Tailnet IP. It rejects a LAN address instead of falling back to the alias route.
+
+Omit `--ssh-tunnel` to require direct Tailnet HTTP as well. With `--ssh-tunnel`,
+the verifier records the direct HTTP result and opens a temporary SSH forward
+bound only to local loopback, using the same pinned Tailnet SSH options.
+Native clients then reach the API through that forward, which is stopped at
+exit. The historical passing run used LAN SSH; direct Tailnet HTTP and the
+later pinned Tailnet SSH control path timed out. No routing or firewall rules
+were changed, and the strict guard was not relaxed to turn that gap into a pass.
 
 ## Evidence and cleanup
 
-The private report directory contains `report.json` and scrubbed
+On a new run, the private report directory receives `report.json` and scrubbed
 `service-logs.txt`. Reports contain selected counters, content hashes, source
 proof, and Docker metadata, without raw memory, tokens, keys, Docker
 environments, or connection strings. Scrubbed service logs are also retained
@@ -105,10 +121,12 @@ With `--cleanup`, the verifier runs the explicitly named compose project's
 `down --volumes` in a `finally` path after ownership has been proven, including
 when a later assertion fails. It verifies that the project's containers,
 dedicated volume, and networks are absent and that the preserved unrelated
-database container is unchanged. Source files, compose backups, images, and logs are
-retained. If project ownership cannot be proven, it refuses automatic cleanup
+database container is unchanged. Source files, compose backups, images, and
+logs are retained. If project ownership cannot be proven, it refuses automatic cleanup
 and reports the reason. Without `--cleanup`, it intentionally leaves the
 authorized project running for diagnosis.
+Retention here describes the cleanup scope; artifacts under `/tmp` are not
+durable across reboots.
 
 After a failed run that completed cleanup, recreate only the same disposable
 project from its retained compose file before rerunning; use a fresh report
@@ -118,11 +136,13 @@ claim.
 
 ## Recorded maintenance result
 
-The 2026-11-15 UTC run passed using installed `lore-rs 0.62.29` and hub source
+The completed 2026-11-15 UTC functional run passed using installed
+`lore-rs 0.62.29` and hub source
 `8ddb0a032a4b23e25df3a03762e6d427285b477d`. All 52 staged source files and 12
 installed package files matched the supplied commit archive. All 18 native
 commands exited zero with empty stderr. Health returned 200 and unauthenticated
-GET/POST operations returned 401 through the private SSH forward.
+GET/POST operations returned 401 through the LAN SSH forward. Control and
+tunneling were not over Tailnet in this run.
 
 | Check | Result |
 | --- | --- |
@@ -135,18 +155,28 @@ GET/POST operations returned 401 through the private SSH forward.
 | Ordinary repeat push / pull | No new operations or curated changes |
 | Banked A push / pull positions | 2 / 4, stable on repeat |
 | Banked B push / pull positions | 4 / 2, stable on repeat |
-| Cleanup | Project containers, networks, volume, client fixtures, and SSH forward removed |
-| Existing `lore-hub-postgres` | Same identity, running state, start time, and published ports |
+| Cleanup verified after this run | Project containers, networks, volume, client fixtures, and SSH forward removed |
+| Unrelated database | Same identity, running state, start time, and published ports |
+| Strict Tailnet-only control and tunnel | No passing receipt; later pinned SSH timed out |
 
 Push positions use local ledger sequence numbers; B had already imported two
 operations before its own writes. B's pull position remains 2 because its own
 hub operations are excluded. The stable positions and empty repeat pulls
 confirm settled cursors for this scenario.
 
-Scrubbed evidence is in
-`/tmp/lore-private-hub-evidence-01a1dd-verified/report.json` and
-`service-logs.txt`; the source directory and per-run remote logs remain on the
-workstation. Earlier failed-route and verifier-setup reports were preserved in
-their separate report directories. Direct Tailnet HTTP and SSH timed out;
-the passing result establishes convergence through the authorized private LAN
-SSH alias to the Tailnet-bound API, not direct Tailnet connectivity.
+The [sanitized report](../scripts/verify-private-hub-report.json) retains exact
+versions, source checks, convergence counters, stable cursors, and the cleanup
+receipt without private endpoints, credentials, raw memory, or logs. Original
+reports, earlier failed-route receipts, and scrubbed logs were preserved during
+the maintenance work. The original `/tmp` receipts are no longer available
+after reboot; the repository JSON is the retained sanitized summary. Its
+`original_receipt_sha256` values identify the former receipts and cannot now
+be rechecked against those missing files. These historical results do not
+constitute a fresh verification of the strict verifier or remote state.
+
+The later status check at 2026-11-15 05:28:50 UTC found no matching local SSH
+forwards. Pinned Tailnet SSH exited 255 after timing out, so fresh remote
+confirmation was unavailable. The last verified remote cleanup remains the
+completed functional run's receipt; the follow-up did not recreate the stack.
+Functional convergence and cleanup verified then are completed results.
+Acceptance with both control and tunnel over Tailnet remains pending.
