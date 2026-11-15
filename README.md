@@ -269,11 +269,11 @@ and interoperability test oracle.
 
 ## Reference
 
-- **Manual** — every command, config variable, hook, and store mechanics: [`docs/manual.md`](docs/manual.md)
+- **Manual** — commands, configuration, hooks, and store mechanics: [`docs/manual.md`](docs/manual.md)
 - **Maintenance** — [large pending queues](docs/pending-pages.md), [retention and reviewed snapshot cleanup](docs/retention.md), and [optional skill usage sync](docs/skill-usage-sync.md)
 - **Design rationale** — [`docs/user-model-channel-separation.md`](docs/user-model-channel-separation.md), [`docs/memory-proposal-quality.md`](docs/memory-proposal-quality.md), [`docs/write-gate.md`](docs/write-gate.md)
 - **Sync** — the wire contract in [`docs/sync-protocol.md`](docs/sync-protocol.md), the design and merge rules in [`docs/plans/sync.md`](docs/plans/sync.md)
-- **[CHANGELOG.md](CHANGELOG.md)** — one line per release, newest first
+- **[CHANGELOG.md](CHANGELOG.md)** — release notes, newest first
 
 ## Lineage
 
