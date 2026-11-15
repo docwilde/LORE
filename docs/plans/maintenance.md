@@ -1,6 +1,7 @@
 # Memory maintenance work
 
-Status: implementation prepared for **0.62.30**, awaiting review and release.
+Status: maintenance features implemented in **0.62.30**. Outstanding acceptance
+work remains listed below.
 
 ## Implemented
 
@@ -57,6 +58,6 @@ peer review. Native, Python, interoperability and launcher checks validate
 the code paths; live reports retain their separate acceptance results. No
 verification result waives signature, exact-review or parity gates.
 
-The review branch contains separate commits by concern. A draft PR records
-the latest validation and remaining gates. Merge, release and a permanent
-deployment require their own explicit action.
+[PR #138](https://github.com/docwilde/LORE/pull/138) records the commits by concern,
+validation and remaining acceptance work for 0.62.30. A permanent hub deployment
+remains outside this release.

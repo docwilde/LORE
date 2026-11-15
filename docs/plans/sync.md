@@ -1,6 +1,6 @@
 # One memory on every machine: sync through an op log and a hub — specification
 
-Status: **core sync shipped; maintenance extensions prepared for 0.62.30**.
+Status: **core sync shipped; maintenance extensions implemented in 0.62.30**.
 LORE provides portable project identity, signed operation logs, merge and
 quarantine rules, hub clients, direct peers and offline transfer. The private
 `docwilde/lore-hub` repository contains the API, local Compose deployment,
