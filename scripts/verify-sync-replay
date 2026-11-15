@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/lore-recovery-target}"
+if [[ "${1:-}" == "--transport" ]]; then
+    exec env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
+        cargo run --manifest-path "$repo_dir/Cargo.toml" --locked --offline --quiet \
+        --example verify-sync-replay -- "$@"
+fi
+exec cargo run --manifest-path "$repo_dir/Cargo.toml" --locked --offline --quiet \
+    --example verify-sync-replay -- "$@"
