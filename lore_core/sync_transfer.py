@@ -28,7 +28,7 @@ __all__ = ["PORTABLE_CLASSES", "export_bundle", "import_bundle",
 # Session payloads carry local cwd; transcripts, tabsets and worktrees carry
 # local paths or runtime state. Machine-scoped memory never enters sync_ops.
 # Keep the boundary explicit even if future classes become enabled in config.
-PORTABLE_CLASSES = frozenset({"memory", "filemap", "belief", "pending", "skill"})
+PORTABLE_CLASSES = frozenset({"memory", "filemap", "belief", "pending", "skill", "skill_usage"})
 FORMAT = "lore-manual-transfer"
 VERSION = 1
 MAX_BUNDLE_BYTES = 128 * 1024 * 1024

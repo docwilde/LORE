@@ -14,6 +14,10 @@ use std::{
 };
 const MAX_SKILLS: usize = 400;
 const MAX_SOURCE: usize = 1024 * 1024;
+#[path = "sync_seed.rs"]
+pub mod sync_seed;
+#[path = "skill_usage_sync.rs"]
+pub mod usage_sync;
 pub fn overlap_tokens(text: &str) -> BTreeSet<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '_')
@@ -91,6 +95,10 @@ pub fn learned(cfg: &Config) -> Result<BTreeMap<String, String>> {
     Ok(result)
 }
 pub fn load_usage(cfg: &Config) -> Result<Value> {
+    usage_sync::visible(cfg, load_local_usage(cfg)?)
+}
+/// The on-disk ledger is local evidence. Imported counters never enter it.
+pub fn load_local_usage(cfg: &Config) -> Result<Value> {
     let path = cfg.root.join("skill_usage.json");
     if !path.try_exists()? {
         return Ok(json!({}));
@@ -262,7 +270,8 @@ pub fn record_outcomes(
     let learned = learned(cfg)?;
     let path = cfg.root.join("skill_usage.json");
     let _lock = files::Locks::acquire(&cfg.root, &[path], cfg.timeout)?;
-    let mut usage = load_usage(cfg)?;
+    let mut usage = load_local_usage(cfg)?;
+    let before = usage.clone();
     let head = repo_head(cwd);
     let mut recorded = 0;
     for outcome in data["skill_outcomes"]
@@ -318,7 +327,7 @@ pub fn record_outcomes(
         recorded += 1;
     }
     if recorded > 0 {
-        save_usage(cfg, &usage)?;
+        usage_sync::save_local(cfg, &before, &usage)?;
     }
     Ok(recorded)
 }
@@ -337,7 +346,8 @@ pub fn record_usage(
     }
     let path = cfg.root.join("skill_usage.json");
     let _lock = files::Locks::acquire(&cfg.root, &[path], cfg.timeout)?;
-    let mut usage = load_usage(cfg)?;
+    let mut usage = load_local_usage(cfg)?;
+    let before = usage.clone();
     let mut changed = false;
     for message in messages {
         if message.role != "tool" {
@@ -360,12 +370,15 @@ pub fn record_usage(
         changed = true;
     }
     if changed {
-        save_usage(cfg, &usage)?;
+        usage_sync::save_local(cfg, &before, &usage)?;
     }
     Ok(())
 }
 pub fn update_admitted(action: &str, row: &Value) -> bool {
-    let n = count(row, "ok").saturating_add(count(row, "fail"));
+    // A track record imported from another reviewer is useful for ranking,
+    // but cannot satisfy the local graduated evidence gate.
+    let proof = row.get("_lore_local_counts").unwrap_or(row);
+    let n = count(proof, "ok").saturating_add(count(proof, "fail"));
     if action == "retire" {
         return n >= 3;
     }

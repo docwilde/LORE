@@ -14,7 +14,7 @@ const RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const DRAIN_BYTES: usize = 128 * 1024 * 1024;
 const MAX_OPS: usize = 100_000;
 const BUNDLE_BYTES: usize = 128 * 1024 * 1024;
-const PORTABLE: &[&str] = &["memory", "filemap", "belief", "pending", "skill"];
+const PORTABLE: &[&str] = &["memory", "filemap", "belief", "pending", "skill", "skill_usage"];
 
 pub struct TransportError {
     pub status: u16,
@@ -920,7 +920,7 @@ pub fn export_bundle(cfg: &Config, path: &Path) -> Result<Value> {
         .map(|s| s.to_string())
         .collect::<BTreeSet<_>>();
     let mut stmt = conn.prepare(&format!(
-        "{SELECT} WHERE applied IN (0,1,5) AND class IN ('memory','filemap','belief','pending','skill') ORDER BY lamport,machine_id,machine_seq LIMIT 100001"
+        "{SELECT} WHERE applied IN (0,1,5) AND class IN ('memory','filemap','belief','pending','skill','skill_usage') ORDER BY lamport,machine_id,machine_seq LIMIT 100001"
     ))?;
     let mut ops = Vec::new();
     let mut budget = 0;
