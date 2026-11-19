@@ -30,6 +30,9 @@ and relations between beliefs do not turn them into approved facts.
 
 ## What you get
 
+[LORE 0.62.31](https://github.com/docwilde/LORE/releases/tag/v0.62.31) documents
+shared memory for Gemini sessions through Google Antigravity in DOXA.
+
 [LORE 0.62.30](https://github.com/docwilde/LORE/releases/tag/v0.62.30) adds
 paged pending review, protected cleanup, and optional shared skill usage.
 
@@ -100,6 +103,10 @@ distribution. Keep the checkout and LORE store in the distribution's Linux
 filesystem (for example, under `~/`), then follow the install steps above.
 This WSL 2 setup has not been verified in LORE CI; see the
 [platform notes](docs/manual.md#platform-support) before relying on it.
+
+### Antigravity in DOXA
+
+[DOXA](https://github.com/docwilde/doxa/blob/main/docs/antigravity.md) connects to Google Antigravity on native Linux. Gemini sessions in DOXA receive LORE memory with their first prompt and contribute scrubbed transcripts to local LORE session search. Use `DOXA_LORE=0` to disable memory injection and indexing for a session.
 
 ### Codex
 
