@@ -101,6 +101,10 @@ filesystem (for example, under `~/`), then follow the install steps above.
 This WSL 2 setup has not been verified in LORE CI; see the
 [platform notes](docs/manual.md#platform-support) before relying on it.
 
+### Antigravity in DOXA
+
+[DOXA](https://github.com/docwilde/doxa/blob/main/docs/antigravity.md) connects to Google Antigravity on native Linux. Antigravity sessions receive LORE memory with their first prompt and contribute scrubbed transcripts to local LORE session search. Use `DOXA_LORE=0` to disable memory injection and indexing for a session.
+
 ### Codex
 
 LORE supports Codex through the portable [`plugin.json`](plugin.json) and

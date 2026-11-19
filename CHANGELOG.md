@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.62.31 — 2026-11-19
+
+- Document LORE memory injection and local transcript indexing for Antigravity sessions in DOXA.
+- Correct README command and integration references.
+
 ## 0.62.30 — 2026-11-14
 
 **Bounded memory maintenance**
