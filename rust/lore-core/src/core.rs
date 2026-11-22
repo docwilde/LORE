@@ -30,6 +30,7 @@ impl Core {
             "codegraph_snapshot_read_v1",
             "codegraph_snapshot_store_v1",
             "diagnostic_trace_capture_v1",
+            "tool_evidence_record_v1",
             "diagnostic_trace_read_v1",
             "diagnostic_retention_plan_v1",
             "diagnostic_retention_apply_v1",
@@ -80,6 +81,7 @@ impl Core {
         let config = &self.config;
         let auth = &self.authority;
         let value = match req["op"].as_str().ok_or(Error::InvalidRequest)? {
+            "tool_evidence_record_v1" => crate::tool_evidence::record(config, req, "doxa")?,
             "diagnostic_trace_capture_v1" => crate::diagnostics::capture(config, req)?,
             "diagnostic_trace_read_v1" => crate::diagnostics::show(config, req)?,
             "diagnostic_retention_plan_v1" => crate::retention::plan(config, req)?,

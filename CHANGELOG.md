@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.62.32 — 2026-11-21
+
+- Record provider-reported tool outcomes by default in Claude Code, Codex, Antigravity and DOXA.
+- Store deduplicated observations locally and let reviewers link them to beliefs and exact learned recipe revisions.
+- Set `LORE_TOOL_EVIDENCE=0` to turn recording off.
+
 ## 0.62.31 — 2026-11-19
 
 - Document LORE memory injection and local transcript indexing for Antigravity sessions in DOXA.

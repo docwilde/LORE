@@ -34,6 +34,8 @@ Diagnostics: trace capture --transcript FILE --session-id ID --engine claude|cod
              trace retention-plan|retention-apply --json REVIEWED_PLAN
 Administration: setup teardown reset project move config show|set|unset
 Sync: sync status|health|whoami|push|pull|bootstrap|serve|export|import|classes|login|resign|seed
+Tool evidence: tool-evidence list [--belief ID | --recipe NAME] [--before ID] [--limit N]
+               tool-evidence link OBSERVATION_ID (--belief ID | --recipe NAME)
 Integration: mcp hook
 
 Use --json '{...}' for structured arguments; --cwd defaults to this directory.
@@ -260,6 +262,9 @@ fn validate_flags(group: &str, sub: &str, req: &Value) -> Result<()> {
         ("consult"|"ask"|"dialectic",_) => "query limit",
         ("outcome",_) => "belief_id event source note",
         ("skills",_) => "prompt limit pid suite sha256 kind",
+        ("tool-evidence", "hook") => "engine event",
+        ("tool-evidence", "list") => "belief recipe before limit",
+        ("tool-evidence", "link") => "belief recipe",
         ("trace",_) => "transcript session_id engine sha256 policy plan_sha256 plan",
         ("codegraph", "cleanup-plan"|"cleanup-apply") => "plan_sha256 plan reviewed_orphan_keys",
         ("dream",_) => "dry_run engine",
@@ -331,7 +336,12 @@ pub fn run(args: &[String]) -> Result<()> {
     if matches!(args[0].as_str(), "--version" | "version") {
         return output(json!(env!("CARGO_PKG_VERSION")));
     }
-    let cfg = Config::from_env(Duration::from_secs(3))?;
+    let timeout = if args[0] == "tool-evidence" && args.get(1).is_some_and(|arg| arg == "hook") {
+        Duration::from_millis(600)
+    } else {
+        Duration::from_secs(3)
+    };
+    let cfg = Config::from_env(timeout)?;
     if args[0] == "hook" {
         return hook(&cfg, &args[1..]);
     }
@@ -353,6 +363,7 @@ pub fn run(args: &[String]) -> Result<()> {
             | "project"
             | "trace"
             | "codegraph"
+            | "tool-evidence"
     );
     let (sub, tail) = if grouped && args.get(1).is_some_and(|s| !s.starts_with('-')) {
         (args[1].as_str(), &args[2..])
@@ -371,6 +382,28 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     let mut core = Core::new(cfg.clone(), auth.clone());
     let value = match (group, sub) {
+        ("tool-evidence", "hook") if p.is_empty() => {
+            if crate::tool_evidence::enabled(&cfg) {
+                let mut raw = Vec::new();
+                io::stdin()
+                    .lock()
+                    .take(crate::MAX_FRAME_BYTES as u64 + 1)
+                    .read_to_end(&mut raw)?;
+                if raw.len() > crate::MAX_FRAME_BYTES {
+                    return Err(Error::TooLarge);
+                }
+                let input = serde_json::from_slice(&raw).map_err(|_| Error::InvalidRequest)?;
+                let engine = req["engine"].as_str().ok_or(Error::InvalidRequest)?;
+                let event = req["event"].as_str().ok_or(Error::InvalidRequest)?;
+                crate::tool_evidence::hook(&cfg, engine, event, &input)?;
+            }
+            json!({})
+        }
+        ("tool-evidence", "list") if p.is_empty() => crate::tool_evidence::list(&cfg, &req)?,
+        ("tool-evidence", "link") if p.len() == 1 => {
+            req["observation_id"] = json!(p[0].parse::<i64>().map_err(|_| Error::InvalidRequest)?);
+            crate::tool_evidence::link(&cfg, &req, &auth)?
+        }
         ("trace", "retention-plan") => crate::retention::plan(&cfg, &req)?,
         ("trace", "retention-apply") => crate::retention::apply(&cfg, &req, &auth)?,
         ("codegraph", "cleanup-plan") => crate::codegraph_snapshot::cleanup_plan(&cfg, &req)?,

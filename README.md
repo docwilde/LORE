@@ -30,6 +30,10 @@ and relations between beliefs do not turn them into approved facts.
 
 ## What you get
 
+[LORE 0.62.32](https://github.com/docwilde/LORE/releases/tag/v0.62.32) records
+tool outcomes by default and lets reviewers link them to beliefs and learned
+recipes.
+
 [LORE 0.62.31](https://github.com/docwilde/LORE/releases/tag/v0.62.31) documents
 shared memory for Gemini sessions through Google Antigravity in DOXA.
 
@@ -46,6 +50,7 @@ paged pending review, protected cleanup, and optional shared skill usage.
   while preserving human review of each complete, exact proposal.
 - **Reviewed cleanup.** [Preview diagnostic retention and select orphaned
   codegraph snapshots](docs/retention.md) before applying a reviewed plan.
+- **Tool evidence.** LORE [captures reported tool outcomes](docs/tool-evidence.md) by default. Link relevant observations to beliefs and learned recipes.
 - **Learned skills.** Recipes carry outcome history and staged updates or retirement.
 - **Local skill experiments.** [Compare exact pending coding skills](docs/skill-evaluation.md)
   against frozen tests before human approval. The experimental subscription
@@ -111,7 +116,7 @@ This WSL 2 setup has not been verified in LORE CI; see the
 ### Codex
 
 LORE supports Codex through the portable [`plugin.json`](plugin.json) and
-its [startup and prompt hooks](codex/hooks/hooks.json). Enable the full plugin,
+its [startup, prompt and tool hooks](codex/hooks/hooks.json). Enable the full plugin,
 then review and trust its hooks with `/hooks` in Codex. Once trusted, the startup
 hook injects the shared user and current project snapshot at startup, resume,
 clear, compaction, and fork. Codex requires a new review when a hook changes; see its

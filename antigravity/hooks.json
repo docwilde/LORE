@@ -1,0 +1,17 @@
+{
+  "lore-tool-evidence": {
+    "enabled": true,
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ \"${LORE_TOOL_EVIDENCE:-1}\" != 0 ] && [ -z \"${LORE_SKIP:-}\" ]; then exec lore-rs tool-evidence hook --engine antigravity --event PostToolUse; else printf '%s\\n' '{}'; fi",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}

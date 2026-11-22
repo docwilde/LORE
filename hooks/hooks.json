@@ -47,6 +47,28 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ \"${LORE_TOOL_EVIDENCE:-1}\" != 0 ] && [ -z \"${LORE_SKIP:-}\" ]; then exec \"${CLAUDE_PLUGIN_ROOT}/bin/lore\" tool-evidence hook --engine claude --event PostToolUse; else printf '%s\\n' '{}'; fi",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ \"${LORE_TOOL_EVIDENCE:-1}\" != 0 ] && [ -z \"${LORE_SKIP:-}\" ]; then exec \"${CLAUDE_PLUGIN_ROOT}/bin/lore\" tool-evidence hook --engine claude --event PostToolUseFailure; else printf '%s\\n' '{}'; fi",
+            "timeout": 2
+          }
+        ]
+      }
     ]
   }
 }
