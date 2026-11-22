@@ -8,6 +8,7 @@ pub mod context;
 mod core;
 pub mod dream;
 pub mod diagnostics;
+mod tool_evidence;
 pub mod filemap;
 pub mod files;
 pub mod gate;

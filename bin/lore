@@ -49,7 +49,7 @@ fingerprint=$({ find "$root/rust/lore-core/src" -type f -exec sha256sum {} +; sh
 target=$cache/$fingerprint
 binary=$target/release/lore-rs
 if matches "$binary"; then exec "$binary" "$@"; fi
-if [ "${1:-}" = hook ]; then
+if [ "${1:-}" = hook ] || { [ "${1:-}" = tool-evidence ] && [ "${2:-}" = hook ]; }; then
   printf 'LORE native carrier is not installed; run the LORE setup command once.\n' >&2
   exit 1
 fi

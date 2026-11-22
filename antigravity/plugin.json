@@ -1,0 +1,6 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "lore-tool-evidence",
+  "version": "0.62.32",
+  "description": "Record reported tool outcomes in the local LORE evidence store."
+}
