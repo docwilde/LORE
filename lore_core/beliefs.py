@@ -8,7 +8,7 @@ them measure sameness; the outcomes
 ledger (record_outcome, outcome_counts, calibrated_confidence) is the ground
 truth the deriver's self-reported confidence gets calibrated against;
 dormant_sweep retires beliefs nobody has touched in a while; audit_check /
-cmd_audit machine-check a sample of active beliefs for free ledger rows;
+cmd_audit report path and token matches for a sample of active beliefs;
 interaction_model_lines renders the user-model subset for the context
 snapshot. `lore belief`, `lore outcome`, `lore audit`, `lore stats`.
 """
@@ -721,18 +721,17 @@ AUDIT_TOKEN = re.compile(r"\b[A-Za-z_]\w*=[^\s'\"]+|--[a-z][\w-]+")
 
 
 def audit_check(claim: str, cwd: str) -> tuple[str, str]:
-    """(verdict, detail): PASS / FAIL / UNCHECKABLE for one claim.
+    """(verdict, detail): MATCH / NO_MATCH / UNCHECKABLE for a claim fragment.
 
-    Path beats token when both appear — existence is the cheaper and stronger
-    signal. Trailing sentence punctuation is stripped from a matched path
+    Check the path first when both appear. Strip trailing sentence punctuation
+    from a matched path
     ("lives at /opt/x/y." would otherwise never exist). A token grep outside a
-    git repo (or with git missing) is UNCHECKABLE, never FAIL: absence of a
-    checkable repo says nothing about the claim.
+    git repo or with Git missing is UNCHECKABLE.
     """
     m = AUDIT_PATH.search(claim)
     if m:
         p = Path(os.path.expanduser(m.group(0).rstrip(".,;:")))
-        return ("PASS" if p.exists() else "FAIL", f"path {p}")
+        return ("MATCH" if p.exists() else "NO_MATCH", f"path {p}")
     m = AUDIT_TOKEN.search(claim)
     if m:
         token = m.group(0).rstrip(".,;:")
@@ -745,18 +744,15 @@ def audit_check(claim: str, cwd: str) -> tuple[str, str]:
         except (OSError, subprocess.TimeoutExpired):
             return ("UNCHECKABLE", f"git grep unavailable for {token!r}")
         if r.returncode == 0:
-            return ("PASS", f"git grep {token!r} in {cwd}")
+            return ("MATCH", f"git grep {token!r} in {cwd}")
         if r.returncode == 1:
-            return ("FAIL", f"git grep {token!r} in {cwd}: no match")
+            return ("NO_MATCH", f"git grep {token!r} in {cwd}: no match")
         return ("UNCHECKABLE", f"{cwd} is not a git repo")
     return ("UNCHECKABLE", "no machine-checkable fragment")
 
 
 def cmd_audit(args) -> int:
-    """Sample active beliefs and feed the ledger for free where a check is
-    mechanical; the printed layout doubles as a verification worksheet for
-    the UNCHECKABLE remainder (which records nothing — a claim no machine
-    can test must not be scored by one)."""
+    """Sample active beliefs and report heuristic matches for human review."""
     conn = db_connect()
     cwd = getattr(args, "cwd", None) or os.getcwd()
     rows = conn.execute(
@@ -764,23 +760,17 @@ def cmd_audit(args) -> int:
         " ORDER BY RANDOM() LIMIT ?",
         (args.sample,),
     ).fetchall()
+    legacy = conn.execute(
+        "SELECT count(*) FROM belief_outcomes WHERE source = 'audit'"
+    ).fetchone()[0]
+    conn.close()
     if not rows:
         print("no active beliefs to audit.")
-        return 0
-    recorded = 0
     for bid, subject, claim, conf, _status in rows:
         verdict, detail = audit_check(claim, cwd)
         print(f"[{bid}] ({subject}, conf {conf:.2f}) {claim}")
         print(f"      {verdict} — {detail}")
-        if verdict == "PASS":
-            record_outcome(conn, bid, "confirmed", "audit", note=detail)
-            recorded += 1
-        elif verdict == "FAIL":
-            record_outcome(conn, bid, "stale", "audit", note=detail)
-            recorded += 1
-    conn.commit()
-    print(f"\naudited {len(rows)} belief(s), recorded {recorded} outcome(s);"
-          " UNCHECKABLE records nothing.")
+    print(f"\naudited {len(rows)} belief(s). Legacy audit outcomes: {legacy}.")
     return 0
 
 
@@ -813,7 +803,7 @@ def cmd_stats(args) -> int:
         # exactly the overtrust this ledger exists to end.
         print(f"!!! UNCALIBRATED — n={total}, display gate at 100 !!!")
         print("!!! per-bucket precision below is anecdote, not a curve — keep"
-              " recording outcomes (lore outcome / lore audit) !!!")
+              " recording verified outcomes (lore outcome) !!!")
     return 0
 
 

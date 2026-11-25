@@ -649,7 +649,7 @@ pub fn run(args: &[String]) -> Result<()> {
         ("dream", _) => dream(&cfg, &req)?,
         ("status", _) => status(&cfg, &req)?,
         ("stats", _) => crate::standalone_ops::calibration(&cfg)?,
-        ("audit", _) => crate::standalone_ops::audit(&cfg, &req, &auth)?,
+        ("audit", _) => crate::standalone_ops::audit(&cfg, &req)?,
         ("crosscheck", _) => crate::standalone_ops::duplicates(&cfg, &req, true)?,
         ("belief", "dedup-report") => crate::standalone_ops::duplicates(&cfg, &req, false)?,
         ("graph", "derive") => {

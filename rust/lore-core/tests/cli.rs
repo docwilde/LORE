@@ -115,6 +115,74 @@ fn tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     rows
 }
 
+#[test]
+fn audit_reports_fragments_across_checkouts_without_recording_outcomes() {
+    let fixture = Fixture::new();
+    let mut args = ["audit", "--cwd", fixture.cwd.to_str().unwrap()];
+    let (ok, empty, error) = fixture.invoke(&args);
+    assert!(ok, "{error}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&empty).unwrap(),
+        json!({"rows":[],"legacy_audit_outcomes":0})
+    );
+    assert!(!fixture.root.exists());
+
+    let other = fixture.home.join("other");
+    fs::create_dir(&other).unwrap();
+    for repo in [&fixture.cwd, &other] {
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let flags = fixture.cwd.join("flags.txt");
+    fs::write(&flags, "run --fixture-feature\n").unwrap();
+    assert!(Command::new("git")
+        .args(["add", "flags.txt"])
+        .current_dir(&fixture.cwd)
+        .status()
+        .unwrap()
+        .success());
+
+    let cfg = config::Config::for_root(fixture.root.clone());
+    let conn = lore_core::store::connect(&cfg).unwrap();
+    conn.execute(
+        "INSERT INTO beliefs(id,subject,claim,confidence) VALUES(1,?1,?2,0.7),(2,?1,?3,0.7)",
+        [
+            format!("project:{}", config::project_slug(&fixture.cwd)),
+            "Run with --fixture-feature".into(),
+            format!("The config at {} sets replicas to 1000", flags.display()),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO belief_outcomes(belief_id,event,source) VALUES(1,'stale','audit')",
+        [],
+    )
+    .unwrap();
+
+    for (repo, expected) in [(&fixture.cwd, "MATCH"), (&other, "NO_MATCH")] {
+        args[2] = repo.to_str().unwrap();
+        let (ok, report, error) = fixture.invoke_env(&args, &[("PATH", "/usr/bin:/bin")]);
+        assert!(ok, "{error}");
+        let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+        assert_eq!(report["legacy_audit_outcomes"], 1);
+        let rows = report["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let verdict = |id: i64| &rows.iter().find(|row| row["id"] == id).unwrap()["verdict"];
+        assert_eq!(verdict(1), expected);
+        assert_eq!(verdict(2), "MATCH");
+    }
+    let outcomes: (i64, String, String) = conn
+        .query_row("SELECT count(*),event,source FROM belief_outcomes", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(outcomes, (1, "stale".into(), "audit".into()));
+}
+
 fn sync_reply(status: u16, body: serde_json::Value) -> (String, std::thread::JoinHandle<()>) {
     use std::io::{BufRead, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
