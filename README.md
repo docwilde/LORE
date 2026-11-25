@@ -159,6 +159,16 @@ The skill calls LORE's CLI against the shared store when a task needs recall.
 This skill-only setup does not install the automatic SessionStart hook;
 install the full Codex plugin for startup context injection.
 
+### oh-my-pi
+
+[`omp/lore.ts`](omp/lore.ts) injects the shared user and project snapshot with the first prompt and after clear and compaction. It reads context only: no transcript indexing, review or tool evidence. `LORE_RS` overrides the carrier path.
+
+```sh
+./task install
+mkdir -p ~/.omp/agent/extensions
+ln -s "$(pwd)/omp/lore.ts" ~/.omp/agent/extensions/lore.ts
+```
+
 ## Memory and graph context
 
 Claude Code refreshes curated memory on prompt submission when its content

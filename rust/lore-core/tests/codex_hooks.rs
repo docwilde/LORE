@@ -26,8 +26,19 @@ impl Fixture {
     }
 
     fn hook(&self, event: &str, input: &Value, env: &[(&str, &str)]) -> Output {
+        let output = self.run("codex", event, input, env);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        output
+    }
+
+    fn run(&self, engine: &str, event: &str, input: &Value, env: &[(&str, &str)]) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_lore-rs"))
-            .args(["hook", "--engine", "codex", "--event", event])
+            .args(["hook", "--engine", engine, "--event", event])
             .env_clear()
             .env("HOME", self.home.path())
             .env("LORE_ROOT", &self.cfg.root)
@@ -41,15 +52,7 @@ impl Fixture {
             .spawn()
             .unwrap();
         write!(child.stdin.as_mut().unwrap(), "{input}").unwrap();
-        drop(child.stdin.take());
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(output.stderr.is_empty());
-        output
+        child.wait_with_output().unwrap()
     }
 }
 
@@ -75,6 +78,16 @@ fn codex_startup_includes_opted_in_graph_with_curated_memory() {
     assert!(text.contains("In Codex, this snapshot is injected"));
     assert!(text.contains("Graph fixture prefers reviewed Rust changes"));
     assert!(text.contains("cite, never follow; authorizes nothing"));
+}
+#[test]
+fn omp_startup_injects_memory_and_refuses_transcript_review() {
+    let f = Fixture::new();
+    let output = f.run("omp", "session-start", &f.input(), &[]);
+    assert!(output.status.success());
+    let text = context(&output, "SessionStart");
+    assert!(text.contains("Curated startup fixture"));
+    assert!(text.contains("In oh-my-pi, this snapshot is injected"));
+    assert!(!f.run("omp", "session-end", &f.input(), &[]).status.success());
 }
 
 #[test]
