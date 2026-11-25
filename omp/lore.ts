@@ -16,10 +16,14 @@ export default function lore(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (event.reason === "revive") return;
 		const hookEvent = injected ? "prompt" : "session-start";
-		const context = await runHook(hookEvent, { cwd: ctx.cwd, prompt: event.prompt ?? "" });
+		// Set before awaiting: a compaction during the hook must still re-arm injection.
 		injected = true;
-		if (!context) return;
-		return { message: { customType: "lore", content: context, display: false } };
+		try {
+			const context = await runHook(hookEvent, { cwd: ctx.cwd, prompt: event.prompt ?? "" });
+			if (context) return { message: { customType: "lore", content: context, display: false } };
+		} catch (error) {
+			pi.logger.warn(`LORE ${hookEvent} hook failed: ${error}`);
+		}
 	});
 }
 
@@ -27,10 +31,15 @@ async function runHook(event: string, input: object): Promise<string | undefined
 	const child = Bun.spawn([CARRIER, "hook", "--engine", "omp", "--event", event], {
 		stdin: new Blob([JSON.stringify(input)]),
 		stdout: "pipe",
-		stderr: "ignore",
+		stderr: "pipe",
 		timeout: HOOK_TIMEOUT_MS,
 	});
-	const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
-	if (code !== 0 || !stdout.trim()) return undefined;
+	const [stdout, stderr, code] = await Promise.all([
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+		child.exited,
+	]);
+	if (code !== 0) throw new Error(`${CARRIER} exited ${code}: ${stderr.trim()}`);
+	if (!stdout.trim()) return undefined;
 	return JSON.parse(stdout).hookSpecificOutput?.additionalContext;
 }
