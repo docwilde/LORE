@@ -183,6 +183,49 @@ fn audit_reports_fragments_across_checkouts_without_recording_outcomes() {
     assert_eq!(outcomes, (1, "stale".into(), "audit".into()));
 }
 
+#[test]
+fn legacy_audit_outcomes_remain_in_the_ledger_without_admitting_steer() {
+    let fixture = Fixture::new();
+    let cfg = config::Config::for_root(fixture.root.clone());
+    let conn = lore_core::store::connect(&cfg).unwrap();
+    conn.execute(
+        "INSERT INTO beliefs(id,subject,claim,confidence) VALUES(1,'user','calibrationfixture',0.7)",
+        [],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "INSERT INTO belief_fts(belief_id,claim) VALUES(1,'calibrationfixture');
+         INSERT INTO belief_outcomes(belief_id,event,source) VALUES
+            (1,'confirmed','audit'),(1,'confirmed','audit'),(1,'stale','audit'),
+            (1,'confirmed','user'),(1,'confirmed','user');",
+    )
+    .unwrap();
+    let invoke = |args: &[&str]| -> serde_json::Value {
+        let (ok, report, error) = fixture.invoke(args);
+        assert!(ok, "{error}");
+        serde_json::from_str(&report).unwrap()
+    };
+    let consult = || invoke(&["consult", "calibrationfixture"]);
+    let report = consult();
+    assert_eq!(report["steer"], json!([]));
+    assert_eq!(report["cite_only"][0]["outcomes"], 2, "{report}");
+    let stats = invoke(&["stats"]);
+    assert_eq!(stats["ledger_total"], 5);
+    assert_eq!(stats["calibration_total"], 2);
+    assert_eq!(stats["legacy_audit_outcomes"], 3);
+    assert_eq!(stats["buckets"][0]["precision"], 1.0);
+
+    conn.execute(
+        "INSERT INTO belief_outcomes(belief_id,event,source) VALUES(1,'contradicted','user')",
+        [],
+    )
+    .unwrap();
+    let report = consult();
+    assert_eq!(report["steer"][0]["outcomes"], 3);
+    assert_eq!(report["steer"][0]["stale"], 0);
+    assert!((report["steer"][0]["calibrated_confidence"].as_f64().unwrap() - 0.68).abs() < 1e-9);
+}
+
 fn sync_reply(status: u16, body: serde_json::Value) -> (String, std::thread::JoinHandle<()>) {
     use std::io::{BufRead, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

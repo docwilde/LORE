@@ -153,8 +153,8 @@ def cmd_consult(args) -> int:
     q = " ".join(args.query)
     rows = conn.execute(
         "SELECT b.id, b.subject, b.claim, b.confidence, "
-        "(SELECT count(*) FROM belief_outcomes o WHERE o.belief_id = b.id) AS n_out, "
-        "(SELECT sum(CASE WHEN o.event='confirmed' THEN 1 ELSE 0 END) FROM belief_outcomes o WHERE o.belief_id = b.id) AS n_conf "
+        "(SELECT count(*) FROM belief_calibration_outcomes o WHERE o.belief_id = b.id) AS n_out, "
+        "(SELECT sum(CASE WHEN o.event='confirmed' THEN 1 ELSE 0 END) FROM belief_calibration_outcomes o WHERE o.belief_id = b.id) AS n_conf "
         "FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id "
         "WHERE belief_fts MATCH ? AND b.status = 'active' "
         "ORDER BY bm25(belief_fts) LIMIT ?", (fts_expr(q, " OR "), args.limit)).fetchall()

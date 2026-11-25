@@ -390,7 +390,7 @@ pub fn calibrated_confidence(prior: f64, confirms: u64, contradicts: u64) -> f64
     (prior * 2. + confirms as f64) / (2. + confirms as f64 + contradicts as f64)
 }
 pub fn outcome_counts(conn: &Connection, bid: i64) -> Result<(u64, u64, u64)> {
-    Ok(conn.query_row("SELECT coalesce(sum(event='confirmed'),0),coalesce(sum(event='contradicted'),0),coalesce(sum(event='stale'),0) FROM belief_outcomes WHERE belief_id=?",[bid],|r|Ok((sql_count(r,0)?,sql_count(r,1)?,sql_count(r,2)?)))?)
+    Ok(conn.query_row("SELECT coalesce(sum(event='confirmed'),0),coalesce(sum(event='contradicted'),0),coalesce(sum(event='stale'),0) FROM belief_calibration_outcomes WHERE belief_id=?",[bid],|r|Ok((sql_count(r,0)?,sql_count(r,1)?,sql_count(r,2)?)))?)
 }
 pub(crate) fn reinforce_in_transaction(
     cfg: &Config,
@@ -522,6 +522,7 @@ pub(crate) fn outcome_in_transaction(
         &json!({"uid":uid,"belief_uid":belief_uid,"event":event,"source":source,"session_id":sid,"agent":agent,"note":note}),
     )?;
     if event == "contradicted"
+        && source != "audit"
         && outcome_counts(conn, bid)?.1 >= 2
         && conn.execute(
             "UPDATE beliefs SET status='dormant',updated=? WHERE id=? AND status='active'",

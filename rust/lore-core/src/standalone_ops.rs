@@ -554,12 +554,15 @@ fn backfill_project(
 
 pub fn calibration(cfg: &Config) -> Result<Value> {
     let conn = store::connect(cfg)?;
-    let total = conn.query_row("SELECT count(*) FROM belief_outcomes", [], |r| {
-        r.get::<_, i64>(0)
-    })?;
-    let mut stmt=conn.prepare("SELECT round(b.confidence,1),count(DISTINCT b.id),count(o.id),coalesce(sum(o.event='confirmed'),0),coalesce(sum(o.event='contradicted'),0),coalesce(sum(o.event='stale'),0) FROM beliefs b LEFT JOIN belief_outcomes o ON o.belief_id=b.id GROUP BY round(b.confidence,1) ORDER BY round(b.confidence,1)")?;
+    let (total, legacy) = conn.query_row(
+        "SELECT count(*),count(CASE WHEN source='audit' THEN 1 END) FROM belief_outcomes",
+        [],
+        |r| Ok((beliefs::sql_count(r, 0)?, beliefs::sql_count(r, 1)?)),
+    )?;
+    let eligible = total.saturating_sub(legacy);
+    let mut stmt=conn.prepare("SELECT round(b.confidence,1),count(DISTINCT b.id),count(o.id),coalesce(sum(o.event='confirmed'),0),coalesce(sum(o.event='contradicted'),0),coalesce(sum(o.event='stale'),0) FROM beliefs b LEFT JOIN belief_calibration_outcomes o ON o.belief_id=b.id GROUP BY round(b.confidence,1) ORDER BY round(b.confidence,1)")?;
     let rows=stmt.query_map([],|r|{let c=r.get::<_,i64>(3)?;let x=r.get::<_,i64>(4)?;let s=r.get::<_,i64>(5)?;Ok(json!({"claimed":r.get::<_,f64>(0)?,"beliefs":r.get::<_,i64>(1)?,"outcomes":r.get::<_,i64>(2)?,"confirmed":c,"contradicted":x,"stale":s,"precision":if c+x+s>0{Some(c as f64/(c+x+s) as f64)}else{None}}))})?.collect::<std::result::Result<Vec<_>,_>>()?;
-    Ok(json!({"calibrated":total>=100,"ledger_total":total,"display_gate":100,"buckets":rows}))
+    Ok(json!({"calibrated":eligible>=100,"ledger_total":total,"calibration_total":eligible,"legacy_audit_outcomes":legacy,"display_gate":100,"buckets":rows}))
 }
 pub fn duplicates(cfg: &Config, req: &Value, cross: bool) -> Result<Value> {
     let threshold = req["threshold"]
@@ -1609,7 +1612,7 @@ pub fn consult(cfg: &Config, req: &Value, ask: bool) -> Result<Value> {
     let limit = cap(req, "limit", if ask { 12 } else { 8 }, 100)?;
     let conn = store::connect(cfg)?;
     let dormant = ask && cfg.disabled("LORE_INCLUDE_DORMANT");
-    let mut statement=conn.prepare("SELECT b.id,b.subject,b.claim,b.confidence,b.status,(SELECT count(*) FROM belief_outcomes o WHERE o.belief_id=b.id),(SELECT coalesce(sum(event='confirmed'),0) FROM belief_outcomes o WHERE o.belief_id=b.id),(SELECT coalesce(sum(event='contradicted'),0) FROM belief_outcomes o WHERE o.belief_id=b.id),(SELECT count(*) FROM belief_evidence e WHERE e.belief_id=b.id),(SELECT count(DISTINCT session_id) FROM belief_evidence e WHERE e.belief_id=b.id) FROM beliefs b JOIN belief_fts f ON b.id=f.belief_id WHERE belief_fts MATCH ? AND (status='active' OR (? AND status='dormant')) ORDER BY bm25(belief_fts) LIMIT ?")?;
+    let mut statement=conn.prepare("SELECT b.id,b.subject,b.claim,b.confidence,b.status,(SELECT count(*) FROM belief_calibration_outcomes o WHERE o.belief_id=b.id),(SELECT coalesce(sum(event='confirmed'),0) FROM belief_calibration_outcomes o WHERE o.belief_id=b.id),(SELECT coalesce(sum(event='contradicted'),0) FROM belief_calibration_outcomes o WHERE o.belief_id=b.id),(SELECT count(*) FROM belief_evidence e WHERE e.belief_id=b.id),(SELECT count(DISTINCT session_id) FROM belief_evidence e WHERE e.belief_id=b.id) FROM beliefs b JOIN belief_fts f ON b.id=f.belief_id WHERE belief_fts MATCH ? AND (status='active' OR (? AND status='dormant')) ORDER BY bm25(belief_fts) LIMIT ?")?;
     let mut cursor = statement.query(params![expression, dormant, limit as i64])?;
     let mut budget = 8 * 1024 * 1024;
     let mut steer = Vec::new();

@@ -649,9 +649,10 @@ def record_outcome(conn: sqlite3.Connection, belief_id: int, event: str, source:
             "uid": outcome_uid, "belief_uid": row[1], "event": event, "source": source,
             "session_id": session_id, "agent": agent_val, "note": note_text,
         })
-    if event == "contradicted":
+    if event == "contradicted" and source != "audit":
         n = conn.execute(
-            "SELECT count(*) FROM belief_outcomes WHERE belief_id = ? AND event = 'contradicted'",
+            "SELECT count(*) FROM belief_calibration_outcomes"
+            " WHERE belief_id = ? AND event = 'contradicted'",
             (belief_id,),
         ).fetchone()[0]
         if n >= CONTRADICTIONS_TO_DORMANT:
@@ -670,11 +671,11 @@ def record_outcome(conn: sqlite3.Connection, belief_id: int, event: str, source:
 
 
 def outcome_counts(conn: sqlite3.Connection, belief_id: int) -> tuple[int, int, int]:
-    """(confirms, contradicts, stales) for one belief."""
+    """(confirms, contradicts, stales) eligible for calibration."""
     row = conn.execute(
         "SELECT coalesce(sum(event = 'confirmed'), 0),"
         " coalesce(sum(event = 'contradicted'), 0), coalesce(sum(event = 'stale'), 0)"
-        " FROM belief_outcomes WHERE belief_id = ?",
+        " FROM belief_calibration_outcomes WHERE belief_id = ?",
         (belief_id,),
     ).fetchone()
     return int(row[0]), int(row[1]), int(row[2])
@@ -784,12 +785,15 @@ def cmd_stats(args) -> int:
     event name retired it.
     """
     conn = db_connect()
-    total = conn.execute("SELECT count(*) FROM belief_outcomes").fetchone()[0]
+    total, legacy = conn.execute(
+        "SELECT count(*), count(CASE WHEN source = 'audit' THEN 1 END) FROM belief_outcomes"
+    ).fetchone()
+    eligible = total - legacy
     rows = conn.execute(
         "SELECT round(b.confidence, 1) AS bucket, count(DISTINCT b.id), count(o.id),"
         " coalesce(sum(o.event = 'confirmed'), 0),"
         " coalesce(sum(o.event = 'contradicted'), 0), coalesce(sum(o.event = 'stale'), 0)"
-        " FROM beliefs b LEFT JOIN belief_outcomes o ON o.belief_id = b.id"
+        " FROM beliefs b LEFT JOIN belief_calibration_outcomes o ON o.belief_id = b.id"
         " GROUP BY bucket ORDER BY bucket"
     ).fetchall()
     print("claimed  n_beliefs  n_outcomes  precision")
@@ -797,11 +801,12 @@ def cmd_stats(args) -> int:
         prec = f"{c / (c + x + s):.2f}" if (c + x + s) else "    -"
         print(f"{bucket:>7.1f}  {nb:>9}  {no:>10}  {prec:>9}")
     print(f"\nledger total: {total} outcome row(s)")
-    if total < 100:
+    print(f"calibration outcomes: {eligible}. Legacy audit outcomes excluded: {legacy}.")
+    if eligible < 100:
         # loud on purpose: below ~100 outcomes the per-bucket precision is a
         # handful of coin flips, and a confident-looking table would invite
         # exactly the overtrust this ledger exists to end.
-        print(f"!!! UNCALIBRATED — n={total}, display gate at 100 !!!")
+        print(f"!!! UNCALIBRATED — n={eligible}, display gate at 100 !!!")
         print("!!! per-bucket precision below is anecdote, not a curve — keep"
               " recording verified outcomes (lore outcome) !!!")
     return 0
@@ -852,7 +857,7 @@ def interaction_model_lines(limit: int = 5) -> "list[str]":
         conn = db_connect()
         rows = conn.execute(
             "SELECT b.id, claim, confidence, source_engine,"
-            " (SELECT count(*) FROM belief_outcomes o WHERE o.belief_id = b.id)"
+            " (SELECT count(*) FROM belief_calibration_outcomes o WHERE o.belief_id = b.id)"
             " FROM beliefs b WHERE status = 'active' AND subject = 'user-model'"
             " ORDER BY confidence DESC, updated DESC LIMIT ?", (limit,)).fetchall()
         if rows:
