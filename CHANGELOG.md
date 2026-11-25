@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.62.35 — 2026-11-25
+
+- Exclude historical heuristic audit outcomes from belief calibration, graph ranking, and the STEER threshold. Preserve signed ledger history.
+- Report the excluded audit count and the eligible calibration total in `lore stats`.
+
 ## 0.62.34 — 2026-11-25
 
 - Fix **`lore audit`** writing belief outcomes from path existence and literal Git matches. Report fragment matches for review and count historical audit outcomes.

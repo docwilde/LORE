@@ -24,6 +24,7 @@
   "CREATE TABLE IF NOT EXISTS belief_outcomes(id INTEGER PRIMARY KEY, belief_id INTEGER NOT NULL, event TEXT NOT NULL CHECK(event IN ('confirmed','contradicted','stale')), source TEXT NOT NULL, session_id TEXT, agent TEXT, note TEXT, created TEXT)",
   "ALTER TABLE belief_outcomes ADD COLUMN uid TEXT",
   "CREATE UNIQUE INDEX IF NOT EXISTS belief_outcomes_uid ON belief_outcomes(uid)",
+  "CREATE VIEW IF NOT EXISTS belief_calibration_outcomes AS SELECT id,belief_id,event FROM belief_outcomes WHERE source<>'audit'",
   "CREATE TABLE IF NOT EXISTS sync_ops(seq INTEGER PRIMARY KEY, op_id TEXT NOT NULL UNIQUE, machine_id TEXT NOT NULL, machine_seq INTEGER NOT NULL, lamport INTEGER NOT NULL, class TEXT NOT NULL, op TEXT NOT NULL, project_key TEXT, payload TEXT NOT NULL, mac TEXT, created TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0)",
   "CREATE INDEX IF NOT EXISTS sync_ops_order ON sync_ops(lamport, machine_id, machine_seq)",
   "CREATE UNIQUE INDEX IF NOT EXISTS sync_ops_slot ON sync_ops(machine_id, machine_seq) WHERE applied != 2",

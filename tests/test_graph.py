@@ -364,7 +364,7 @@ class GraphContext(unittest.TestCase):
         conn.execute("UPDATE beliefs SET confidence = 1.0 WHERE id = ?", (self.hi,))
         conn.execute("UPDATE beliefs SET confidence = 0.6 WHERE id = ?", (self.cal,))
         for _ in range(3):
-            lore.record_outcome(conn, self.cal, "confirmed", "audit")
+            lore.record_outcome(conn, self.cal, "confirmed", "user")
         conn.commit()
 
     def _rows(self, prompt=""):

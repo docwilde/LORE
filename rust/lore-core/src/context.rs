@@ -76,7 +76,7 @@ pub fn interaction_model_lines(cfg: &Config) -> Result<Vec<String>> {
     let mut conn = crate::store::connect(cfg)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let rows = {
-        let mut query=tx.prepare("SELECT b.id,claim,confidence,source_engine,(SELECT count(*) FROM belief_outcomes o WHERE o.belief_id=b.id) FROM beliefs b WHERE status='active' AND subject='user-model' ORDER BY confidence DESC,updated DESC LIMIT 5")?;
+        let mut query=tx.prepare("SELECT b.id,claim,confidence,source_engine,(SELECT count(*) FROM belief_calibration_outcomes o WHERE o.belief_id=b.id) FROM beliefs b WHERE status='active' AND subject='user-model' ORDER BY confidence DESC,updated DESC LIMIT 5")?;
         let rows = query
             .query_map([], |row| {
                 Ok((

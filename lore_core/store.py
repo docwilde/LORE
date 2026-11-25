@@ -304,6 +304,12 @@ def db_connect() -> sqlite3.Connection:
         pass  # column already present
     _backfill_uids(conn, "belief_outcomes")  # every connect, as for beliefs
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS belief_outcomes_uid ON belief_outcomes(uid)")
+    # Historical audit observations stay signed and replayable. Only the
+    # evidence used for calibration and belief decisions is filtered.
+    conn.execute(
+        "CREATE VIEW IF NOT EXISTS belief_calibration_outcomes AS"
+        " SELECT id,belief_id,event FROM belief_outcomes WHERE source<>'audit'"
+    )
     # SYNC OP LOG (sync spec PR 3, docs/plans/sync.md "The core: a local op
     # log"): every mutation to a synced class appends one row here, in the
     # SAME transaction as the mutation when the mutation is itself SQLite

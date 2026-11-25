@@ -142,14 +142,14 @@ Four rules keep the loop honest:
 
 The deriver writes beliefs straight to SQLite, ungated. The gate sits on the read side instead:
 
-- **World beliefs** — projects, systems, environment — reach the agent only on demand: `/lore:ask`, or `lore consult` at act time (opt in with `LORE_CONSULT=1`). Consult splits results into **STEER** (≥3 rows in the outcomes ledger, may shape the decision) and **CITE ONLY** (deriver-claimed — mention, never follow).
+- **World beliefs** — projects, systems, environment — reach the agent only on demand: `/lore:ask`, or `lore consult` at act time (opt in with `LORE_CONSULT=1`). Consult splits results into **STEER** (at least three calibration-eligible outcomes, may shape the decision) and **CITE ONLY** (deriver-claimed — mention, never follow).
 - **User-model beliefs** (`subject: user-model`) ride into the snapshot openly, labeled uncalibrated. They shape tone and approach, never authorize an action, and stamp `last_referenced` so the influence stays auditable.
 
 **`user` and `user-model` are separate channels.** A preference the user stated goes to `user`, where a later session may act on it; a pattern the reviewer inferred from behaviour goes to `user-model`, which authorizes nothing. A conclusion already covered by the other channel is dropped before it is written. Rationale, the channel rule, and the containment check behind the drop logic: [`user-model-channel-separation.md`](user-model-channel-separation.md). `lore crosscheck` lists cross-channel near-duplicate pairs, read-only, for a human to resolve.
 
 LORE measures confidence instead of asserting it: `lore stats` prints per-bucket empirical precision from the outcomes ledger, and shouts UNCALIBRATED below 100 outcomes.
 
-`lore audit` samples active beliefs for review. `MATCH` and `NO_MATCH` describe a path or literal token in the current environment. Record verified claim outcomes with `lore outcome`. The audit reports the count of historical heuristic outcomes, which still count toward calibration.
+`lore audit` samples active beliefs for review. `MATCH` and `NO_MATCH` describe a path or literal token in the current environment. Record verified claim outcomes with `lore outcome`. The audit reports historical heuristic outcomes. LORE keeps those entries in the ledger and excludes them from calibration and the STEER threshold.
 
 **The cost, plainly.** A belief goes live the moment the deriver writes it; no human sees it first. Beliefs unreferenced for 45 days go dormant (`LORE_BELIEF_DORMANT_DAYS`; confidence ≥0.95 exempt) and two recorded contradictions retire one — but nothing re-verifies a claim that keeps getting cited. Read the store yourself now and then:
 

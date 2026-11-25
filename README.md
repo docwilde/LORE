@@ -16,6 +16,10 @@
 are hard-capped; curated proposals wait for review. Derived beliefs retain their
 evidence and appear on request or through explicitly enabled context.
 
+Gemini sessions launched through Google Antigravity in DOXA share the same
+memory and local session index. The standalone Antigravity companion records
+tool evidence. [Antigravity setup](#google-antigravity)
+
 > [!WARNING]
 > **Beta.** Commands, caps, and configuration may change between releases.
 > LORE indexes local transcripts; Claude review sends a scrubbed digest to
@@ -30,15 +34,9 @@ and relations between beliefs do not turn them into approved facts.
 
 ## What you get
 
-[LORE 0.62.32](https://github.com/docwilde/LORE/releases/tag/v0.62.32) records
-tool outcomes by default and lets reviewers link them to beliefs and learned
-recipes.
-
-[LORE 0.62.31](https://github.com/docwilde/LORE/releases/tag/v0.62.31) documents
-shared memory for Gemini sessions through Google Antigravity in DOXA.
-
-[LORE 0.62.30](https://github.com/docwilde/LORE/releases/tag/v0.62.30) adds
-paged pending review, protected cleanup, and optional shared skill usage.
+LORE 0.62.35 excludes historical heuristic audit outcomes from belief
+calibration and the STEER threshold. `lore audit` reports path and Git token
+matches for review. [Release notes](https://github.com/docwilde/LORE/releases/tag/v0.62.35)
 
 - **Claude Code, Codex, and DOXA memory.** Share one native store for capped
   user and project facts across engines; host facts stay local.
@@ -67,6 +65,8 @@ Use `/lore:filemap` to inspect file maps; `LORE_FILEMAP_CAP` and
 `LORE_MACHINE_CAP` bound file maps and machine memory.
 
 ## Install
+
+### Claude Code
 
 ```
 /plugin marketplace add docwilde/lore
@@ -109,10 +109,24 @@ filesystem (for example, under `~/`), then follow the install steps above.
 This WSL 2 setup has not been verified in LORE CI; see the
 [platform notes](docs/manual.md#platform-support) before relying on it.
 
-### Antigravity in DOXA
+### Google Antigravity
 
-[DOXA](https://github.com/docwilde/doxa/blob/main/docs/antigravity.md) connects to Google Antigravity on native Linux. Gemini sessions in DOXA receive LORE memory with their first prompt and contribute scrubbed transcripts to local LORE session search. Use `DOXA_LORE=0` to disable memory injection and indexing for a session.
+**Shared memory through DOXA.** On native Linux, choose **Antigravity** in DOXA’s
+**New Session** form and select a Gemini model. DOXA injects the working
+directory’s LORE memory on the first turn and indexes the scrubbed transcript
+on session shutdown. Set `DOXA_LORE=0` to disable both for a session.
+[DOXA Antigravity setup](https://github.com/docwilde/doxa/blob/main/docs/antigravity.md)
 
+**Tool evidence in the standalone Antigravity CLI.** The `lore-tool-evidence`
+companion records reported tool successes and failures in the local LORE store.
+Install it from this checkout and keep `lore-rs` on `PATH`.
+
+```sh
+./task install
+agy plugin install "$PWD/antigravity"
+```
+
+See [tool evidence](docs/tool-evidence.md) for storage and linking details.
 ### Codex
 
 LORE supports Codex through the portable [`plugin.json`](plugin.json) and

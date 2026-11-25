@@ -469,8 +469,8 @@ class TestWiredWritePaths(unittest.TestCase):
         conn = self.lore.db_connect()
         bid, _ = self.lore.belief_insert(conn, "user", "will go dormant", 0.6, "s1", None, None, via="direct")
         conn.commit()
-        self.lore.record_outcome(conn, bid, "contradicted", "audit")
-        self.lore.record_outcome(conn, bid, "contradicted", "audit")
+        self.lore.record_outcome(conn, bid, "contradicted", "user")
+        self.lore.record_outcome(conn, bid, "contradicted", "user")
         conn.commit()
         status = conn.execute("SELECT status FROM beliefs WHERE id = ?", (bid,)).fetchone()[0]
         self.assertEqual(status, "dormant")

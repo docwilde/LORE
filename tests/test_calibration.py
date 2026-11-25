@@ -154,6 +154,16 @@ class TestDormancyFlip(DBTest):
         conn.commit()
         self.assertEqual(self._status(conn, bid), "active")
 
+    def test_legacy_audit_contradiction_does_not_count_toward_dormancy(self):
+        conn = self.connect()
+        bid = _belief(conn, "legacy audit contradicted a belief", 0.9)
+        lore.record_outcome(conn, bid, "contradicted", "audit")
+        lore.record_outcome(conn, bid, "contradicted", "user")
+        self.assertEqual(self._status(conn, bid), "active")
+        self.assertEqual(lore.outcome_counts(conn, bid), (0, 1, 0))
+        lore.record_outcome(conn, bid, "contradicted", "user")
+        self.assertEqual(self._status(conn, bid), "dormant")
+
     def test_terminal_status_is_not_overwritten(self):
         conn = self.connect()
         bid = _belief(conn, "dormancy superseded claim", 0.9)
@@ -180,13 +190,29 @@ class TestStatsBuckets(DBTest):
         with contextlib.redirect_stdout(buf):
             self.assertEqual(lore.cmd_stats(argparse.Namespace()), 0)
         out = buf.getvalue()
-        # 2 beliefs, 4 outcomes, precision 2/(2+1+1) = 0.50
-        self.assertRegex(out, re.compile(r"^\s*0\.3\s+2\s+4\s+0\.50\s*$", re.MULTILINE))
+        # 2 beliefs, 2 eligible outcomes, precision 1/(1+1) = 0.50
+        self.assertRegex(out, re.compile(r"^\s*0\.3\s+2\s+2\s+0\.50\s*$", re.MULTILINE))
         m = re.search(r"UNCALIBRATED — n=(\d+), display gate at 100", out)
         self.assertIsNotNone(m)  # this test DB never reaches 100 rows
         total = lore.db_connect().execute(
-            "SELECT count(*) FROM belief_outcomes").fetchone()[0]
+            "SELECT count(*) FROM belief_outcomes WHERE source <> 'audit'").fetchone()[0]
         self.assertEqual(int(m.group(1)), total)
+
+    def test_consult_uses_only_eligible_outcomes(self):
+        conn = self.connect()
+        bid = _belief(conn, "consultcalibration fixture claim", 0.7)
+        for event, source in (("confirmed", "audit"), ("stale", "audit"),
+                              ("confirmed", "user")):
+            lore.record_outcome(conn, bid, event, source)
+        conn.commit()
+        report = io.StringIO()
+        with contextlib.redirect_stdout(report):
+            lore.cmd_consult(argparse.Namespace(query=["consultcalibration"], limit=8))
+        self.assertIn("CITE ONLY", report.getvalue())
+        self.assertIn("(uncalibrated, n=1)", report.getvalue())
+        self.assertEqual(conn.execute(
+            "SELECT count(*) FROM belief_outcomes WHERE belief_id = ?", (bid,)
+        ).fetchone()[0], 3)
 
 
 class TestAuditSampler(DBTest):
