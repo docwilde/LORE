@@ -194,7 +194,12 @@ impl Config {
             });
         let projects = env::var_os("LORE_PROJECTS_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".claude/projects"));
+            .unwrap_or_else(|| {
+                env::var_os("CLAUDE_CONFIG_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".claude"))
+                    .join("projects")
+            });
         let codex_home = env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"));
@@ -328,8 +333,10 @@ pub fn project_identity_root(cwd: &Path) -> PathBuf {
     cwd.to_path_buf()
 }
 pub fn project_slug(cwd: &Path) -> String {
-    project_identity_root(cwd)
-        .to_string_lossy()
+    checkout_slug(&project_identity_root(cwd))
+}
+pub(crate) fn checkout_slug(path: &Path) -> String {
+    path.to_string_lossy()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()

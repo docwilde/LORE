@@ -255,7 +255,7 @@ fn validate_flags(group: &str, sub: &str, req: &Value) -> Result<()> {
         ("session",_) => "session_id grep context limit trunc offset",
         ("index",_) => "force live",
         ("history",_) => "limit offset prefix session_id",
-        ("review",_) => "transcript latest foreground dry_run workers full incremental engine session_id model",
+        ("review",_) => "transcript latest foreground dry_run workers full incremental engine session_id model expected_source provider_thread",
         ("backfill",_) => "project list jobs force dry_run",
         ("pending",_) => "pid all cluster limit cursor",
         ("approve"|"reject",_) => "pid expected",
@@ -1372,6 +1372,9 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
             }
             req["engine"] = json!(engine);
             req["incremental"] = json!(true);
+            if event == "session-end" && engine == "claude" {
+                return crate::standalone_hooks::review_at_session_end(cfg, &req);
+            }
             own_process_group()?;
             crate::standalone_ops::review(cfg, &req).map(|_| ())
         }

@@ -655,6 +655,11 @@ pub(crate) fn snapshot_source(path: &Path) -> Result<(File, Value)> {
     let proof = json!({"sha256":source.hash,"inode":source.inode,"device":source.device,"size":source.size,"ctime":source.ctime,"ctime_nsec":source.ctime_nsec});
     Ok((file, proof))
 }
+pub(crate) fn claude_hook_transcript(cfg: &Config, cwd: &Path, sid: &str, path: &Path) -> bool {
+    config::valid_id(sid)
+        && path == cfg.projects.join(config::checkout_slug(cwd)).join(format!("{sid}.jsonl"))
+}
+
 pub fn build_review_job(
     cfg: &Config,
     req: &Value,
@@ -688,7 +693,8 @@ pub fn build_review_job(
     let codex = path.starts_with(&cfg.codex_sessions)
         || archive.as_ref().is_some_and(|root| path.starts_with(root));
     let is_doxa = path == cfg.projects.join(&slug).join(format!("{sid}.jsonl"));
-    if !is_doxa && !codex {
+    let is_claude = authority.engine() == "claude" && claude_hook_transcript(cfg, cwd, sid, path);
+    if !is_doxa && !codex && !is_claude {
         return Err(Error::UnsafePath);
     }
     if codex
@@ -735,6 +741,9 @@ pub fn build_review_job(
     let (meta, _) = index::parse_transcript_fd(&file, codex)?;
     if meta.internal {
         return Ok(None);
+    }
+    if is_claude && !is_doxa && meta.cwd.as_deref().map(Path::new) != Some(cwd) {
+        return Err(Error::Untrusted);
     }
     if codex
         && (meta.session_id.as_deref() != Some(provider_thread.unwrap_or(sid))

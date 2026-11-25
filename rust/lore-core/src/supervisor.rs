@@ -25,9 +25,9 @@ pub fn required(args: &[String]) -> bool {
             .is_some_and(|a| matches!(a.as_str(), "pull" | "push" | "bootstrap"))
         || args.first().is_some_and(|a| a == "graph") && args.get(1).is_some_and(|a| a == "derive")
         || args.first().is_some_and(|a| a == "hook")
-            && args.windows(2).any(|a| {
-                a[0] == "--event" && matches!(a[1].as_str(), "pre-compact" | "session-end")
-            })
+            && (args.windows(2).any(|a| a == ["--event", "pre-compact"])
+                || args.windows(2).any(|a| a == ["--event", "session-end"])
+                    && !args.windows(2).any(|a| a == ["--engine", "claude"]))
 }
 #[cfg(target_os = "linux")]
 pub fn enter_worker() -> Result<bool> {
@@ -70,34 +70,42 @@ pub fn enter_worker() -> Result<bool> {
 #[cfg(target_os = "linux")]
 pub fn run(args: &[String]) -> Result<i32> {
     use std::os::unix::process::CommandExt;
-    let background = std::env::var("LORE_NATIVE_BACKGROUND_REVIEW").is_ok_and(|v| v == "1");
+    unsafe {
+        libc::signal(libc::SIGTERM, cancel as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, cancel as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, cancel as *const () as libc::sighandler_t);
+    }
+    let session_end = std::env::var("LORE_NATIVE_BACKGROUND_REVIEW").is_ok_and(|v| v == "session-end");
+    let background = session_end || std::env::var("LORE_NATIVE_BACKGROUND_REVIEW").is_ok_and(|v| v == "1");
     let pull = std::env::var("LORE_NATIVE_BACKGROUND_PULL").is_ok_and(|v| v == "1");
     let _background_slot = if background || pull {
         let cfg = crate::config::Config::from_env(Duration::from_secs(3))?;
-        let mut acquired = None;
-        for slot in 0..if background { 4 } else { 1 } {
-            let path = cfg.root.join(".native-jobs").join(format!(
-                "{}-{slot}",
-                if background { "review" } else { "pull" }
-            ));
-            if let Ok(lock) =
-                crate::files::Locks::acquire(&cfg.root, &[path], Duration::from_millis(1))
-            {
-                acquired = Some(lock);
-                break;
+        // A final review can wait for the same capacity used by mid-session
+        // reviews, without holding open the Claude Code shutdown path.
+        let deadline = Instant::now() + Duration::from_secs(305);
+        let lock = 'wait: loop {
+            for slot in 0..if background { 4 } else { 1 } {
+                let path = cfg.root.join(".native-jobs").join(format!(
+                    "{}-{slot}",
+                    if background { "review" } else { "pull" }
+                ));
+                match crate::files::Locks::acquire(&cfg.root, &[path], Duration::from_millis(1)) {
+                    Ok(lock) => break 'wait lock,
+                    Err(Error::Timeout) => (),
+                    Err(error) => return Err(error),
+                }
             }
-        }
-        Some(acquired.ok_or(Error::Timeout)?)
+            if !session_end || CANCELLED.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        Some(lock)
     } else {
         None
     };
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) } != 0 {
         return Err(Error::Untrusted);
-    }
-    unsafe {
-        libc::signal(libc::SIGTERM, cancel as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, cancel as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGHUP, cancel as *const () as libc::sighandler_t);
     }
     let parent = unsafe { libc::getpid() };
     let mut command = Command::new(std::env::current_exe()?);

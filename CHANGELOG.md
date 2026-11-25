@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.62.33 — 2026-11-25
+
+- Fix Claude Code `SessionEnd` cancellations by running the final review in LORE's detached supervisor.
+- Review transcripts from linked Git worktrees under the shared project memory scope.
+- Exit cleanly when Claude Code ends a session without a saved transcript.
+
 ## 0.62.32 — 2026-11-21
 
 - Record provider-reported tool outcomes by default in Claude Code, Codex, Antigravity and DOXA.
