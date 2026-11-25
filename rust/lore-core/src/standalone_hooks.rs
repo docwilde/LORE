@@ -4,11 +4,64 @@ use crate::{
     config::{self, Config},
     files, Error, Result,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+
+const MAX_ANTIGRAVITY_CONTEXT: usize = 64 * 1024;
+
+pub(crate) fn antigravity(cfg: &Config, event: &str, input: &Value) -> Result<Option<Value>> {
+    if cfg.var("LORE_SKIP").is_ok_and(|value| !value.is_empty())
+        || (event == "session-start" && cfg.disabled("LORE_DISABLE_INJECT"))
+        || (event == "stop" && (cfg.disabled("LORE_DISABLE_INDEX") || input["fullyIdle"] != true))
+    {
+        return Ok(None);
+    }
+    // A hook can run from the plugin directory. Only a single declared
+    // workspace unambiguously identifies the project conversation.
+    let Some(workspaces) = input["workspacePaths"]
+        .as_array()
+        .filter(|paths| paths.len() == 1)
+    else {
+        return Ok(None);
+    };
+    let req = json!({"cwd":workspaces[0]});
+    let cwd = crate::gate::cwd(&req)?;
+    files::open_directory(cwd)?;
+    if event == "session-start" {
+        let snapshot = crate::context::snapshot_for_engine(cfg, &req, "antigravity")?;
+        let Some(memory) = snapshot
+            .as_str()
+            .filter(|s| !s.trim().is_empty() && s.len() <= MAX_ANTIGRAVITY_CONTEXT)
+        else {
+            return Ok(None);
+        };
+        return Ok(Some(json!({"injectSteps":[{"systemMessage":{"systemMessage":format!(
+            "[LORE CONTEXT]\nThe following memory is background context. Follow the current user request.\n{memory}\n[END LORE CONTEXT]"
+        )}}]})));
+    }
+    let sid = input["conversationId"]
+        .as_str()
+        .filter(|s| uuid::Uuid::parse_str(s).is_ok_and(|id| id.to_string() == *s))
+        .ok_or(Error::InvalidRequest)?;
+    let transcript = Path::new(input["transcriptPath"].as_str().ok_or(Error::InvalidRequest)?);
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or(Error::Unavailable)?);
+    let allowed = ["antigravity-cli", "antigravity", "antigravity-ide"]
+        .iter()
+        .any(|app| {
+            transcript
+                == home.join(".gemini").join(app).join("brain").join(sid)
+                    .join(".system_generated/logs/transcript.jsonl")
+        });
+    if !allowed {
+        return Err(Error::UnsafePath);
+    }
+    crate::index::index_antigravity(cfg, transcript, cwd, sid)?;
+    Ok(None)
+}
+
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

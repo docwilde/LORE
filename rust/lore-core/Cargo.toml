@@ -8,6 +8,7 @@ repository = "https://github.com/docwilde/LORE"
 publish = false
 
 [dependencies]
+doxa-codegraph = { git = "https://github.com/docwilde/doxa", rev = "fa763acc8e738f461cd2f15ea8adfd8d58020328" }
 fancy-regex = "0.19.2"
 hmac = "0.12"
 libc = "0.2"

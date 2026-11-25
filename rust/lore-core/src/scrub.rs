@@ -186,8 +186,16 @@ pub fn scrub(text: &str) -> Result<String> {
     Ok(text)
 }
 pub fn scrub_json(value: &serde_json::Value) -> Result<serde_json::Value> {
+    scrub_json_with_digests(value, &[])
+}
+
+/// Preserve named digests in JSON serialized from typed local output.
+pub(crate) fn scrub_json_with_digests(
+    value: &serde_json::Value,
+    digest_fields: &[&str],
+) -> Result<serde_json::Value> {
     use serde_json::Value;
-    fn walk(value: &Value, depth: usize) -> Result<Value> {
+    fn walk(value: &Value, depth: usize, digest_fields: &[&str]) -> Result<Value> {
         if depth > 32 {
             return Err(Error::TooLarge);
         }
@@ -195,12 +203,23 @@ pub fn scrub_json(value: &serde_json::Value) -> Result<serde_json::Value> {
             Value::String(s) => Value::String(scrub(s)?),
             Value::Array(a) => Value::Array(
                 a.iter()
-                    .map(|v| walk(v, depth + 1))
+                    .map(|v| walk(v, depth + 1, digest_fields))
                     .collect::<Result<_>>()?,
             ),
             Value::Object(o) => Value::Object(
                 o.iter()
-                    .map(|(k, v)| Ok((k.clone(), walk(v, depth + 1)?)))
+                    .map(|(k, v)| {
+                        let clean = if digest_fields.contains(&k.as_str())
+                            && v.as_str().is_some_and(|s| {
+                                s.len() == 64 && s.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                        {
+                            v.clone()
+                        } else {
+                            walk(v, depth + 1, digest_fields)?
+                        };
+                        Ok((k.clone(), clean))
+                    })
                     .collect::<Result<_>>()?,
             ),
             _ => value.clone(),
@@ -213,7 +232,7 @@ pub fn scrub_json(value: &serde_json::Value) -> Result<serde_json::Value> {
     {
         return Err(Error::TooLarge);
     }
-    walk(value, 0)
+    walk(value, 0, digest_fields)
 }
 #[cfg(test)]
 mod tests {

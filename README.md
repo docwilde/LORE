@@ -16,9 +16,8 @@
 are hard-capped; curated proposals wait for review. Derived beliefs retain their
 evidence and appear on request or through explicitly enabled context.
 
-Gemini sessions launched through Google Antigravity in DOXA share the same
-memory and local session index. The standalone Antigravity companion records
-tool evidence. [Antigravity setup](#google-antigravity)
+Gemini sessions in Google Antigravity can use the same memory and local session
+index through standalone hooks or DOXA. [Antigravity setup](#google-antigravity)
 
 > [!WARNING]
 > **Beta.** Commands, caps, and configuration may change between releases.
@@ -44,6 +43,8 @@ matches for review. [Release notes](https://github.com/docwilde/LORE/releases/ta
   demand, or enable experimental, bounded graph context.
 - **Session search.** Local FTS5 index of Claude Code, DOXA, and Codex transcripts.
 - **File maps.** A short `path — purpose` guide to important project files.
+- **AST codegraph.** Inspect Rust and Python definitions, imports, call sites,
+  and module layout in the current Git worktree. [Codegraph commands](docs/manual.md#ast-codegraph)
 - **Bounded pending review.** [Page through large queues](docs/pending-pages.md)
   while preserving human review of each complete, exact proposal.
 - **Reviewed cleanup.** [Preview diagnostic retention and select orphaned
@@ -117,16 +118,22 @@ directory’s LORE memory on the first turn and indexes the scrubbed transcript
 on session shutdown. Set `DOXA_LORE=0` to disable both for a session.
 [DOXA Antigravity setup](https://github.com/docwilde/doxa/blob/main/docs/antigravity.md)
 
-**Tool evidence in the standalone Antigravity CLI.** The `lore-tool-evidence`
-companion records reported tool successes and failures in the local LORE store.
-Install it from this checkout and keep `lore-rs` on `PATH`.
+**Standalone Antigravity.** The `lore-tool-evidence` plugin loads shared
+memory at conversation start, indexes completed chat steps when the agent
+is idle, and records tool outcomes. Install it from this checkout and
+keep `lore-rs` on `PATH`.
 
 ```sh
 ./task install
 agy plugin install "$PWD/antigravity"
 ```
 
-See [tool evidence](docs/tool-evidence.md) for storage and linking details.
+The hooks use a single workspace to scope memory and indexing. Start a new
+conversation to load the latest snapshot. Antigravity may retain the startup
+context in its own history. The indexing hook stores scrubbed user and assistant
+text locally. Use `LORE_DISABLE_INJECT=1` or `LORE_DISABLE_INDEX=1`
+to turn off either hook. [Tool evidence](docs/tool-evidence.md)
+
 ### Codex
 
 LORE supports Codex through the portable [`plugin.json`](plugin.json) and

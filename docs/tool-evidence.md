@@ -11,7 +11,7 @@ Tool recording is on by default. Each observation records the provider, project,
 | Antigravity | The companion plugin uses **PostToolUse**, which reports success or failure in its **error** field. LORE uses the conversation and step IDs to identify each call. |
 | DOXA | The daemon records structured tool results from Claude, Codex, Antigravity, DeepSeek and GLM. Router observations carry the active worker engine. DOXA writes up to 128 observations at the end of each turn. |
 
-For Antigravity, build and install the LORE CLI from this checkout with **./task install**, then run **agy plugin install "$PWD/antigravity"**. Launch Antigravity with **lore-rs** on **PATH**. The companion plugin records tool evidence. DOXA supplies LORE memory to its own Antigravity sessions.
+For Antigravity, build and install the LORE CLI from this checkout with **./task install**, then run **agy plugin install "$PWD/antigravity"**. Launch Antigravity with **lore-rs** on **PATH**. The plugin includes memory and indexing hooks for standalone conversations. DOXA handles LORE integration for its own Antigravity sessions. [Antigravity setup](../README.md#google-antigravity)
 
 DOXA uses its embedded LORE core when it supports tool evidence. A build with an older core looks for an updated **lore-rs** on **PATH**. Set **DOXA_LORE_RS** to an absolute path to select the executable explicitly. **DOXA_LORE=0** also disables recording for that DOXA session.
 

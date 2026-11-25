@@ -21,7 +21,9 @@ Memory: memory show|entries|usage|review|add|replace|remove|move
 Beliefs: belief list|search|show|review|add|retract|edges|dedup-report
          evidence consult ask outcome stats audit crosscheck dream
 Graph: graph stats|neighbours|path|communities|components|degree|context|html|backfill|derive|edge
-Codegraph: codegraph store --cwd WORKTREE --input FILE --expected-sha256 HASH --expected-revision N
+Codegraph: codegraph file|imports|calls|modules PATH [--cwd WORKTREE]
+           codegraph symbol NAME [--cwd WORKTREE]
+           codegraph store --cwd WORKTREE --input FILE --expected-sha256 HASH --expected-revision N
            codegraph cleanup-plan|cleanup-apply --json REVIEWED_PLAN
 Sessions: search session index history recent|prefix|metadata
 Review: review backfill pending list|page|show approve reject
@@ -406,6 +408,31 @@ pub fn run(args: &[String]) -> Result<()> {
         }
         ("trace", "retention-plan") => crate::retention::plan(&cfg, &req)?,
         ("trace", "retention-apply") => crate::retention::apply(&cfg, &req, &auth)?,
+        ("codegraph", kind @ ("file" | "symbol" | "imports" | "calls" | "modules")) => {
+            let [value] = p.as_slice() else {
+                return Err(Error::InvalidRequest);
+            };
+            use doxa_codegraph::Query;
+            let query = match kind {
+                "file" => Query::File(value.clone()),
+                "symbol" => Query::Symbol(value.clone()),
+                "imports" => Query::Imports(value.clone()),
+                "calls" => Query::Calls(value.clone()),
+                _ => Query::Modules(value.clone()),
+            };
+            let answer = doxa_codegraph::query(crate::gate::cwd(&req)?, query).map_err(|message| {
+                if let Ok(message) = crate::scrub::scrub(&message) {
+                    eprintln!("lore-rs: codegraph: {message}");
+                }
+                Error::Unavailable
+            })?;
+            let value = serde_json::to_value(answer).map_err(|_| Error::Unavailable)?;
+            crate::scrub::scrub_json_with_digests(&value, &[
+                "sha256", "source_sha256", "requested_source_sha256", "scan_input_sha256",
+                "python_scan_input_sha256", "target_sha256", "conditional_candidate_sha256",
+                "structural_candidate_sha256",
+            ])?
+        }
         ("codegraph", "cleanup-plan") => crate::codegraph_snapshot::cleanup_plan(&cfg, &req)?,
         ("codegraph", "cleanup-apply") => crate::codegraph_snapshot::cleanup_apply(&cfg, &req, &auth)?,
         ("trace", "capture") => crate::diagnostics::capture(&cfg, &req)?,
@@ -1250,15 +1277,13 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
     }
     let engine = options["engine"]
         .as_str()
-        .filter(|s| matches!(*s, "claude" | "codex"))
+        .filter(|s| matches!(*s, "claude" | "codex" | "antigravity"))
         .ok_or(Error::InvalidRequest)?;
     let event = options["event"]
         .as_str()
-        .filter(|s| {
-            matches!(
-                *s,
-                "session-start" | "prompt" | "pre-compact" | "session-end"
-            )
+        .filter(|s| match engine {
+            "antigravity" => matches!(*s, "session-start" | "stop"),
+            _ => matches!(*s, "session-start" | "prompt" | "pre-compact" | "session-end"),
         })
         .ok_or(Error::InvalidRequest)?;
     let mut raw = Vec::new();
@@ -1272,6 +1297,21 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
     let input: Value = serde_json::from_slice(&raw).map_err(|_| Error::InvalidRequest)?;
     if !input.is_object() {
         return Err(Error::InvalidRequest);
+    }
+    if engine == "antigravity" {
+        let noop = if event == "stop" {
+            json!({"decision":"stop"})
+        } else {
+            json!({})
+        };
+        return output(match crate::standalone_hooks::antigravity(cfg, event, &input) {
+            Ok(Some(response)) => response,
+            Ok(None) => noop,
+            Err(error) => {
+                eprintln!("lore-rs: Antigravity {event}: {}", error.code());
+                noop
+            }
+        });
     }
     if cfg.var("LORE_SKIP").is_ok_and(|s| !s.is_empty()) {
         return Ok(());

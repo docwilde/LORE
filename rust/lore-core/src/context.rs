@@ -134,6 +134,9 @@ fn rendered_memory(cfg: &Config, scope: Scope, key: &str, entries: &[String]) ->
         .to_owned()
 }
 fn freshness_rule(policy: RefreshPolicy, engine: &str) -> String {
+    if engine == "antigravity" {
+        return "- In Antigravity, LORE loads this snapshot at the start of a new conversation. Read current files during the conversation with lore-rs memory show.".into();
+    }
     if engine == "codex" {
         return "- In Codex, this snapshot is injected at startup, resume, clear, and compaction. Writes land in the files immediately; read them during this session with lore-rs memory show.".into();
     }

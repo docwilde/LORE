@@ -330,6 +330,110 @@ pub fn parse_transcript_fd(file: &File, codex: bool) -> Result<(Metadata, Vec<Me
     meta.last_ts = safe_optional(&meta.last_ts)?;
     Ok((meta, rows))
 }
+
+/// Import a snapshot of the owned native conversation admitted by the hook.
+/// Provider tool steps, reasoning and injected system context stay out of FTS.
+pub(crate) fn index_antigravity(cfg: &Config, path: &Path, cwd: &Path, sid: &str) -> Result<()> {
+    let Some(file) = crate::files::open_regular_if_exists(path, MAX_FILE as usize)? else {
+        return Ok(());
+    };
+    let version = |st: &fs::Metadata| {
+        (
+            st.dev(),
+            st.ino(),
+            st.len(),
+            st.mtime(),
+            st.mtime_nsec(),
+            st.ctime(),
+            st.ctime_nsec(),
+        )
+    };
+    let st = descriptor(&file)?;
+    let mut rows = Vec::new();
+    lines(&file, st.len(), |_, raw, _| {
+        if raw.trim().is_empty() {
+            return Ok(());
+        }
+        let row: Value = serde_json::from_str(raw).map_err(|_| Error::Changed)?;
+        if row["status"] != "DONE" {
+            return Ok(());
+        }
+        let Some(text) = row["content"].as_str() else {
+            return Ok(());
+        };
+        let (role, text) = match (row["type"].as_str(), row["source"].as_str()) {
+            (Some("USER_INPUT"), Some("USER_EXPLICIT")) => {
+                // The CLI appends clock and settings annotations to wrapped input.
+                let request = text.strip_prefix("<USER_REQUEST>\n")
+                    .and_then(|body| body.rsplit_once("\n</USER_REQUEST>"))
+                    .map_or(text, |(request, _)| request);
+                ("user", request)
+            }
+            (Some("PLANNER_RESPONSE"), Some("MODEL")) => ("assistant", text),
+            _ => return Ok(()),
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(());
+        }
+        if rows.len() == MAX_MESSAGES {
+            return Err(Error::TooLarge);
+        }
+        rows.push(Message {
+            ts: scrub::scrub(&string(&row["created_at"], 128).unwrap_or_default())?,
+            role: role.into(),
+            content: clean_text(text)?,
+        });
+        Ok(())
+    })?;
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+        return Ok(());
+    };
+    let cwd_text = scrub::scrub(cwd.to_str().ok_or(Error::InvalidRequest)?)?;
+    let project = config::project_slug(cwd);
+    let mut conn = store::connect(cfg)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Recheck under the index lock so a late hook cannot replace newer rows
+    // with a snapshot captured before another Stop notification.
+    let current = crate::files::open_regular(path, MAX_FILE as usize)?;
+    if version(&st) != version(&current.metadata()?) {
+        return Err(Error::Changed);
+    }
+    let existing = tx
+        .query_row(
+            "SELECT engine,project,cwd FROM sessions WHERE session_id=?",
+            [sid],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    if existing
+        .as_ref()
+        .is_some_and(|(engine, saved_project, saved_cwd)| {
+            engine != "antigravity"
+                || saved_project.as_deref() != Some(project.as_str())
+                || saved_cwd.as_deref() != Some(cwd_text.as_str())
+        })
+    {
+        return Err(Error::Changed);
+    }
+    tx.execute("DELETE FROM msg WHERE session_id=?", [sid])?;
+    write_rows(&tx, sid, &project, &rows)?;
+    tx.execute(
+        "INSERT INTO sessions(session_id,project,cwd,first_ts,last_ts,messages,engine)
+         VALUES(?,?,?,?,?,?,'antigravity') ON CONFLICT(session_id) DO UPDATE
+         SET first_ts=excluded.first_ts,last_ts=excluded.last_ts,messages=excluded.messages",
+        params![sid, project, cwd_text, first.ts, last.ts, crate::beliefs::sql_integer(rows.len())?],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn msgs_payload(conn: &Connection, sid: &str) -> Result<Value> {
     // Read the current persisted snapshot inside the caller's mutation lock.
     let mut stmt = conn
