@@ -149,6 +149,8 @@ The deriver writes beliefs straight to SQLite, ungated. The gate sits on the rea
 
 LORE measures confidence instead of asserting it: `lore stats` prints per-bucket empirical precision from the outcomes ledger, and shouts UNCALIBRATED below 100 outcomes.
 
+`lore audit` samples active beliefs for review. `MATCH` and `NO_MATCH` describe a path or literal token in the current environment. Record verified claim outcomes with `lore outcome`. The audit reports the count of historical heuristic outcomes, which still count toward calibration.
+
 **The cost, plainly.** A belief goes live the moment the deriver writes it; no human sees it first. Beliefs unreferenced for 45 days go dormant (`LORE_BELIEF_DORMANT_DAYS`; confidence ≥0.95 exempt) and two recorded contradictions retire one — but nothing re-verifies a claim that keeps getting cited. Read the store yourself now and then:
 
 ```sh

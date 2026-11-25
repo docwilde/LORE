@@ -624,15 +624,25 @@ pub fn duplicates(cfg: &Config, req: &Value, cross: bool) -> Result<Value> {
         json!({"threshold":threshold,"pairs":pairs.into_iter().map(|(_,p)|p).collect::<Vec<_>>(),"changed":false}),
     )
 }
-pub fn audit(cfg: &Config, req: &Value, auth: &Authority) -> Result<Value> {
-    if !auth.may_write() {
-        return Err(Error::Untrusted);
-    }
-    let conn = store::connect(cfg)?;
+pub fn audit(cfg: &Config, req: &Value) -> Result<Value> {
+    let sample = cap(req, "sample", 10, 100)?;
+    let cwd = gate::cwd(req)?;
+    let conn = match store::read_only(cfg) {
+        Ok(conn) => conn,
+        Err(Error::Unavailable) if !cfg.root.join("state.db").try_exists()? => {
+            return Ok(json!({"rows":[],"legacy_audit_outcomes":0}));
+        }
+        Err(error) => return Err(error),
+    };
+    let legacy: u64 = conn.query_row(
+        "SELECT count(*) FROM belief_outcomes WHERE source='audit'",
+        [],
+        |row| beliefs::sql_count(row, 0),
+    )?;
     let mut stmt=conn.prepare("SELECT id,subject,claim,confidence FROM beliefs WHERE status='active' ORDER BY random() LIMIT ?")?;
     let mut selected = Vec::new();
     let mut budget = crate::MAX_FRAME_BYTES;
-    let mut cursor = stmt.query([cap(req, "sample", 10, 100)? as i64])?;
+    let mut cursor = stmt.query([sample as i64])?;
     while let Some(r) = cursor.next()? {
         selected.push((
             r.get::<_, i64>(0)?,
@@ -652,9 +662,9 @@ pub fn audit(cfg: &Config, req: &Value, auth: &Authority) -> Result<Value> {
             let p = path.as_str().trim_end_matches(['.', ',', ';', ':']);
             (
                 if Path::new(p).exists() {
-                    "PASS"
+                    "MATCH"
                 } else {
-                    "FAIL"
+                    "NO_MATCH"
                 },
                 format!("path {p}"),
             )
@@ -662,7 +672,7 @@ pub fn audit(cfg: &Config, req: &Value, auth: &Authority) -> Result<Value> {
             let token = token.as_str().trim_end_matches(['.', ',', ';', ':']);
             let mut child = Command::new("git")
                 .args(["grep", "-q", "-F", "-e", token, "--"])
-                .current_dir(gate::cwd(req)?)
+                .current_dir(cwd)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -681,24 +691,17 @@ pub fn audit(cfg: &Config, req: &Value, auth: &Authority) -> Result<Value> {
                 std::thread::sleep(Duration::from_millis(10))
             };
             let verdict = match status {
-                Some(Some(0)) => "PASS",
-                Some(Some(1)) => "FAIL",
+                Some(Some(0)) => "MATCH",
+                Some(Some(1)) => "NO_MATCH",
                 _ => "UNCHECKABLE",
             };
-            (verdict, format!("git grep {token}"))
+            (verdict, format!("git grep {token} in {}", cwd.display()))
         } else {
             ("UNCHECKABLE", "no machine-checkable fragment".into())
         };
-        if matches!(verdict, "PASS" | "FAIL") {
-            beliefs::outcome(
-                cfg,
-                &json!({"belief_id":id,"event":if verdict=="PASS"{"confirmed"}else{"stale"},"source":"audit","note":detail}),
-                auth,
-            )?;
-        }
         rows.push(json!({"id":id,"subject":subject,"claim":crate::scrub::scrub(&claim)?,"confidence":confidence,"verdict":verdict,"detail":crate::scrub::scrub(&detail)?}));
     }
-    Ok(json!({"rows":rows}))
+    Ok(json!({"rows":rows,"legacy_audit_outcomes":legacy}))
 }
 pub fn derive_graph(cfg: &Config, req: &Value) -> Result<Value> {
     let subjects = match req.get("subject") {

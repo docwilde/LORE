@@ -990,7 +990,7 @@ def main() -> int:
     sp.set_defaults(fn=cmd_outcome)
 
     sp = sub.add_parser("audit",
-                        help="sample active beliefs, machine-check what can be, feed the ledger")
+                        help="report path and token matches for a sample of active beliefs")
     sp.add_argument("--sample", type=int, default=10)
     sp.add_argument("--cwd")
     sp.set_defaults(fn=cmd_audit)

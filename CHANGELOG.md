@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.62.34 — 2026-11-25
+
+- Fix **`lore audit`** writing belief outcomes from path existence and literal Git matches. Report fragment matches for review and count historical audit outcomes.
+
 ## 0.62.33 — 2026-11-25
 
 - Fix Claude Code `SessionEnd` cancellations by running the final review in LORE's detached supervisor.

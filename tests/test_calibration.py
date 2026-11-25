@@ -190,15 +190,15 @@ class TestStatsBuckets(DBTest):
 
 
 class TestAuditSampler(DBTest):
-    def test_path_check_pass_and_fail(self):
+    def test_path_check_match_and_no_match(self):
         present = Path(TMP) / "artifact-present.txt"
         present.write_text("x", encoding="utf-8")
         verdict, detail = lore.audit_check(f"the artifact lives at {present}", TMP)
-        self.assertEqual(verdict, "PASS")
+        self.assertEqual(verdict, "MATCH")
         self.assertIn(str(present), detail)
         verdict, _ = lore.audit_check(
             f"the artifact lives at {TMP}/no-such-file-zz.txt.", TMP)
-        self.assertEqual(verdict, "FAIL")  # trailing sentence dot stripped, then missing
+        self.assertEqual(verdict, "NO_MATCH")  # trailing sentence dot stripped
 
     def test_token_check_greps_the_repo(self):
         repo = Path(TMP) / "auditrepo"
@@ -206,35 +206,35 @@ class TestAuditSampler(DBTest):
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
         (repo / "flags.txt").write_text("run with --my-odd-flag always\n", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=repo, check=True)
-        self.assertEqual(lore.audit_check("invoke it with --my-odd-flag", str(repo))[0], "PASS")
-        self.assertEqual(lore.audit_check("invoke it with --absent-flag-zz", str(repo))[0], "FAIL")
+        self.assertEqual(lore.audit_check("invoke it with --my-odd-flag", str(repo))[0], "MATCH")
+        self.assertEqual(lore.audit_check("invoke it with --absent-flag-zz", str(repo))[0], "NO_MATCH")
 
     def test_prose_is_uncheckable(self):
         self.assertEqual(lore.audit_check("the user prefers terse answers", TMP)[0],
                          "UNCHECKABLE")
 
-    def test_cmd_audit_records_confirmed_and_stale(self):
+    def test_cmd_audit_reports_matches_without_changing_outcomes(self):
         conn = self.connect()
         present = Path(TMP) / "audit-live-artifact.txt"
         present.write_text("x", encoding="utf-8")
-        good = _belief(conn, f"corpus checkpoint kept at {present}", 0.7)
-        bad = _belief(conn, f"old dump kept at {TMP}/gone/removed-dump.jsonl", 0.7)
-        prose = _belief(conn, "audit prose claim nothing checkable here", 0.7)
+        _belief(conn, f"config {present} sets replica count to 1000", 0.7)
+        _belief(conn, f"old dump kept at {TMP}/gone/removed-dump.jsonl", 0.7)
+        _belief(conn, "audit prose claim nothing checkable here", 0.7)
+        outcomes = "SELECT * FROM belief_outcomes ORDER BY id"
+        before = conn.execute(outcomes).fetchall()
+        legacy = conn.execute(
+            "SELECT count(*) FROM belief_outcomes WHERE source = 'audit'"
+        ).fetchone()[0]
         conn.close()
         # sample far above the belief count so every active belief is drawn
         args = argparse.Namespace(sample=1000, cwd=TMP)
-        with contextlib.redirect_stdout(io.StringIO()):
+        report = io.StringIO()
+        with contextlib.redirect_stdout(report):
             self.assertEqual(lore.cmd_audit(args), 0)
-        conn = self.connect()
-
-        def audit_events(bid):
-            return [r[0] for r in conn.execute(
-                "SELECT event FROM belief_outcomes WHERE belief_id = ?"
-                " AND source = 'audit'", (bid,))]
-
-        self.assertEqual(audit_events(good), ["confirmed"])
-        self.assertEqual(audit_events(bad), ["stale"])
-        self.assertEqual(audit_events(prose), [])  # UNCHECKABLE records nothing
+        self.assertIn("      MATCH — path", report.getvalue())
+        self.assertIn("      NO_MATCH — path", report.getvalue())
+        self.assertIn(f"Legacy audit outcomes: {legacy}.", report.getvalue())
+        self.assertEqual(self.connect().execute(outcomes).fetchall(), before)
 
 
 if __name__ == "__main__":
