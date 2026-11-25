@@ -208,10 +208,15 @@ pub fn review(cfg: &Config, req: &Value) -> Result<Value> {
         .join(config::project_slug(gate::cwd(&req)?))
         .join(format!("{sid}.json"));
     let _lock = if req["dry_run"] != true {
+        let timeout = if std::env::var("LORE_NATIVE_BACKGROUND_REVIEW").is_ok_and(|v| v == "session-end") {
+            std::time::Duration::from_secs(305)
+        } else {
+            cfg.timeout
+        };
         Some(files::Locks::acquire(
             &cfg.root,
             &[stamp.clone()],
-            cfg.timeout,
+            timeout,
         )?)
     } else {
         None

@@ -31,7 +31,12 @@ fn due(cfg: &Config, path: &Path, interval: u64, start_clock: bool) -> Result<bo
     files::atomic_write(path, current.to_string().as_bytes())?;
     Ok(!start_clock || previous.is_some())
 }
-fn spawn(args: &[String], defer: bool) -> Result<()> {
+enum BackgroundJob {
+    Pull,
+    MidReview,
+    SessionEndReview,
+}
+fn spawn(args: &[String], job: BackgroundJob) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -42,13 +47,15 @@ fn spawn(args: &[String], defer: bool) -> Result<()> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .env_remove("LORE_NATIVE_SUPERVISOR_PID");
-        if defer {
-            command
+        match job {
+            BackgroundJob::Pull => command.env("LORE_NATIVE_BACKGROUND_PULL", "1"),
+            BackgroundJob::MidReview => command
                 .env("LORE_DEFER_DREAM", "1")
-                .env("LORE_NATIVE_BACKGROUND_REVIEW", "1");
-        } else {
-            command.env("LORE_NATIVE_BACKGROUND_PULL", "1");
-        }
+                .env("LORE_NATIVE_BACKGROUND_REVIEW", "1"),
+            BackgroundJob::SessionEndReview => {
+                command.env("LORE_NATIVE_BACKGROUND_REVIEW", "session-end")
+            }
+        };
         unsafe {
             command.pre_exec(|| {
                 if libc::setsid() < 0 {
@@ -71,7 +78,7 @@ fn spawn(args: &[String], defer: bool) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (args, defer);
+        let _ = (args, job);
         Err(Error::Unsupported)
     }
 }
@@ -97,7 +104,7 @@ pub fn pull_at_start(cfg: &Config, cwd: &str) -> Result<()> {
     if due(cfg, &cfg.root.join(".sync/pull"), interval, false)? {
         spawn(
             &["sync".into(), "pull".into(), "--cwd".into(), cwd.into()],
-            false,
+            BackgroundJob::Pull,
         )?;
     }
     Ok(())
@@ -133,6 +140,8 @@ pub fn review_at_prompt(
             .join(config::project_slug(Path::new(cwd)))
             .join(format!("{session}.jsonl"))
         && !path.starts_with(&cfg.codex_sessions)
+        && !(engine == "claude"
+            && crate::review::claude_hook_transcript(cfg, Path::new(cwd), session, &path))
     {
         return Err(Error::UnsafePath);
     }
@@ -157,10 +166,48 @@ pub fn review_at_prompt(
                 "--foreground".into(),
                 "--incremental".into(),
             ],
-            true,
+            BackgroundJob::MidReview,
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn review_at_session_end(cfg: &Config, req: &Value) -> Result<()> {
+    if cfg.disabled("LORE_DISABLE_REVIEW") {
+        return Ok(());
+    }
+    let cwd = crate::gate::cwd(req)?;
+    let sid = req["session_id"].as_str().ok_or(Error::InvalidRequest)?;
+    let path = Path::new(req["transcript"].as_str().ok_or(Error::InvalidRequest)?);
+    let project_transcript = cfg
+        .projects
+        .join(config::project_slug(cwd))
+        .join(format!("{sid}.jsonl"));
+    if path != project_transcript && !crate::review::claude_hook_transcript(cfg, cwd, sid, path) {
+        return Err(Error::UnsafePath);
+    }
+    let Some(file) = files::open_regular_if_exists(path, 256 * 1024 * 1024)? else {
+        return Ok(());
+    };
+    if file.metadata()?.len() == 0 {
+        return Ok(());
+    }
+    let mut request = req.clone();
+    request
+        .as_object_mut()
+        .ok_or(Error::InvalidRequest)?
+        .remove("prompt");
+    let json = serde_json::to_string(&request).map_err(|_| Error::InvalidRequest)?;
+    if json.len() > 16 * 1024 {
+        return Err(Error::TooLarge);
+    }
+    if !cfg!(target_os = "linux") {
+        return Err(Error::Unsupported);
+    }
+    spawn(
+        &["review".into(), "--json".into(), json],
+        BackgroundJob::SessionEndReview,
+    )
 }
 
 #[cfg(test)]

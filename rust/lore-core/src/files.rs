@@ -75,6 +75,10 @@ pub fn private_dir(path: &Path) -> Result<()> {
 /// Ancestor links are refused without changing any directory permissions.
 #[cfg(unix)]
 fn open_walk(path: &Path, directory: bool) -> Result<File> {
+    open_walk_if_exists(path, directory)?.ok_or(Error::Unavailable)
+}
+#[cfg(unix)]
+fn open_walk_if_exists(path: &Path, directory: bool) -> Result<Option<File>> {
     use std::{ffi::CString, path::Component};
     if !path.is_absolute() {
         return Err(Error::UnsafePath);
@@ -102,6 +106,9 @@ fn open_walk(path: &Path, directory: bool) -> Result<File> {
         let fd = unsafe { libc::openat(current.as_raw_fd(), name.as_ptr(), flags) };
         if fd < 0 {
             let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(None);
+            }
             return Err(
                 if matches!(
                     error.raw_os_error(),
@@ -115,7 +122,7 @@ fn open_walk(path: &Path, directory: bool) -> Result<File> {
         }
         current = unsafe { File::from_raw_fd(fd) };
     }
-    Ok(current)
+    Ok(Some(current))
 }
 pub fn open_directory(path: &Path) -> Result<File> {
     #[cfg(unix)]
@@ -134,9 +141,14 @@ pub fn open_directory(path: &Path) -> Result<File> {
     }
 }
 pub fn open_regular(path: &Path, cap: usize) -> Result<File> {
+    open_regular_if_exists(path, cap)?.ok_or(Error::Unavailable)
+}
+pub(crate) fn open_regular_if_exists(path: &Path, cap: usize) -> Result<Option<File>> {
     #[cfg(unix)]
     {
-        let file = open_walk(path, false)?;
+        let Some(file) = open_walk_if_exists(path, false)? else {
+            return Ok(None);
+        };
         let meta = file.metadata()?;
         if !meta.is_file() {
             return Err(Error::UnsafePath);
@@ -147,7 +159,7 @@ pub fn open_regular(path: &Path, cap: usize) -> Result<File> {
         if meta.nlink() != 1 || meta.uid() != unsafe { libc::geteuid() } {
             return Err(Error::UnsafePath);
         }
-        Ok(file)
+        Ok(Some(file))
     }
     #[cfg(not(unix))]
     {

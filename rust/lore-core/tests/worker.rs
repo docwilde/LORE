@@ -38,6 +38,12 @@ mode = os.environ['OWNED_MODE']
 if mode == 'blocked_stdin':
     time.sleep(30)
     sys.exit(7)
+if mode == 'hold_session_end':
+    deadline = time.monotonic() + 8
+    while not (root / 'finish-session-end').exists():
+        if time.monotonic() >= deadline:
+            sys.exit(7)
+        time.sleep(0.02)
 prompt = sys.stdin.read()
 (root / 'prompt').write_text(prompt)
 role = 'dreamer' if prompt.startswith('You are the dreamer') else 'deriver'
@@ -404,6 +410,87 @@ fn claude_native_worker_stages_derived_memory_without_curated_write() {
     assert!(fs::read_to_string(fixture.home.join("prompt"))
         .unwrap()
         .contains("U: owned source text 2"));
+}
+
+fn run_claude_session_end(fixture: &Fixture) -> std::process::Output {
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_lore-rs"))
+        .args(["hook", "--engine", "claude", "--event", "session-end"])
+        .env_clear()
+        .env("HOME", &fixture.home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("LORE_ROOT", &fixture.root)
+        .env("LORE_PROJECTS_DIR", &fixture.projects)
+        .env("LORE_SKILLS_DIR", fixture.home.join("skills"))
+        .env("LORE_DISABLE_SYNC", "1")
+        .env("LORE_CLAUDE_BIN", fixture.home.join("provider"))
+        .env("LORE_DERIVER_MODEL", "owned-model")
+        .env("OWNED_FIXTURE", &fixture.home)
+        .env("OWNED_MODE", "hold_session_end")
+        .current_dir(&fixture.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let input = json!({
+        "hook_event_name": "SessionEnd", "reason": "other", "cwd": fixture.cwd,
+        "session_id": "owned-session", "transcript_path": fixture.source
+    });
+    writeln!(hook.stdin.take().unwrap(), "{input}").unwrap();
+    hook.wait_with_output().unwrap()
+}
+
+fn wait_for(path: &Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "timed out waiting for {path:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn claude_session_end_returns_before_review_and_reads_the_actual_worktree() {
+    let fixture = Fixture::new("claude", false);
+    let gitdir = fixture.home.join("main/.git/worktrees/review");
+    fs::create_dir_all(&gitdir).unwrap();
+    fs::write(fixture.cwd.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+    let project_slug = config::project_slug(&fixture.cwd);
+    assert_ne!(fixture.source.parent().unwrap().file_name().unwrap(), project_slug.as_str());
+    let rows = (0..3)
+        .map(|i| json!({"cwd":fixture.cwd,"type":"user","message":{"content":format!("Fixture prompt {i}")}}))
+        .map(|row| format!("{row}\n"))
+        .collect::<String>();
+    fs::write(&fixture.source, rows).unwrap();
+    let slots = (0..4)
+        .map(|slot| fixture.root.join(format!(".native-jobs/review-{slot}")))
+        .collect::<Vec<_>>();
+    let capacity = files::Locks::acquire(&fixture.root, &slots, Duration::from_secs(1)).unwrap();
+    let output = run_claude_session_end(&fixture);
+    assert!(output.status.success(), "{:?}", output);
+    assert!(!fixture.home.join("ready").exists());
+    drop(capacity);
+    wait_for(&fixture.home.join("ready"), Duration::from_secs(5));
+    assert!(fixture.pending().is_empty());
+    fs::write(fixture.home.join("finish-session-end"), "").unwrap();
+    wait_for(
+        &fixture.root.join(".derived").join(project_slug).join("owned-session.json"),
+        Duration::from_secs(5),
+    );
+    assert_eq!(fixture.pending().len(), 1);
+    fixture.assert_not_curated();
+}
+
+#[test]
+fn claude_session_end_skips_missing_transcripts_and_refuses_symlinks() {
+    let fixture = Fixture::new("claude", false);
+    let content = fixture.home.join("transcript");
+    fs::rename(&fixture.source, &content).unwrap();
+    assert!(run_claude_session_end(&fixture).status.success());
+    std::os::unix::fs::symlink(content, &fixture.source).unwrap();
+    let result = run_claude_session_end(&fixture);
+    assert!(!result.status.success());
+    assert_eq!(result.stderr, b"lore-rs: unsafe_path\n");
+    assert!(!fixture.home.join("ready").exists());
 }
 #[test]
 fn codex_native_worker_proves_provider_source_and_keeps_raw_tools() {

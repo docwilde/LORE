@@ -42,8 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/lore\" hook --engine claude --event session-end",
-            "timeout": 60
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/lore\" hook --engine claude --event session-end"
           }
         ]
       }
