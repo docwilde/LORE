@@ -1363,6 +1363,8 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
+    // APFS refuses non-UTF-8 file names, so this fixture cannot be created on macOS.
+    #[cfg(target_os = "linux")]
     fn non_utf8_json_stem_makes_every_session_summary_incomplete() {
         use std::os::unix::ffi::OsStringExt;
         let temp = tempfile::tempdir().unwrap();
