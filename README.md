@@ -3,7 +3,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/status-beta-f59f00" alt="beta: the store migrates itself; command surfaces can still change">
   <a href="https://github.com/docwilde/LORE/releases"><img src="https://img.shields.io/github/v/release/docwilde/LORE?label=release&color=ff7f50" alt="latest release"></a>
-  <img src="https://img.shields.io/badge/Claude%20Code%20%7C%20Codex%20%7C%20DOXA-shared%20memory-d97757" alt="shared memory for Claude Code, Codex, and DOXA">
+  <img src="https://img.shields.io/badge/Claude%20Code%20%7C%20Codex%20%7C%20Antigravity-shared%20memory-d97757" alt="shared memory for Claude Code, Codex, and Google Antigravity">
   <img src="https://img.shields.io/badge/curated%20proposals-reviewed-2f9e44" alt="curated memory proposals require review">
   <img src="https://img.shields.io/badge/search-SQLite%20FTS5-044a64" alt="SQLite FTS5 search">
   <img src="https://img.shields.io/badge/search-no%20embeddings%20or%20API%20calls-555" alt="search uses no embeddings or API calls">
@@ -12,12 +12,12 @@
 
 # LORE — Lots Of Reconciled Engrams
 
-**Persistent memory shared by Claude Code, Codex, and DOXA.** Curated facts
-are hard-capped; curated proposals wait for review. Derived beliefs retain their
-evidence and appear on request or through explicitly enabled context.
+**Shared local memory for Claude Code, Codex, and Gemini via Google Antigravity.**
+LORE carries curated facts across sessions, keeps citations on derived beliefs,
+and makes earlier conversations searchable. Each agent loads memory through
+its own native hooks.
 
-Gemini sessions in Google Antigravity can use the same memory and local session
-index through standalone hooks or DOXA. [Antigravity setup](#google-antigravity)
+[Claude Code setup](#claude-code) · [Codex setup](#codex) · [Google Antigravity setup](#google-antigravity)
 
 > [!WARNING]
 > **Beta.** Commands, caps, and configuration may change between releases.
@@ -36,11 +36,12 @@ and relations between beliefs do not turn them into approved facts.
 LORE 0.62.36 adds standalone Antigravity memory hooks and AST codegraph queries
 for Rust and Python. [Release notes](https://github.com/docwilde/LORE/releases/tag/v0.62.36)
 
-- **Claude Code, Codex, and DOXA memory.** Share one native store for capped
-  user and project facts across engines; host facts stay local.
+- **Shared memory.** Claude Code, Codex, and Google Antigravity read capped
+  user and project facts from the same local store. Host facts stay local.
 - **Beliefs with evidence.** Query conclusions, citations, and their graph on
   demand, or enable experimental, bounded graph context.
-- **Session search.** Local FTS5 index of Claude Code, DOXA, and Codex transcripts.
+- **Session search.** SQLite FTS5 searches indexed Claude Code, Codex,
+  Antigravity, and DOXA transcripts locally.
 - **File maps.** A short `path — purpose` guide to important project files.
 - **AST codegraph.** Inspect Rust and Python definitions, imports, call sites,
   and module layout in the current Git worktree. [Codegraph commands](docs/manual.md#ast-codegraph)
@@ -56,8 +57,8 @@ for Rust and Python. [Release notes](https://github.com/docwilde/LORE/releases/t
   attempted calls and independent verification.
 - **Cross-machine sync.** Signed hub, peer, or offline transfer, with optional
   [skill usage counters](docs/skill-usage-sync.md); off by default.
-- **Agent integration.** Claude Code and Codex plugins inject startup context;
-  interactive CLI writes apply directly, while hooks and model tools stage proposals.
+- **Native startup hooks.** Claude Code, Codex, and Google Antigravity load
+  workspace memory when a session starts.
 
 Engine-origin labels add context, not authority. The [manual](docs/manual.md)
 explains the write gates, hooks, and belief model.
@@ -95,44 +96,6 @@ directory. Store paths and identity remain process configuration. Saved credenti
 
 **First run:** review only looks forward, so run `/lore:backfill project` once to derive existing sessions into the belief store.
 
-### Windows
-
-Native Windows is not supported yet. The `bin/lore` launcher and `./task`
-require a POSIX shell, and the Rust carrier uses Unix file and process APIs.
-CI checks Linux and macOS, but not Windows.
-
-[WSL 2](https://learn.microsoft.com/windows/wsl/install) is the practical
-route to try on a Windows machine: install Rust and run LORE and its Claude
-Code or Codex integration inside the same Linux
-distribution. Keep the checkout and LORE store in the distribution's Linux
-filesystem (for example, under `~/`), then follow the install steps above.
-This WSL 2 setup has not been verified in LORE CI; see the
-[platform notes](docs/manual.md#platform-support) before relying on it.
-
-### Google Antigravity
-
-**Shared memory through DOXA.** On native Linux, choose **Antigravity** in DOXA’s
-**New Session** form and select a Gemini model. DOXA injects the working
-directory’s LORE memory on the first turn and indexes the scrubbed transcript
-on session shutdown. Set `DOXA_LORE=0` to disable both for a session.
-[DOXA Antigravity setup](https://github.com/docwilde/doxa/blob/main/docs/antigravity.md)
-
-**Standalone Antigravity.** The `lore-tool-evidence` plugin loads shared
-memory at conversation start, indexes completed chat steps when the agent
-is idle, and records tool outcomes. Install it from this checkout and
-keep `lore-rs` on `PATH`.
-
-```sh
-./task install
-agy plugin install "$PWD/antigravity"
-```
-
-The hooks use a single workspace to scope memory and indexing. Start a new
-conversation to load the latest snapshot. Antigravity may retain the startup
-context in its own history. The indexing hook stores scrubbed user and assistant
-text locally. Use `LORE_DISABLE_INJECT=1` or `LORE_DISABLE_INDEX=1`
-to turn off either hook. [Tool evidence](docs/tool-evidence.md)
-
 ### Codex
 
 LORE supports Codex through the portable [`plugin.json`](plugin.json) and
@@ -141,8 +104,7 @@ then review and trust its hooks with `/hooks` in Codex. Once trusted, the startu
 hook injects the shared user and current project snapshot at startup, resume,
 clear, compaction, and fork. Codex requires a new review when a hook changes; see its
 [hook trust documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
-Claude Code, Codex, and DOXA read the same store; set `LORE_ROOT` when using a
-store other than `~/.claude/lore`.
+Set `LORE_ROOT` when using a shared store other than `~/.claude/lore`.
 
 The [Codex skill](codex/skills/lore/SKILL.md) supports explicit recall and
 memory writes. Index local Codex, Claude Code, and DOXA transcripts with
@@ -179,12 +141,54 @@ The skill calls LORE's CLI against the shared store when a task needs recall.
 This skill-only setup does not install the automatic SessionStart hook;
 install the full Codex plugin for startup context injection.
 
+### Google Antigravity
+
+With Rust and the Antigravity CLI (`agy`) installed, build LORE and install the
+standalone plugin. Keep `agy` and the native `lore-rs` carrier on `PATH`. The
+carrier installs to `~/.local/bin` by default.
+
+```sh
+git clone https://github.com/docwilde/LORE.git
+cd LORE
+./task install
+agy plugin install "$PWD/antigravity"
+```
+
+Start a new Gemini conversation with one workspace open. Use the same LORE store
+as your other agents. Set `LORE_ROOT` if you keep the store outside `~/.claude/lore`.
+
+| Native hook | What it does |
+| --- | --- |
+| `SessionStart` | Loads the shared user and workspace memory into a new conversation. |
+| `Stop` | Indexes scrubbed user and assistant messages locally when the agent is idle. |
+| `PostToolUse` | Records reported tool outcomes for later review. |
+
+Use `lore search "terms"` from the workspace to find indexed messages. Start
+a fresh conversation to load an updated snapshot. Antigravity may retain the
+startup context in its own history. Set `LORE_DISABLE_INJECT=1` to turn off
+startup memory, `LORE_DISABLE_INDEX=1` to turn off transcript indexing, or
+`LORE_TOOL_EVIDENCE=0` to turn off tool evidence recording. [Tool evidence guide](docs/tool-evidence.md)
+
+### Windows
+
+Native Windows is not supported yet. The `bin/lore` launcher and `./task`
+require a POSIX shell, and the Rust carrier uses Unix file and process APIs.
+CI checks Linux and macOS, but not Windows.
+
+[WSL 2](https://learn.microsoft.com/windows/wsl/install) is the practical
+route to try on a Windows machine: install Rust and run LORE and its Claude
+Code or Codex integration inside the same Linux
+distribution. Keep the checkout and LORE store in the distribution's Linux
+filesystem (for example, under `~/`), then follow the install steps above.
+This WSL 2 setup has not been verified in LORE CI; see the
+[platform notes](docs/manual.md#platform-support) before relying on it.
+
 ## Memory and graph context
 
 Claude Code refreshes curated memory on prompt submission when its content
-changes by default (`LORE_REFRESH_ON_CHANGE=0` opts out). The bundled Codex
-hook supplies startup snapshots; read back changes during a session with
-`lore memory show` or the MCP tool `lore_memory_list`.
+changes by default (`LORE_REFRESH_ON_CHANGE=0` opts out). Codex and Antigravity
+load startup snapshots. Read back current memory with `lore memory show` or
+the MCP tool `lore_memory_list` where the server is configured.
 
 Replacements and removals require a unique `--match`. Empty or whitespace-only
 replacement text is refused; use `memory remove` to delete an entry:
@@ -294,8 +298,8 @@ LORE provides a canonical **Rust module** for
 [DOXA](https://github.com/docwilde/doxa): memory, beliefs, review, context and
 session search share the existing files, SQLite store and signed sync log.
 See the [native core guide](docs/native-core.md) for build commands and contracts.
-Claude Code and Codex hooks, the standalone CLI, MCP, review and sync transports
-use this native core. The Python `lore_core`
+The standalone CLI, provider hooks, MCP, review, and sync transports use
+this native core. The Python `lore_core`
 [library](docs/manual.md#lore_core-as-a-library) remains a compatibility reference
 and interoperability test oracle.
 
@@ -312,7 +316,7 @@ and interoperability test oracle.
 Curated memory follows the [Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory)
 pattern: hard caps, a reviewer that proposes but never applies, and stable
 context with change-detected refresh in Claude Code and startup snapshots in
-Codex. The belief layer uses [Honcho](https://github.com/plastic-labs/honcho)'s
+Codex and Antigravity. The belief layer uses [Honcho](https://github.com/plastic-labs/honcho)'s
 deriver/dreamer/dialectic split, stored locally in SQLite.
 
 The name means the accumulated knowledge of a craft — and, coincidentally, Data's brother in TNG. The logo's amber is a positronic wink at that.
