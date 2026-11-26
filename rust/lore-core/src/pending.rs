@@ -1361,7 +1361,8 @@ mod tests {
             assert_eq!(for_sessions(&cfg, &request).unwrap()["complete"], true);
         }
     }
-    #[cfg(unix)]
+    // APFS refuses non-UTF-8 file names, so this fixture cannot be created on macOS.
+    #[cfg(target_os = "linux")]
     #[test]
     fn non_utf8_json_stem_makes_every_session_summary_incomplete() {
         use std::os::unix::ffi::OsStringExt;

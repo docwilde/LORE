@@ -29,7 +29,7 @@ pub fn required(args: &[String]) -> bool {
                 || args.windows(2).any(|a| a == ["--event", "session-end"])
                     && !args.windows(2).any(|a| a == ["--engine", "claude"]))
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn enter_worker() -> Result<bool> {
     let Some(raw) = std::env::var_os("LORE_NATIVE_SUPERVISOR_PID") else {
         return Ok(false);
@@ -56,9 +56,12 @@ pub fn enter_worker() -> Result<bool> {
             worker_parent_lost as *const () as libc::sighandler_t,
         );
     }
+    #[cfg(target_os = "linux")]
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } != 0 {
         return Err(Error::Untrusted);
     }
+    #[cfg(target_os = "macos")]
+    watch_parent(pid);
     if unsafe { libc::getppid() } != pid {
         unsafe {
             libc::kill(-libc::getpgrp(), libc::SIGKILL);
@@ -67,7 +70,7 @@ pub fn enter_worker() -> Result<bool> {
     std::env::remove_var("LORE_NATIVE_SUPERVISOR_PID");
     Ok(true)
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn run(args: &[String]) -> Result<i32> {
     use std::os::unix::process::CommandExt;
     unsafe {
@@ -104,6 +107,7 @@ pub fn run(args: &[String]) -> Result<i32> {
     } else {
         None
     };
+    #[cfg(target_os = "linux")]
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) } != 0 {
         return Err(Error::Untrusted);
     }
@@ -117,7 +121,11 @@ pub fn run(args: &[String]) -> Result<i32> {
         .stderr(Stdio::inherit());
     unsafe {
         command.pre_exec(move || {
-            if libc::setpgid(0, 0) != 0 || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            #[cfg(target_os = "linux")]
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
             if libc::getppid() != parent {
@@ -162,6 +170,8 @@ pub fn run(args: &[String]) -> Result<i32> {
     let status = child.wait();
     // Subreaper ownership admits escaped provider grandchildren too. Reparented
     // children are our children, so none can be an unrelated reused PID.
+    // shortcut: macOS has no subreaper or /proc, so a grandchild that left the
+    // process group is not reaped; upgrade with kqueue process tracking if needed.
     let children = std::path::PathBuf::from(format!("/proc/{parent}/task/{parent}/children"));
     let cleanup_deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -194,11 +204,21 @@ pub fn run(args: &[String]) -> Result<i32> {
     }
     Ok(status?.code().unwrap_or(1))
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn watch_parent(parent: libc::pid_t) {
+    const PARENT_POLL: Duration = Duration::from_millis(100);
+    std::thread::spawn(move || loop {
+        if unsafe { libc::getppid() } != parent {
+            worker_parent_lost(libc::SIGTERM);
+        }
+        std::thread::sleep(PARENT_POLL);
+    });
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn enter_worker() -> Result<bool> {
     Ok(false)
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn run(_args: &[String]) -> Result<i32> {
     Err(Error::Unsupported)
 }
