@@ -137,6 +137,9 @@ fn freshness_rule(policy: RefreshPolicy, engine: &str) -> String {
     if engine == "codex" {
         return "- In Codex, this snapshot is injected at startup, resume, clear, and compaction. Writes land in the files immediately; read them during this session with lore-rs memory show.".into();
     }
+    if engine == "omp" {
+        return "- In oh-my-pi, this snapshot is injected with the first prompt and again after clear and compaction. Writes land in the files immediately; read them during this session with lore-rs memory show.".into();
+    }
     if policy.on_change {
         "- This snapshot re-injects on your NEXT prompt whenever its content changed (change-detected each prompt; LORE_REFRESH_ON_CHANGE=0 opts out); the refresh supersedes every earlier copy in the conversation.".into()
     } else if let Some(interval) = policy.interval_secs {

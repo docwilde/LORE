@@ -1250,7 +1250,7 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
     }
     let engine = options["engine"]
         .as_str()
-        .filter(|s| matches!(*s, "claude" | "codex"))
+        .filter(|s| matches!(*s, "claude" | "codex" | "omp"))
         .ok_or(Error::InvalidRequest)?;
     let event = options["event"]
         .as_str()
@@ -1304,7 +1304,7 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
                 return Ok(());
             }
             let mut snapshot = crate::context::snapshot_for_engine(cfg, &req, engine)?;
-            if engine == "codex" {
+            if engine != "claude" {
                 if let Ok(Value::String(graph)) = crate::context::graph_context_op(cfg, &req) {
                     if !graph.is_empty() {
                         let text = snapshot.as_str().ok_or(Error::InvalidRequest)?;
@@ -1317,7 +1317,7 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
             )
         }
         "prompt" => {
-            if engine == "codex" {
+            if engine != "claude" {
                 if cfg.disabled("LORE_DISABLE_INJECT") {
                     return Ok(());
                 }
@@ -1346,7 +1346,7 @@ pub fn hook(cfg: &Config, args: &[String]) -> Result<()> {
                 output(frame)
             }
         }
-        "pre-compact" | "session-end" => {
+        "pre-compact" | "session-end" if engine != "omp" => {
             let sid = session.ok_or(Error::InvalidRequest)?;
             let transcript = input["transcript_path"]
                 .as_str()
