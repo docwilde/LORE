@@ -33,9 +33,8 @@ and relations between beliefs do not turn them into approved facts.
 
 ## What you get
 
-LORE 0.62.35 excludes historical heuristic audit outcomes from belief
-calibration and the STEER threshold. `lore audit` reports path and Git token
-matches for review. [Release notes](https://github.com/docwilde/LORE/releases/tag/v0.62.35)
+LORE 0.62.36 adds standalone Antigravity memory hooks and AST codegraph queries
+for Rust and Python. [Release notes](https://github.com/docwilde/LORE/releases/tag/v0.62.36)
 
 - **Claude Code, Codex, and DOXA memory.** Share one native store for capped
   user and project facts across engines; host facts stay local.
