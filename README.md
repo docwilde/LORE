@@ -15,7 +15,7 @@
 **Shared local memory for Claude Code, Codex, and Gemini via Google Antigravity.**
 LORE carries curated facts across sessions, keeps citations on derived beliefs,
 and makes earlier conversations searchable. Each agent loads memory through
-its own native hooks.
+native hooks when configured.
 
 [Claude Code setup](#claude-code) · [Codex setup](#codex) · [Google Antigravity setup](#google-antigravity)
 
@@ -69,15 +69,18 @@ Use `/lore:filemap` to inspect file maps; `LORE_FILEMAP_CAP` and
 
 ### Claude Code
 
-```
-/plugin marketplace add docwilde/lore
-/plugin install lore
+Install Rust if you need to build the native carrier. [Rust installation](https://rustup.rs)
+
+In a Claude Code session, run these commands in order.
+
+```text
+/plugin marketplace add docwilde/LORE
+/plugin install lore@lore
 /lore:setup
 ```
 
-The plugin uses the native Rust CLI. Install Rust with [rustup](https://rustup.rs)
-if `lore-rs` is not already installed; the first `/lore:setup` builds it once
-in a private disk cache. Hooks use the installed carrier and never build during
+The first `/lore:setup` builds the native carrier in a private disk cache
+when a compatible `lore-rs` is unavailable. Hooks use the installed carrier and never build during
 startup. From a checkout, use `./task build` or `./task install`.
 The carrier may use a newer patch release within the plugin’s major/minor
 version; preview versions require an exact match.
@@ -98,48 +101,69 @@ directory. Store paths and identity remain process configuration. Saved credenti
 
 ### Codex
 
-LORE supports Codex through the portable [`plugin.json`](plugin.json) and
-its [startup, prompt and tool hooks](codex/hooks/hooks.json). Enable the full plugin,
-then review and trust its hooks with `/hooks` in Codex. Once trusted, the startup
-hook injects the shared user and current project snapshot at startup, resume,
-clear, compaction, and fork. Codex requires a new review when a hook changes; see its
-[hook trust documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
-Set `LORE_ROOT` when using a shared store other than `~/.claude/lore`.
-
-The [Codex skill](codex/skills/lore/SKILL.md) supports explicit recall and
-memory writes. Index local Codex, Claude Code, and DOXA transcripts with
-`lore index`, search them with `lore search "terms" --all`, and read a match
-with `lore session <id>`. Indexing and search stay local and use SQLite FTS5.
-The Codex injection hooks read context without indexing transcripts or
-scheduling review.
-
-Interactive Codex sessions can apply CLI memory writes directly. Calls
-classified as hooks or detached/model writers stage proposals; inspect them
-with `lore pending` and resolve the exact reviewed
-proposal in the native terminal or DOXA. The MCP tool `lore_remember` always
-stages a proposal. A proposal or search result is not an approved fact.
-
-The plugin declares its startup and prompt hooks and skills. Register the native
-MCP server separately to give Codex tools for curated memory, beliefs and evidence,
-graph traversal, session search, and staged memory proposals. From this checkout:
+With Rust and the Codex CLI installed, build the native carrier and register
+LORE’s MCP server from your terminal.
 
 ```sh
+git clone https://github.com/docwilde/LORE.git
+cd LORE
 ./task install
-codex mcp add lore --env LORE_ENGINE=codex -- "$HOME/.local/bin/lore-rs" mcp --engine codex
+codex mcp add lore --env LORE_ENGINE=codex -- \
+  "$HOME/.local/bin/lore-rs" mcp --engine codex
 ```
 
-Restart Codex to load the registered server.
+Start a fresh Codex session to use LORE’s memory, beliefs, evidence, and session
+search tools. Run `codex mcp list` to check the registration. Set `LORE_ROOT` if
+your shared store lives outside `~/.claude/lore`.
 
-For a skill-only local setup from this checkout:
+#### Load memory at startup
+
+Keep `~/.local/bin` on `PATH`. Add this `SessionStart` entry to `hooks.json`
+in `${CODEX_HOME:-$HOME/.codex}`. Keep any hooks you already have.
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "lore-rs hook --engine codex --event session-start",
+            "timeout": 10,
+            "additionalContextLimit": 16000
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Open Codex in your project and use `/hooks` to review and trust the LORE hook.
+Start a fresh session to load the shared user and project snapshot. Review the
+hook again after its command changes. [Codex hook trust](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)
+
+#### Recall past sessions
+
+Run `lore index` to index local Codex, Claude Code, and DOXA transcripts. Use
+`lore search "terms" --all` to find a match and `lore session <id>` to read it.
+Indexing and search stay local and use SQLite FTS5.
+
+Interactive CLI writes can apply directly. Hook and model writers stage
+proposals for review with `lore pending`. The MCP tool `lore_remember` always
+stages a proposal.
+
+#### Install the local skill
+
+From the checkout, link the [Codex skill](codex/skills/lore/SKILL.md) to give
+Codex instructions for explicit recall and memory writes.
 
 ```sh
 mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
 ln -s "$(pwd)/codex/skills/lore" "${CODEX_HOME:-$HOME/.codex}/skills/lore"
 ```
-
-The skill calls LORE's CLI against the shared store when a task needs recall.
-This skill-only setup does not install the automatic SessionStart hook;
-install the full Codex plugin for startup context injection.
 
 ### Google Antigravity
 
