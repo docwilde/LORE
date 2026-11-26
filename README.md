@@ -228,10 +228,10 @@ An absent entry reports `match_not_found`; multiple matches report
 Graph context is experimental and off by default. Enable it in the shared
 settings with `lore config set LORE_GRAPH_CONTEXT 1`. Its defaults are a
 1,200-character budget (`LORE_GRAPH_CONTEXT_CAP`) and one relation hop
-(`LORE_GRAPH_CONTEXT_HOPS`). The Claude prompt hook and bundled Codex startup
-and `UserPromptSubmit` hooks inject the bounded block. Codex retrieves graph
-context on the first prompt and subsequent prompts; retrieval failures leave
-startup memory available and omit the graph block.
+(`LORE_GRAPH_CONTEXT_HOPS`). The Claude Code prompt hook injects the bounded
+block. In Codex, use the startup hook above and add a `UserPromptSubmit` hook
+that calls `lore-rs hook --engine codex --event prompt` to retrieve graph
+context on prompts. Startup memory stays available if graph retrieval fails.
 With graph context enabled, `lore graph context --prompt "topic terms"` reads
 the block explicitly. `lore graph stats`, `lore graph neighbours <id>`, and the
 MCP tool `lore_belief_neighbours` support on-demand inspection and traversal.
