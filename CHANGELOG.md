@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.62.36 — 2026-11-26
+
+**Standalone Antigravity**
+
+- Load workspace memory through the native `SessionStart` hook.
+- Index completed transcript messages locally through the native `Stop` hook.
+
+**AST codegraph**
+
+- Add `lore codegraph` queries for Rust and Python definitions, imports,
+  calls, symbols, and modules in a Git worktree.
+
 ## 0.62.35 — 2026-11-25
 
 - Exclude historical heuristic audit outcomes from belief calibration, graph ranking, and the STEER threshold. Preserve signed ledger history.

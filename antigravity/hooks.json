@@ -1,4 +1,20 @@
 {
+  "lore-memory": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "lore-rs hook --engine antigravity --event session-start",
+        "timeout": 10
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "lore-rs hook --engine antigravity --event stop",
+        "timeout": 15
+      }
+    ]
+  },
   "lore-tool-evidence": {
     "enabled": true,
     "PostToolUse": [

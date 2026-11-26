@@ -53,6 +53,25 @@ current project; they do not include proposals for unrelated projects. A
 file-map, skill, or belief proposal with a project identity is reviewed only
 from that project.
 
+## AST codegraph
+
+`lore codegraph` queries the current Git worktree through the same bounded
+Rust and Python AST engine used by DOXA. The engine is built into `lore-rs`.
+
+```sh
+lore codegraph file src/lib.rs
+lore codegraph symbol parse_config
+lore codegraph imports tools/importer.py
+lore codegraph calls src/lib.rs
+lore codegraph modules src/lib.rs --cwd /path/to/worktree
+```
+
+The result includes source hashes, line locations, scan coverage, and omitted
+counts. Imports are declarations. Call and module candidates describe syntax
+or worktree layout. Compiler bindings and runtime import resolution stay
+unknown. Queries read source without executing it and the index stays in
+memory for the query. [DOXA AST engine notes](https://github.com/docwilde/doxa/blob/v2.0.0-beta.90/docs/plans/code-graph.md)
+
 ## Six stores
 
 | Store | Location | Cap | Gate |

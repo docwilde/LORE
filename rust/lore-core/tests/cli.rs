@@ -4,6 +4,7 @@ use lore_core::{config, files, gate};
 use serde_json::json;
 use std::{
     fs,
+    io::Write,
     os::unix::{fs::symlink, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -34,6 +35,9 @@ impl Fixture {
         self.invoke_env(args, &[])
     }
     fn invoke_env(&self, args: &[&str], env: &[(&str, &str)]) -> (bool, String, String) {
+        self.invoke_with_input(args, env, None)
+    }
+    fn invoke_with_input(&self, args: &[&str], env: &[(&str, &str)], input: Option<&str>) -> (bool, String, String) {
         let out = self.home.join("stdout");
         let err = self.home.join("stderr");
         let mut child = Command::new(env!("CARGO_BIN_EXE_lore-rs"))
@@ -48,11 +52,14 @@ impl Fixture {
             .envs(env.iter().copied())
             .current_dir(&self.cwd)
             .process_group(0)
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::from(fs::File::create(&out).unwrap()))
             .stderr(Stdio::from(fs::File::create(&err).unwrap()))
             .spawn()
             .unwrap();
+        if let Some(input) = input {
+            child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        }
         let deadline = Instant::now() + Duration::from_secs(3);
         let ready = loop {
             let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -98,6 +105,99 @@ impl Fixture {
             .join("filemap")
             .join(format!("{}.md", config::project_slug(&self.cwd)))
     }
+}
+
+#[test]
+fn antigravity_start_injects_only_the_declared_workspace() {
+    let fixture = Fixture::new();
+    let workspace = fixture.home.join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    fixture.write(&fixture.project(), "- wrong workspace fact\n");
+    fixture.write(&fixture.root.join("projects").join(config::project_slug(&workspace)).join("MEMORY.md"),
+        "- selected workspace fact\n");
+    let args = ["hook", "--engine", "antigravity", "--event", "session-start"];
+    let input = json!({"workspacePaths":[workspace]}).to_string();
+    let (ok, out, error) = fixture.invoke_with_input(&args, &[], Some(&input));
+    assert!(ok && error.is_empty(), "{error}");
+    let response: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let text = response["injectSteps"][0]["systemMessage"]["systemMessage"].as_str().unwrap();
+    assert!(text.contains("selected workspace fact"));
+    assert!(!text.contains("wrong workspace fact"));
+    let ambiguous = json!({"workspacePaths":[workspace, fixture.cwd]}).to_string();
+    for (input, env) in [(&ambiguous, &[][..]), (&input, &[("LORE_DISABLE_INJECT", "1")][..])] {
+        let (ok, out, error) = fixture.invoke_with_input(&args, env, Some(input));
+        assert!(ok && error.is_empty(), "{error}");
+        assert_eq!(out.trim(), "{}");
+    }
+}
+
+#[test]
+fn antigravity_stop_indexes_owned_chat_steps_and_is_safe_to_repeat() {
+    let fixture = Fixture::new();
+    let sid = "5b200830-3bc3-4e5b-aa56-4e0649feaddb";
+    let transcript = fixture.home.join(".gemini/antigravity-cli/brain").join(sid)
+        .join(".system_generated/logs/transcript.jsonl");
+    fixture.write(&transcript, concat!(
+        "{\"type\":\"SYSTEM_MESSAGE\",\"source\":\"SYSTEM\",\"status\":\"DONE\",\"content\":\"injected memory\"}\n",
+        "{\"type\":\"USER_INPUT\",\"source\":\"USER_EXPLICIT\",\"status\":\"DONE\",\"created_at\":\"2026-11-25T00:00:00Z\",\"content\":\"<USER_REQUEST>\\nlorehookneedle question\\n</USER_REQUEST>\\n<ADDITIONAL_METADATA>private clock metadata</ADDITIONAL_METADATA>\"}\n",
+        "{\"type\":\"GENERIC\",\"source\":\"MODEL\",\"status\":\"DONE\",\"content\":\"tool output\"}\n",
+        "{\"type\":\"PLANNER_RESPONSE\",\"source\":\"MODEL\",\"status\":\"DONE\",\"created_at\":\"2026-11-25T00:00:01Z\",\"content\":\"answer sk-abcdefghijklmnopqrstuvwxyz123456\",\"thinking\":\"private reasoning\"}\n",
+    ));
+    let args = ["hook", "--engine", "antigravity", "--event", "stop"];
+    let event = json!({"workspacePaths":[fixture.cwd],"conversationId":sid,
+                       "transcriptPath":transcript,"fullyIdle":true});
+    let mut busy = event.clone();
+    busy["fullyIdle"] = json!(false);
+    let (ok, _, _) = fixture.invoke_with_input(&args, &[], Some(&busy.to_string()));
+    assert!(ok && !fixture.root.exists());
+    for _ in 0..2 {
+        let (ok, out, error) = fixture.invoke_with_input(&args, &[], Some(&event.to_string()));
+        assert!(ok && error.is_empty(), "{error}");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&out).unwrap(), json!({"decision":"stop"}));
+    }
+    let (ok, out, error) = fixture.invoke(&["session", sid]);
+    assert!(ok, "{error}");
+    let session: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(session["session"][0]["engine"], "antigravity");
+    assert_eq!(session["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(session["rows"][0]["content"], "lorehookneedle question");
+    assert!(!out.contains("injected memory") && !out.contains("tool output") && !out.contains("private reasoning"));
+    assert!(!out.contains("sk-abcdefghijklmnopqrstuvwxyz123456"));
+    let (ok, out, error) = fixture.invoke(&["search", "lorehookneedle"]);
+    assert!(ok && out.contains(sid), "{error}");
+
+    let other_file = fixture.home.join("other-transcript.jsonl");
+    fs::rename(&transcript, &other_file).unwrap();
+    symlink(&other_file, &transcript).unwrap();
+    let (ok, out, error) = fixture.invoke_with_input(&args, &[], Some(&event.to_string()));
+    assert!(ok && out.contains("stop") && error.contains("unsafe_path"), "{error}");
+}
+
+#[test]
+fn standalone_codegraph_queries_rust_and_python_without_a_memory_store() {
+    let fixture = Fixture::new();
+    assert!(Command::new("git").args(["init", "-q"])
+        .current_dir(&fixture.cwd).status().unwrap().success());
+    let rust = "use std::fmt;\npub fn root() { helper(); }\nfn helper() {}\nmod child;\n";
+    fs::write(fixture.cwd.join("lib.rs"), rust).unwrap();
+    fs::write(fixture.cwd.join("child.rs"), "pub fn child() {}\n").unwrap();
+    fs::write(fixture.cwd.join("app.py"), "from pathlib import Path\ndef action():\n    return Path('.')\n").unwrap();
+    let query = |kind: &str, input: &str| -> serde_json::Value {
+        let (ok, reply, error) = fixture.invoke_env(
+            &["codegraph", kind, input],
+            &[("PATH", "/usr/bin:/bin")],
+        );
+        assert!(ok, "{kind}: {error}");
+        serde_json::from_str(&reply).unwrap()
+    };
+    assert_eq!(query("file", "lib.rs")["requested_source_sha256"], lore_core::digest(rust.as_bytes()));
+    assert_eq!(query("symbol", "action")["rows"][0]["file"], "app.py");
+    assert!(query("imports", "app.py")["rows"].as_array().is_some_and(|rows| !rows.is_empty()));
+    assert_eq!(query("calls", "lib.rs")["edges"][0]["binding"], "candidate_only");
+    assert_eq!(query("modules", "lib.rs")["module_edges"][0]["target"], "child.rs");
+    let (ok, _, _) = fixture.invoke_env(&["codegraph", "file", "../outside.rs"], &[("PATH", "/usr/bin:/bin")]);
+    assert!(!ok);
+    assert!(!fixture.root.exists());
 }
 fn tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut rows = Vec::new();
